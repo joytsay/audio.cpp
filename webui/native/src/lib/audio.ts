@@ -65,18 +65,24 @@ export async function concatenateAudioBlobs(blobs: Blob[]): Promise<Blob> {
   }
 }
 
-export async function browserDecodeToWav(file: File, targetSampleRate?: number): Promise<Blob> {
-  if (!targetSampleRate && (file.type === 'audio/wav' || file.name.toLowerCase().endsWith('.wav'))) {
+export async function browserDecodeToWav(
+  file: File,
+  targetSampleRate?: number,
+  targetChannels?: number
+): Promise<Blob> {
+  if (!targetSampleRate && !targetChannels && (file.type === 'audio/wav' || file.name.toLowerCase().endsWith('.wav'))) {
     return file;
   }
   const context = new AudioContext();
   try {
     const decoded = await context.decodeAudioData(await file.arrayBuffer());
-    if (!targetSampleRate || decoded.sampleRate === targetSampleRate) {
+    const sampleRate = targetSampleRate || decoded.sampleRate;
+    const channels = targetChannels || decoded.numberOfChannels;
+    if (decoded.sampleRate === sampleRate && decoded.numberOfChannels === channels) {
       return encodePcm16Wav(decoded);
     }
-    const frames = Math.max(1, Math.ceil(decoded.duration * targetSampleRate));
-    const offline = new OfflineAudioContext(decoded.numberOfChannels, frames, targetSampleRate);
+    const frames = Math.max(1, Math.ceil(decoded.duration * sampleRate));
+    const offline = new OfflineAudioContext(channels, frames, sampleRate);
     const source = offline.createBufferSource();
     source.buffer = decoded;
     source.connect(offline.destination);

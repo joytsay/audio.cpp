@@ -54,6 +54,14 @@ generation, conversion, separation, VAD, diarization, alignment, and voice desig
 - a saved voice library stored in browser IndexedDB;
 - multilingual UI resources under `native/lang/`;
 - structured results, generated artifacts, and request timing.
+- a llama.cpp page that uses llama-server's native model manager to download instruct-model GGUFs
+  with live progress, discovers local models, and runs chat completions with a configurable system
+  prompt (a direct browser download remains available as a fallback);
+- a native diarization → STT → LLM → TTS page that chains audio.cpp and llama.cpp.
+
+The all-in-one AGX deployment has no reverse proxy. `audiocpp_server` directly serves the
+embedded WebUI and audio API on port 8081, while llama.cpp directly serves its API on port 8082.
+The LLM and pipeline pages derive port 8082 from the WebUI hostname automatically.
 
 Uploaded request files use a per-process temporary directory and are deleted when the server exits.
 Saved voices remain in the current browser profile and are only uploaded when selected for a request.

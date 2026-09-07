@@ -35,6 +35,9 @@
   import { defaultChunkBudget, splitTtsChunks } from '$lib/text';
   import { UI_THEME_STORAGE_KEY, resolvedTheme, resolveUiTheme, uiThemes, type UiTheme } from '$lib/theme';
   import Arena from './Arena.svelte';
+  import Llama from './Llama.svelte';
+  import Pipeline from './Pipeline.svelte';
+  import logoCloud from '../../static/logo_cloud.svg?raw';
   import type {
     AudioOutput,
     CatalogEntry,
@@ -51,7 +54,7 @@
   } from '$lib/voices';
   import '../app.css';
 
-  let tab: 'studio' | 'arena' | 'models' | 'logs' = 'studio';
+  let tab: 'studio' | 'arena' | 'llama' | 'pipeline' | 'models' | 'logs' = 'studio';
   let arenaComponent: { runArena: () => Promise<void> } | null = null;
   let selectedId = catalog[0]?.id || '';
   let selected: CatalogEntry = catalog[0];
@@ -2043,7 +2046,7 @@
 
 <header class="topbar">
   <div class="brand">
-    <div class="mark">A</div>
+    <div class="brand-logo">{@html logoCloud}</div>
     <div>
       <strong>audio.cpp</strong>
       <span>{tr('app.nativeStudio')}</span>
@@ -2052,6 +2055,8 @@
   <nav aria-label={tr('nav.primary')}>
     <button class:active={tab === 'studio'} on:click={openStudioPage}>{tr('nav.studio')}</button>
     <button class:active={tab === 'arena'} on:click={() => tab = 'arena'}>{tr('nav.arena')}</button>
+    <button class:active={tab === 'llama'} on:click={() => tab = 'llama'}>LLM</button>
+    <button class:active={tab === 'pipeline'} on:click={() => tab = 'pipeline'}>Pipeline</button>
     {#if server?.ui_management !== false}
       <button class:active={tab === 'models'} on:click={openModelsPage}>{tr('nav.models')}</button>
     {/if}
@@ -2514,6 +2519,10 @@
       {log}
       {tr}
     />
+  {:else if tab === 'llama'}
+    <Llama />
+  {:else if tab === 'pipeline'}
+    <Pipeline />
   {:else if tab === 'models'}
     <section class="page-head">
       <p class="eyebrow">{tr('models.eyebrow')}</p><h1>{tr('models.title')}</h1>
@@ -2649,7 +2658,7 @@
         </div>
       {/each}
     </section>
-  {:else}
+  {:else if tab === 'logs'}
     <section class="page-head"><p class="eyebrow">{tr('runtime.eyebrow')}</p><h1>{tr('runtime.title')}</h1><p>{tr('runtime.subtitle')}</p></section>
     <section class="panel log-panel">
       <div class="runtime-cards">

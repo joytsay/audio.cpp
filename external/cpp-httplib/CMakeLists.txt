@@ -36,11 +36,21 @@ if (NOT AUDIOCPP_USE_SYSTEM_OPENSSL)
     set(OPENSSL_NO_ASM ON CACHE BOOL "Disable BoringSSL assembly generation" FORCE)
     set(FIPS OFF CACHE BOOL "Disable BoringSSL FIPS build" FORCE)
 
-    include(FetchContent)
-    FetchContent_Declare(audiocpp_boringssl
+    set(AUDIOCPP_BORINGSSL_FETCH_ARGS
         URL "${AUDIOCPP_BORINGSSL_URL}"
         URL_HASH "SHA256=${AUDIOCPP_BORINGSSL_SHA256}"
-        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    )
+    # DOWNLOAD_EXTRACT_TIMESTAMP was added in CMake 3.24. Ubuntu 22.04 and
+    # NVIDIA's JetPack 6 containers provide CMake 3.22, where passing the
+    # unknown keyword corrupts URL_HASH argument parsing.
+    if (CMAKE_VERSION VERSION_GREATER_EQUAL "3.24")
+        list(APPEND AUDIOCPP_BORINGSSL_FETCH_ARGS
+            DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+    endif()
+
+    include(FetchContent)
+    FetchContent_Declare(audiocpp_boringssl
+        ${AUDIOCPP_BORINGSSL_FETCH_ARGS}
     )
 
     set(AUDIOCPP_SAVED_BUILD_SHARED_LIBS ${BUILD_SHARED_LIBS})
