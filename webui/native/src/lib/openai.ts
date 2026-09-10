@@ -11,6 +11,18 @@ export function apiEndpoint(base: string, path: string): string {
   return `${root.replace(/\/+$/, '')}/${path.replace(/^\/+/, '')}`;
 }
 
+export function siblingWorkerEndpoint(port: number, path = 'v1'): string {
+  const url = new URL(document.baseURI);
+  // Preserve the address used to open the WebUI. This automatically supports
+  // an AGX IP address, mDNS/DNS hostname, or localhost without container-side
+  // knowledge of the host network interface.
+  url.port = String(port);
+  url.pathname = `/${path.replace(/^\/+|\/+$/g, '')}/`;
+  url.search = '';
+  url.hash = '';
+  return url.toString().replace(/\/$/, '');
+}
+
 async function responseError(response: Response): Promise<Error> {
   const fallback = `${response.status} ${response.statusText}`;
   const text = await response.text();

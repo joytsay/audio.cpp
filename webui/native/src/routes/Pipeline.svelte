@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
   import { browserDecodeToWav } from '$lib/audio';
-  import { apiEndpoint, chatText, endpointBlob, endpointJson, endpointModels, endpointRouterModels, routerEndpoint, type OpenAIModel } from '$lib/openai';
+  import { apiEndpoint, chatText, endpointBlob, endpointJson, endpointModels, endpointRouterModels, routerEndpoint, siblingWorkerEndpoint, type OpenAIModel } from '$lib/openai';
 
   type Stage = 'idle' | 'upload' | 'diarization' | 'stt' | 'llm' | 'tts' | 'done';
 
@@ -221,12 +221,7 @@
 
   onMount(() => {
     audioBaseUrl = new URL('v1/', document.baseURI).toString().replace(/\/$/, '');
-    const workerUrl = new URL(document.baseURI);
-    workerUrl.port = '8082';
-    workerUrl.pathname = '/v1/';
-    workerUrl.search = '';
-    workerUrl.hash = '';
-    llmBaseUrl = workerUrl.toString().replace(/\/$/, '');
+    llmBaseUrl = siblingWorkerEndpoint(8082);
     try {
       const saved = JSON.parse(localStorage.getItem('audiocpp.pipeline.settings') || '{}');
       diarizationModel = saved.diarizationModel || '';

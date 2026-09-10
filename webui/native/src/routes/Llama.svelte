@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
-  import { chatText, endpointJson, endpointRouterModels, routerEndpoint, type OpenAIModel } from '$lib/openai';
+  import { chatText, endpointJson, endpointRouterModels, routerEndpoint, siblingWorkerEndpoint, type OpenAIModel } from '$lib/openai';
 
   let baseUrl = '';
   let model = '';
@@ -144,12 +144,7 @@
   }
 
   onMount(() => {
-    const workerUrl = new URL(document.baseURI);
-    workerUrl.port = '8082';
-    workerUrl.pathname = '/v1/';
-    workerUrl.search = '';
-    workerUrl.hash = '';
-    baseUrl = workerUrl.toString().replace(/\/$/, '');
+    baseUrl = siblingWorkerEndpoint(8082);
     try {
       const saved = JSON.parse(localStorage.getItem('audiocpp.llama.settings') || '{}');
       model = saved.model || model;

@@ -78,7 +78,10 @@ all downloaded audio and LLM weights.
 - `:8082` is served directly by `llama-server` for model management and LLM
   inference.
 - Both ports are published by Compose. The Svelte WebUI automatically connects
-  to port 8082 on the same hostname; worker addresses are not user-configurable.
+  to port 8082 on the same hostname. For example, a WebUI loaded from
+  `http://192.168.5.151:8081` uses `http://192.168.5.151:8082/v1`. Compose binds
+  all host interfaces so this keeps working if DHCP changes the AGX address;
+  worker addresses are not user-configurable.
 
 Override `AUDIOCPP_BOOTSTRAP_PACKAGES` or `LLAMA_BOOTSTRAP_MODEL` in `compose.yml`
 to change the initial downloads. An empty value disables that bootstrap.

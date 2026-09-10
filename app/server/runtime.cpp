@@ -1681,8 +1681,13 @@ HttpResponse ServerState::handle_ui_asset() const {
     response.headers["Clear-Site-Data"] = "\"cache\"";
     response.headers["Expires"] = "0";
     response.headers["Pragma"] = "no-cache";
+    // The all-in-one Jetson UI derives the sibling llama.cpp worker address
+    // from window.location.hostname and connects to it on port 8082. Allow
+    // that direct REST connection for IP addresses and DNS hostnames while
+    // keeping every other cross-origin connection blocked.
     response.headers["Content-Security-Policy"] =
-        "default-src 'self' 'unsafe-inline' blob: data:; connect-src 'self'; media-src 'self' blob: data:";
+        "default-src 'self' 'unsafe-inline' blob: data:; "
+        "connect-src 'self' http://*:8082; media-src 'self' blob: data:";
     response.headers["X-Content-Type-Options"] = "nosniff";
     return response;
 }
