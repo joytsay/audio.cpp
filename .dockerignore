@@ -23,4 +23,6 @@ webui/native/node_modules/
 webui/native/.svelte-kit/
 webui/native/dist/
 *.md
+!knowledge/**/*.md
+!knowledge/*.md
 *.wav

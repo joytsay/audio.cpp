@@ -3,10 +3,13 @@
   import { browserDecodeToWav } from '$lib/audio';
   import { catalog } from '$lib/catalog';
   import { apiEndpoint, chatText, endpointBlob, endpointJson, endpointModels, endpointRouterModels, routerEndpoint, siblingWorkerEndpoint, type OpenAIModel } from '$lib/openai';
+  import { graphCitations, graphContext, graphSearch } from '$lib/rag';
   import type { CatalogEntry, InstallPackageChoice, StringMap } from '$lib/types';
+  import knowledgeSystemPrompt from '../../../../knowledge/system-prompt.md?raw';
   import systemPromt from '../../../../prompt.csv?raw';
 
-  type Stage = 'idle' | 'upload' | 'diarization' | 'stt' | 'llm' | 'tts' | 'done';
+  type Stage = 'idle' | 'upload' | 'diarization' | 'stt' | 'rag' | 'llm' | 'tts' | 'done';
+  type PromptMode = 'system' | 'graphrag';
 
   interface PipelineAudioModel extends OpenAIModel {
     selectionId: string;
@@ -36,6 +39,7 @@
   let voices: string[] = [];
   let language = '';
   let systemPrompt = systemPromt.trim();
+  let promptMode: PromptMode = 'system';
   let useDiarization = true;
   let temperature = 0.2;
   let maxTokens = 512;
@@ -49,6 +53,8 @@
   let status = 'Choose or record a WAV file.';
   let diarizationText = '';
   let sttText = '';
+  let ragText = '';
+  let ragSources: string[] = [];
   let transcript = '';
   let llmResponse = '';
   let diarization: any = null;
@@ -58,12 +64,15 @@
   $: diarizationModels = models.filter((entry) => entry.task === 'diar');
   $: sttModels = models.filter((entry) => ['asr', 'stt'].includes(entry.task || ''));
   $: ttsModels = models.filter((entry) => ['tts', 'clon'].includes(entry.task || ''));
+  $: pipelineSteps = promptMode === 'graphrag'
+    ? [['diarization', 'Diarization'], ['stt', 'Speech to text'], ['rag', 'GraphRAG'], ['llm', 'Language model'], ['tts', 'Text to speech']]
+    : [['diarization', 'Diarization'], ['stt', 'Speech to text'], ['llm', 'Language model'], ['tts', 'Text to speech']];
   $: canRun = Boolean(sourceFile && sttModel && llmModel && ttsModel && (!useDiarization || diarizationModel));
 
   function save() {
     localStorage.setItem('audiocpp.pipeline.settings', JSON.stringify({
       diarizationModel, sttModel, llmModel, ttsModel,
-      voice, language, useDiarization, temperature, maxTokens
+      voice, language, promptMode, useDiarization, temperature, maxTokens
     }));
   }
 
@@ -290,6 +299,8 @@
     running = true;
     diarizationText = '';
     sttText = '';
+    ragText = '';
+    ragSources = [];
     transcript = '';
     llmResponse = '';
     diarization = null;
@@ -320,9 +331,19 @@
       transcript = useDiarization ? labelTranscript(plainTranscript, diarization, stt) : plainTranscript;
       if (!transcript) throw new Error('STT returned an empty transcript.');
 
+      let llmSystemPrompt = systemPrompt.trim();
+      if (promptMode === 'graphrag') {
+        step('rag', 'Retrieving semiconductor knowledge…');
+        const ragResult = await graphSearch(audioBaseUrl, transcript, 'local', 5, aborter.signal);
+        ragText = graphContext(ragResult);
+        ragSources = graphCitations(ragResult);
+        if (!ragText) throw new Error('GraphRAG returned no relevant knowledge.');
+        llmSystemPrompt = `${knowledgeSystemPrompt.trim()}\n\nUse the retrieved knowledge below to normalize technical terms. Do not mention the retrieval process or citations in the output.\n\n${ragText}`;
+      }
+
       step('llm', 'Generating an instruct-model response…');
       const messages = [];
-      if (systemPrompt.trim()) messages.push({ role: 'system', content: systemPrompt.trim() });
+      if (llmSystemPrompt) messages.push({ role: 'system', content: llmSystemPrompt });
       messages.push({ role: 'user', content: transcript });
       const llm = await endpointJson<any>(llmBaseUrl, 'chat/completions', {
         method: 'POST',
@@ -369,6 +390,7 @@
       voice = saved.voice || '';
       language = saved.language || '';
       systemPrompt = localStorage.getItem('audiocpp.pipeline.systemPrompt') || systemPrompt;
+      promptMode = saved.promptMode === 'graphrag' ? 'graphrag' : 'system';
       useDiarization = saved.useDiarization ?? useDiarization;
       temperature = Number(saved.temperature ?? temperature);
       maxTokens = Number(saved.maxTokens ?? maxTokens);
@@ -386,13 +408,13 @@
 
 <section class="page-head pipeline-head">
   <p class="eyebrow">VOICE AGENT PIPELINE</p>
-  <h1>Diar → STT → LLM → TTS</h1>
+  <h1>Diar → STT → {promptMode === 'graphrag' ? 'GraphRAG → ' : ''}LLM → TTS</h1>
   <p>A Python-free voice round trip using audio.cpp, llama.cpp, and this Svelte interface.</p>
 </section>
 
 <section class="pipeline-steps" aria-label="Pipeline progress">
-  {#each [['diarization', 'Diarization'], ['stt', 'Speech to text'], ['llm', 'Language model'], ['tts', 'Text to speech']] as item, index}
-    <div class:active={stage === item[0]} class:complete={stage === 'done' || ['diarization', 'stt', 'llm', 'tts'].indexOf(stage) > index}>
+  {#each pipelineSteps as item, index}
+    <div class:active={stage === item[0]} class:complete={stage === 'done' || pipelineSteps.findIndex((entry) => entry[0] === stage) > index}>
       <span>{index + 1}</span><strong>{item[1]}</strong>
     </div>
   {/each}
@@ -423,8 +445,13 @@
       <span>WAV, MP3, FLAC, or browser recording</span>
       <div><button on:click={() => sourceInput?.click()}>Choose audio</button><button class:danger={recording} on:click={toggleRecording}>{recording ? 'Stop recording' : 'Record microphone'}</button></div>
     </div>
-    <label>System prompt (prompt.csv)<textarea bind:value={systemPrompt} rows="6"></textarea></label>
-    <div class="prompt-actions"><button on:click={saveSystemPromptCsv}>Save CSV</button></div>
+    <label>LLM grounding<select bind:value={promptMode} on:change={save}><option value="system">System prompt (prompt.csv)</option><option value="graphrag">GraphRAG (knowledge/)</option></select></label>
+    {#if promptMode === 'system'}
+      <label>System prompt (prompt.csv)<textarea bind:value={systemPrompt} rows="6"></textarea></label>
+      <div class="prompt-actions"><button on:click={saveSystemPromptCsv}>Save CSV</button></div>
+    {:else}
+      <p class="field-help">The STT transcript retrieves related terms and rules from the local knowledge graph before the LLM runs.</p>
+    {/if}
     <div class="field-grid compact-fields">
       <label>Temperature<input type="number" min="0" max="2" step="0.05" bind:value={temperature} /></label>
       <label>Max tokens<input type="number" min="1" max="32768" bind:value={maxTokens} /></label>
@@ -440,6 +467,10 @@
     <div class="section-title"><div><span>RESULTS</span><h2>Stage outputs</h2></div></div>
     {#if diarizationText}<article class="pipeline-message diarization"><span>DIARIZATION</span><p>{diarizationText}</p></article>{/if}
     {#if sttText}<article class="pipeline-message user"><span>STT</span><p>{sttText}</p></article>{/if}
+    {#if ragText}
+      <article class="pipeline-message diarization"><span>GRAPHRAG</span><p>{ragText}</p></article>
+      {#if ragSources.length}<div class="rag-citations"><strong>Sources</strong>{#each ragSources as citation}<code>{citation}</code>{/each}</div>{/if}
+    {/if}
     {#if llmResponse}<article class="pipeline-message assistant"><span>LLM</span><p>{llmResponse}</p></article>{/if}
     {#if outputUrl}
       <div class="pipeline-audio-result">
@@ -447,6 +478,6 @@
         <div class="pipeline-audio"><audio controls autoplay src={outputUrl}></audio><a href={outputUrl} download="voice-response.wav">Save WAV</a></div>
       </div>
     {/if}
-    {#if !diarizationText && !sttText && !llmResponse && !outputUrl}<div class="empty-output"><div class="wave">∿</div><p>Pipeline results will appear here.</p></div>{/if}
+    {#if !diarizationText && !sttText && !ragText && !llmResponse && !outputUrl}<div class="empty-output"><div class="wave">∿</div><p>Pipeline results will appear here.</p></div>{/if}
   </section>
 </div>

@@ -1,8 +1,9 @@
 # Jetson AGX: one-container WebUI
 
 This Compose project builds one container containing the embedded Svelte WebUI,
-the native audio.cpp worker (diarization, STT, and TTS), and llama.cpp. There is
-no nginx or other reverse proxy.
+the native audio.cpp worker (diarization, STT, and TTS), llama.cpp, and a
+rag-cpp GraphRAG worker over the repository's `knowledge/` corpus. There is no
+nginx or other reverse proxy.
 
 The commands below assume Jetson AGX Orin (CUDA architecture 8.7), Docker, Compose
 v2, and the NVIDIA Container Runtime are already installed.
@@ -42,7 +43,9 @@ docker compose logs -f voice-ai
 The first build downloads the L4T CUDA runtime and recompiles both native
 engines. It also installs the WebUI's Node dependencies and builds the Svelte
 application inside Docker, so host-side `npm ci` and `npm run build` commands
-are not required. Existing `audio-models` and `llama-models` volumes are reused.
+are not required. Existing `audio-models`, `llama-models`, and `rag-data`
+volumes are reused. The knowledge index is rebuilt automatically when the
+bundled markdown corpus changes.
 
 `BUILD_JOBS=2` intentionally limits compiler memory use on Jetson. Increase it
 only when the board has enough free unified memory and swap. This deployment
@@ -79,6 +82,8 @@ all downloaded audio and LLM weights.
   Svelte WebUI and the audio.cpp REST API used for diarization, STT, and TTS.
 - `:8082` is served directly by `llama-server` for model management and LLM
   inference.
+- rag-cpp listens only inside the container on `127.0.0.1:8083`; the native
+  server exposes its GraphRAG method to the WebUI at `/v1/rag/graph`.
 - Both ports are published by Compose. The Svelte WebUI automatically connects
   to port 8082 on the same hostname. For example, a WebUI loaded from
   `http://192.168.5.151:8081` uses `http://192.168.5.151:8082/v1`. Compose binds

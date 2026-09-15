@@ -362,6 +362,11 @@ pre { background: var(--code-bg); border: 1px solid var(--line); border-radius: 
 .pipeline-audio-result > span { color: var(--cyan); font-size: 9px; font-weight: 800; letter-spacing: .13em; }
 .pipeline-audio { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: center; margin-top: 7px; }
 .pipeline-audio a { color: var(--cyan); font-size: 11px; text-decoration: none; }
+.rag-grid { display: grid; grid-template-columns: minmax(320px, .8fr) minmax(420px, 1.2fr); gap: 12px; align-items: start; }
+.rag-results { min-width: 0; }
+.rag-citations { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+.rag-citations strong { width: 100%; color: var(--muted); font-size: 9px; letter-spacing: .1em; text-transform: uppercase; }
+.rag-citations code { padding: 5px 7px; border: 1px solid var(--line); border-radius: 6px; background: var(--code-bg); color: var(--text-subtle); font-size: 9px; }
 footer { display: flex; justify-content: space-between; max-width: 1600px; margin: auto; padding: 14px 20px 20px; border-top: 1px solid var(--line); color: var(--footer-text); font-size: 10px; }
 
 @media (max-width: 1200px) {
@@ -378,7 +383,7 @@ footer { display: flex; justify-content: space-between; max-width: 1600px; margi
   .topbar { padding: 0 14px; gap: 8px; }.brand { min-width: auto; }.brand span { display: none; }
   .topbar > nav { margin-left: auto; overflow-x: auto; } .topbar > nav button { padding: 0 10px; white-space: nowrap; }.language-picker { margin-left: 0; }.language-picker span, .theme-picker span, .server-pill { display: none; }
   main { padding: 22px 12px 40px; }.workflow-tabs { margin-bottom: 22px; }.hero { align-items: start; flex-direction: column; }.hero-stat { width: 100%; }
-  .studio-grid, .arena-grid, .llama-grid, .pipeline-grid { grid-template-columns: 1fr; }.arena-results, .llama-chat, .pipeline-results, .output { grid-column: auto; }.field-grid, .parameter-grid { grid-template-columns: 1fr; }
+  .studio-grid, .arena-grid, .llama-grid, .pipeline-grid, .rag-grid { grid-template-columns: 1fr; }.arena-results, .llama-chat, .pipeline-results, .output { grid-column: auto; }.field-grid, .parameter-grid { grid-template-columns: 1fr; }
   .arena-mode-switch { width: 100%; }
   .arena-add-row { grid-template-columns: 1fr; }
   .voice-library { grid-template-columns: 1fr 1fr; }.library-actions { grid-column: 1/-1; }

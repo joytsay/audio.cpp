@@ -11,6 +11,7 @@ ARG APP_VERSION=N/A
 ARG APP_REVISION=N/A
 ARG GCC_VERSION=14
 ARG LLAMA_CPP_REF=5202104b59ada9005db079eea43882a2b7bf5802
+ARG RAGCPP_REF=748bbd4895e0939857ffcc10276da1c91f20b439
 
 ARG BASE_CUDA_DEV_CONTAINER=docker.io/nvidia/cuda:${CUDA_VERSION}-devel-ubuntu${UBUNTU_VERSION}
 ARG BASE_CUDA_RUN_CONTAINER=docker.io/nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu${UBUNTU_VERSION}
@@ -26,12 +27,49 @@ RUN npm --prefix webui/native ci
 COPY webui/native/ ./webui/native/
 COPY webui/configs/ ./webui/configs/
 COPY model_specs/ ./model_specs/
+COPY knowledge/ ./knowledge/
 COPY prompt.csv ./prompt.csv
 RUN npm --prefix webui/native run build
+
+# ── RAG.CPP: Static GraphRAG worker ──────────────────────────────────────────
+FROM alpine:3.22 AS rag-build
+
+RUN apk add --no-cache build-base cmake git ca-certificates
+
+ARG RAGCPP_REF
+ARG BUILD_JOBS=0
+WORKDIR /src
+RUN mkdir rag-cpp && \
+    cd rag-cpp && \
+    git init && \
+    git remote add origin https://github.com/1ay1/rag-cpp.git && \
+    git fetch --depth=1 origin "${RAGCPP_REF}" && \
+    git checkout --detach FETCH_HEAD
+
+COPY .devops/rag-cpp-cjk-tokenizer.patch /tmp/rag-cpp-cjk-tokenizer.patch
+WORKDIR /src/rag-cpp
+RUN git apply /tmp/rag-cpp-cjk-tokenizer.patch
+RUN --mount=type=cache,target=/src/rag-cpp/build,sharing=locked \
+    cmake -S . -B build \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_EXE_LINKER_FLAGS=-static && \
+    if [ "${BUILD_JOBS}" = "0" ]; then BUILD_JOBS="$(nproc)"; fi && \
+    cmake --build build --parallel "${BUILD_JOBS}" --target ragcpp_cli && \
+    cp build/cli/ragcpp /src/ragcpp
 
 FROM ${BASE_CUDA_DEV_CONTAINER} AS build
 
 ARG GCC_VERSION=14
+
+# Install build toolchain
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+        gcc-${GCC_VERSION} g++-${GCC_VERSION} cmake ca-certificates
+
+ENV CC=gcc-${GCC_VERSION} CXX=g++-${GCC_VERSION} CUDAHOSTCXX=g++-${GCC_VERSION}
+
 ARG AUDIOCPP_VERSION=dev
 ARG AUDIOCPP_MODEL_SET=full
 ARG AUDIOCPP_MODELS=
@@ -41,15 +79,6 @@ ARG BUILD_JOBS=0
 # - default = the portable default list from CMakeLists.txt
 # - for a custom arch set build with --build-arg CUDA_DOCKER_ARCH="89-real;...".
 ARG CUDA_DOCKER_ARCH=default
-
-# Install build toolchain
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-        gcc-${GCC_VERSION} g++-${GCC_VERSION} cmake ca-certificates && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
-
-ENV CC=gcc-${GCC_VERSION} CXX=g++-${GCC_VERSION} CUDAHOSTCXX=g++-${GCC_VERSION}
 
 WORKDIR /app
 COPY . .
@@ -95,18 +124,19 @@ RUN --mount=type=cache,target=/app/build,sharing=locked \
 FROM ${BASE_CUDA_DEV_CONTAINER} AS llama-build
 
 ARG GCC_VERSION=14
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+        gcc-${GCC_VERSION} g++-${GCC_VERSION} build-essential cmake git \
+        ca-certificates libcurl4-openssl-dev libssl-dev
+
+ENV CC=gcc-${GCC_VERSION} CXX=g++-${GCC_VERSION} CUDAHOSTCXX=g++-${GCC_VERSION}
+
 ARG CUDA_DOCKER_ARCH=default
 ARG BUILD_JOBS=0
 ARG LLAMA_CPP_REF
-
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-        gcc-${GCC_VERSION} g++-${GCC_VERSION} build-essential cmake git \
-        ca-certificates libcurl4-openssl-dev libssl-dev && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
-
-ENV CC=gcc-${GCC_VERSION} CXX=g++-${GCC_VERSION} CUDAHOSTCXX=g++-${GCC_VERSION}
 
 WORKDIR /src
 RUN mkdir llama.cpp && \
@@ -198,12 +228,14 @@ USER root
 
 # Keep llama.cpp's ggml libraries separate from audio.cpp's ggml libraries.
 COPY --from=llama-build /out/ /opt/llama.cpp/
+COPY --from=rag-build /src/ragcpp /app/ragcpp
 COPY .devops/all-in-one-entrypoint.sh /app/all-in-one-entrypoint.sh
 COPY .devops/all-in-one-server.json /app/all-in-one-server.json
+COPY knowledge/ /app/knowledge/
 
 RUN chmod +x /app/all-in-one-entrypoint.sh && \
-    mkdir -p /app/models /app/llama-models && \
-    chown -R ubuntu:ubuntu /app/models /app/llama-models
+    mkdir -p /app/models /app/llama-models /app/rag-data && \
+    chown -R ubuntu:ubuntu /app/models /app/llama-models /app/rag-data
 
 USER ubuntu
 

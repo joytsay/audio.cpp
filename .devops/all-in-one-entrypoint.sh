@@ -3,11 +3,12 @@ set -Eeuo pipefail
 
 audio_pid=""
 llama_pid=""
+rag_pid=""
 bootstrap_pid=""
 
 shutdown() {
     trap - EXIT INT TERM
-    for pid in "$bootstrap_pid" "$llama_pid" "$audio_pid"; do
+    for pid in "$bootstrap_pid" "$rag_pid" "$llama_pid" "$audio_pid"; do
         if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
             kill -TERM "$pid" 2>/dev/null || true
         fi
@@ -16,7 +17,23 @@ shutdown() {
 }
 trap shutdown EXIT INT TERM
 
-mkdir -p /app/models /app/llama-models
+mkdir -p /app/models /app/llama-models /app/rag-data
+
+knowledge_db=/app/rag-data/knowledge.ragdb
+knowledge_fingerprint_file=/app/rag-data/knowledge.sha256
+knowledge_fingerprint="$({ printf '%s\n' 'cjk-unigram-bigram-v1'; find /app/knowledge -type f -name '*.md' -print0 | sort -z | xargs -0 sha256sum; } | sha256sum | awk '{print $1}')"
+saved_fingerprint="$(cat "$knowledge_fingerprint_file" 2>/dev/null || true)"
+if [[ ! -s "$knowledge_db" || "$knowledge_fingerprint" != "$saved_fingerprint" ]]; then
+    echo "[all-in-one] indexing /app/knowledge with rag-cpp"
+    knowledge_db_tmp=/app/rag-data/knowledge.ragdb.tmp
+    rm -f "$knowledge_db_tmp"
+    /app/ragcpp index /app/knowledge "$knowledge_db_tmp" --ext=.md --semantic
+    mv "$knowledge_db_tmp" "$knowledge_db"
+    printf '%s\n' "$knowledge_fingerprint" > "$knowledge_fingerprint_file"
+fi
+
+/app/ragcpp serve "$knowledge_db" --http 8083 --graph &
+rag_pid=$!
 
 /app/audiocpp_server \
     --config /app/all-in-one-server.json \
@@ -85,9 +102,10 @@ bootstrap_pid=$!
 echo "[all-in-one] WebUI: http://0.0.0.0:8081"
 echo "[all-in-one] audio.cpp REST worker: http://0.0.0.0:8081/v1"
 echo "[all-in-one] llama.cpp REST worker: http://0.0.0.0:8082/v1"
+echo "[all-in-one] rag-cpp GraphRAG worker: http://127.0.0.1:8083/rcp"
 
 set +e
-wait -n "$audio_pid" "$llama_pid"
+wait -n "$audio_pid" "$llama_pid" "$rag_pid"
 status=$?
 set -e
 echo "[all-in-one] a required worker exited with status $status" >&2

@@ -1,0 +1,91 @@
+diff --git a/src/text/tokenizer.cpp b/src/text/tokenizer.cpp
+index 28f3459..821db35 100644
+--- a/src/text/tokenizer.cpp
++++ b/src/text/tokenizer.cpp
+@@ -4,6 +4,8 @@
+ 
+ #include <algorithm>
+ #include <array>
++#include <cstdint>
+ #include <cctype>
+ #include <unordered_map>
++#include <utility>
+ #include <unordered_set>
+@@ -246,6 +248,38 @@ const std::string& stem_cached(const std::string& word) {
+     return cache.emplace(word, porter_stem(word)).first->second;
+ }
+ 
++// Decode just enough UTF-8 to recognize CJK scripts. The stock tokenizer is
++// byte-oriented and std::isalnum() therefore drops every Han character in the
++// C locale, leaving Chinese queries with no lexical signal.
++std::pair<std::uint32_t, std::size_t> utf8_codepoint(std::string_view text, std::size_t offset) {
++    const auto lead = static_cast<unsigned char>(text[offset]);
++    std::size_t width = lead < 0x80 ? 1 : lead < 0xE0 ? 2 : lead < 0xF0 ? 3 : lead < 0xF8 ? 4 : 1;
++    if (offset + width > text.size()) return {lead, 1};
++
++    std::uint32_t codepoint = lead & (width == 1 ? 0x7F : width == 2 ? 0x1F : width == 3 ? 0x0F : 0x07);
++    for (std::size_t i = 1; i < width; ++i) {
++        const auto byte = static_cast<unsigned char>(text[offset + i]);
++        if ((byte & 0xC0) != 0x80) return {lead, 1};
++        codepoint = (codepoint << 6) | (byte & 0x3F);
++    }
++    return {codepoint, width};
++}
++
++bool is_cjk(std::uint32_t cp) {
++    return (cp >= 0x3400 && cp <= 0x4DBF) ||  // CJK Extension A
++           (cp >= 0x4E00 && cp <= 0x9FFF) ||  // CJK Unified Ideographs
++           (cp >= 0xF900 && cp <= 0xFAFF) ||  // CJK Compatibility Ideographs
++           (cp >= 0x20000 && cp <= 0x2FA1F) ||
++           (cp >= 0x3040 && cp <= 0x30FF) ||  // Hiragana and Katakana
++           (cp >= 0xAC00 && cp <= 0xD7AF);    // Hangul syllables
++}
++
++void append_cjk_token(std::vector<std::string>& out, const std::string& token,
++                      const TokenizeOptions& opts) {
++    if (token.size() >= opts.min_len && token.size() <= opts.max_len)
++        out.push_back(token);
++}
++
+ } // namespace
+ 
+ std::vector<std::string> Tokenizer::tokenize(std::string_view text) const {
+@@ -268,17 +302,35 @@ std::vector<std::string> Tokenizer::tokenize(std::string_view text) const {
+         cur.clear();
+     };
+ 
+-    for (char ch : text) {
+-        unsigned char c = static_cast<unsigned char>(ch);
++    std::string previous_cjk;
++    for (std::size_t offset = 0; offset < text.size();) {
++        const auto [codepoint, width] = utf8_codepoint(text, offset);
++        const auto c = static_cast<unsigned char>(text[offset]);
++        if (is_cjk(codepoint)) {
++            flush();
++            std::string token{text.substr(offset, width)};
++            append_cjk_token(out, token, opts_);
++            if (!previous_cjk.empty()) {
++                previous_cjk += token;
++                append_cjk_token(out, previous_cjk, opts_);
++            }
++            previous_cjk = std::move(token);
++            offset += width;
++            continue;
++        }
++
+         bool alnum = std::isalnum(c);
+         bool intra = (c == '\'');   // keep apostrophes inside words
+         if (alnum) {
+-            cur.push_back(opts_.lowercase ? static_cast<char>(std::tolower(c)) : ch);
++            previous_cjk.clear();
++            cur.push_back(opts_.lowercase ? static_cast<char>(std::tolower(c)) : text[offset]);
+         } else if (intra && !cur.empty()) {
+             // skip apostrophe; "don't" -> "dont" then stopword/stem handles it
+         } else {
+             flush();
++            previous_cjk.clear();
+         }
++        offset += width;
+     }
+     flush();
+     return out;

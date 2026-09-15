@@ -1,5 +1,7 @@
 #include "runtime.h"
 
+#include "httplib.h"
+
 #include "base64.h"
 #include "model_memory.h"
 #include "multipart.h"
@@ -1135,6 +1137,12 @@ HttpResponse ServerState::handle(const HttpRequest & request) {
     else if (request.method == "POST" && request.path == "/v1/ui/upload") {
         response = handle_ui_upload(request);
     }
+    else if (request.method == "POST" && request.path == "/v1/rag/initialize") {
+        response = handle_rag_request(request.body, "initialize");
+    }
+    else if (request.method == "POST" && request.path == "/v1/rag/graph") {
+        response = handle_rag_request(request.body, "graph");
+    }
 #if defined(AUDIOCPP_HAS_NATIVE_MODEL_MANAGER)
     else if (request.method == "GET" && request.path == "/v1/ui/models-root") {
         response = handle_models_root_get();
@@ -1662,6 +1670,35 @@ HttpResponse ServerState::handle_directory_browser(const std::string & body_text
     return json_response(response + "]}");
 }
 #endif
+
+HttpResponse ServerState::handle_rag_request(
+    const std::string & body_text,
+    const std::string & method) const {
+    if (!config_.ui_enabled) {
+        return error_response(404, "WebUI is disabled", "not_found");
+    }
+    if (body_text.empty()) {
+        return error_response(400, "GraphRAG request body is empty", "invalid_request_error");
+    }
+
+    httplib::Client client("http://127.0.0.1:8083");
+    client.set_connection_timeout(2, 0);
+    client.set_read_timeout(60, 0);
+    const auto result = client.Post("/rcp/" + method, body_text, "application/json");
+    if (!result) {
+        return error_response(
+            502,
+            "GraphRAG worker is unavailable: " + httplib::to_string(result.error()),
+            "backend_unavailable");
+    }
+
+    HttpResponse response;
+    response.status = result->status;
+    response.content_type = result->get_header_value("Content-Type");
+    if (response.content_type.empty()) response.content_type = "application/json";
+    response.body = result->body;
+    return response;
+}
 
 HttpResponse ServerState::handle_ui_asset() const {
     if (!config_.ui_enabled) {

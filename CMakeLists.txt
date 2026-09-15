@@ -2032,7 +2032,7 @@ add_executable(audiocpp_server
     app/streaming/streaming.cpp
 )
 
-target_link_libraries(audiocpp_server PRIVATE engine_runtime ggml)
+target_link_libraries(audiocpp_server PRIVATE engine_runtime ggml audiocpp_cpp_httplib)
 if (AUDIOCPP_BUILD_NATIVE_MODEL_MANAGER)
     target_sources(audiocpp_server PRIVATE app/server/model_installer.cpp)
     target_link_libraries(audiocpp_server PRIVATE audiocpp_package_manager)

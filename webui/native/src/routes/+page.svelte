@@ -37,6 +37,7 @@
   import Arena from './Arena.svelte';
   import Llama from './Llama.svelte';
   import Pipeline from './Pipeline.svelte';
+  import Rag from './Rag.svelte';
   import logoCloud from '../../static/logo_cloud.svg?raw';
   import type {
     AudioOutput,
@@ -54,7 +55,7 @@
   } from '$lib/voices';
   import '../app.css';
 
-  let tab: 'studio' | 'arena' | 'llama' | 'pipeline' | 'models' | 'logs' = 'studio';
+  let tab: 'studio' | 'arena' | 'llama' | 'rag' | 'pipeline' | 'models' | 'logs' = 'studio';
   let arenaComponent: { runArena: () => Promise<void> } | null = null;
   let selectedId = catalog[0]?.id || '';
   let selected: CatalogEntry = catalog[0];
@@ -2056,6 +2057,7 @@
     <button class:active={tab === 'studio'} on:click={openStudioPage}>{tr('nav.studio')}</button>
     <button class:active={tab === 'arena'} on:click={() => tab = 'arena'}>{tr('nav.arena')}</button>
     <button class:active={tab === 'llama'} on:click={() => tab = 'llama'}>LLM</button>
+    <button class:active={tab === 'rag'} on:click={() => tab = 'rag'}>RAG</button>
     <button class:active={tab === 'pipeline'} on:click={() => tab = 'pipeline'}>Pipeline</button>
     {#if server?.ui_management !== false}
       <button class:active={tab === 'models'} on:click={openModelsPage}>{tr('nav.models')}</button>
@@ -2521,6 +2523,8 @@
     />
   {:else if tab === 'llama'}
     <Llama />
+  {:else if tab === 'rag'}
+    <Rag />
   {:else if tab === 'pipeline'}
     <Pipeline />
   {:else if tab === 'models'}
