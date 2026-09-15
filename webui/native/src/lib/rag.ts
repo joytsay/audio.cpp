@@ -79,10 +79,23 @@ export async function graphSearch(
 
 export function graphContext(result: GraphResult): string {
   const sections: string[] = [];
+  const hits = result.hits || [];
+  const maxScore = hits.reduce((maximum, hit) =>
+    typeof hit.score === 'number' && Number.isFinite(hit.score)
+      ? Math.max(maximum, hit.score)
+      : maximum, 0);
   if (result.summary?.trim()) sections.push(result.summary.trim());
-  for (const [index, hit] of (result.hits || []).entries()) {
+  for (const [index, hit] of hits.entries()) {
     const source = hit.citation?.source || hit.uri || String(hit.id ?? `result-${index + 1}`);
-    sections.push(`[${index + 1}] ${source}\n${hit.text}`);
+    const displaySource = source.split(/[\\/]/).filter(Boolean).pop() || source;
+    const score = typeof hit.score === 'number' && Number.isFinite(hit.score) ? hit.score : null;
+    const relative = score !== null && maxScore > 0
+      ? Math.max(0, Math.min(100, Math.round((score / maxScore) * 100)))
+      : null;
+    const scoreLine = score === null
+      ? ''
+      : `\nRelevance: ${score.toFixed(3)}${relative === null ? '' : ` · Relative match: ${relative}%`}`;
+    sections.push(`[${index + 1}] ${displaySource}${scoreLine}\n${hit.text}`);
   }
   for (const community of result.communities || []) {
     const text = community.summary || community.title;
