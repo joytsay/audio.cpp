@@ -40,7 +40,9 @@ docker compose logs -f voice-ai
 ```
 
 The first build downloads the L4T CUDA runtime and recompiles both native
-engines. Existing `audio-models` and `llama-models` volumes are reused.
+engines. It also installs the WebUI's Node dependencies and builds the Svelte
+application inside Docker, so host-side `npm ci` and `npm run build` commands
+are not required. Existing `audio-models` and `llama-models` volumes are reused.
 
 `BUILD_JOBS=2` intentionally limits compiler memory use on Jetson. Increase it
 only when the board has enough free unified memory and swap. This deployment

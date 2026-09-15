@@ -1,13 +1,32 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
   import { browserDecodeToWav } from '$lib/audio';
+  import { catalog } from '$lib/catalog';
   import { apiEndpoint, chatText, endpointBlob, endpointJson, endpointModels, endpointRouterModels, routerEndpoint, siblingWorkerEndpoint, type OpenAIModel } from '$lib/openai';
+  import type { CatalogEntry, InstallPackageChoice, StringMap } from '$lib/types';
+  import systemPromt from '../../../../prompt.csv?raw';
 
   type Stage = 'idle' | 'upload' | 'diarization' | 'stt' | 'llm' | 'tts' | 'done';
 
+  interface PipelineAudioModel extends OpenAIModel {
+    selectionId: string;
+    modelId: string;
+    label: string;
+    path?: string;
+    mode?: string;
+    loadOptions?: StringMap;
+    sessionOptions?: StringMap;
+    builtinVoices?: string[];
+  }
+
+  interface PackageInventory {
+    state: 'idle' | 'running' | 'complete' | 'failed';
+    data: Array<{ id: string; installed: boolean }>;
+  }
+
   let audioBaseUrl = '';
   let llmBaseUrl = '';
-  let models: OpenAIModel[] = [];
+  let models: PipelineAudioModel[] = [];
   let llmModels: OpenAIModel[] = [];
   let diarizationModel = '';
   let sttModel = '';
@@ -16,7 +35,7 @@
   let voice = '';
   let voices: string[] = [];
   let language = '';
-  let systemPrompt = 'You are a helpful voice assistant. Answer naturally and concisely because your response will be spoken aloud.';
+  let systemPrompt = systemPromt.trim();
   let useDiarization = true;
   let temperature = 0.2;
   let maxTokens = 512;
@@ -28,6 +47,8 @@
   let running = false;
   let stage: Stage = 'idle';
   let status = 'Choose or record a WAV file.';
+  let diarizationText = '';
+  let sttText = '';
   let transcript = '';
   let llmResponse = '';
   let diarization: any = null;
@@ -42,18 +63,116 @@
   function save() {
     localStorage.setItem('audiocpp.pipeline.settings', JSON.stringify({
       diarizationModel, sttModel, llmModel, ttsModel,
-      voice, language, systemPrompt, useDiarization, temperature, maxTokens
+      voice, language, useDiarization, temperature, maxTokens
     }));
   }
 
+  function saveSystemPromptCsv() {
+    localStorage.setItem('audiocpp.pipeline.systemPrompt', systemPrompt);
+    const url = URL.createObjectURL(new Blob([systemPrompt], { type: 'text/csv;charset=utf-8' }));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'prompt.csv';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    status = 'System prompt saved and prompt.csv downloaded.';
+  }
+
+  function resolvedModelPath(path: string, modelsRoot: string): string {
+    const normalized = path.replace(/\\/g, '/');
+    if (!modelsRoot || !normalized.startsWith('models/')) return path;
+    return `${modelsRoot.replace(/[\\/]+$/, '')}/${normalized.slice('models/'.length)}`;
+  }
+
+  function installedAudioModels(
+    inventory: PackageInventory,
+    modelsRoot: string
+  ): PipelineAudioModel[] {
+    const installed = new Set(inventory.data.filter((item) => item.installed).map((item) => item.id));
+    return catalog.flatMap((entry: CatalogEntry) => {
+      if (!['diar', 'asr', 'stt', 'tts', 'clon'].includes(entry.task)) return [];
+      const choices = (entry.install_packages || []).filter((choice) => installed.has(choice.id));
+      return choices.map((choice: InstallPackageChoice) => ({
+        selectionId: `package:${entry.id}:${choice.id}`,
+        modelId: entry.id,
+        id: entry.id,
+        label: `${entry.display_name} · ${choice.label}`,
+        family: entry.family,
+        task: entry.task,
+        mode: entry.mode || 'offline',
+        path: resolvedModelPath(choice.path, modelsRoot),
+        loadOptions: entry.load_options,
+        sessionOptions: { ...(entry.session_options || {}), ...(choice.session_options || {}) },
+        builtinVoices: entry.builtin_voices
+      }));
+    });
+  }
+
+  function configuredAudioModel(entry: OpenAIModel & { path?: string; mode?: string }): PipelineAudioModel {
+    return {
+      ...entry,
+      selectionId: `configured:${entry.id}`,
+      modelId: entry.id,
+      label: entry.id,
+      path: entry.path,
+      mode: entry.mode || 'offline'
+    };
+  }
+
+  function keepSelection(options: PipelineAudioModel[], current: string): string {
+    return options.find((entry) => entry.selectionId === current)?.selectionId ||
+      options.find((entry) => entry.modelId === current)?.selectionId ||
+      options[0]?.selectionId || '';
+  }
+
+  function selectedAudioModel(selectionId: string): PipelineAudioModel | undefined {
+    return models.find((entry) => entry.selectionId === selectionId);
+  }
+
+  async function ensureAudioModel(selectionId: string, signal: AbortSignal): Promise<PipelineAudioModel> {
+    const selected = selectedAudioModel(selectionId);
+    if (!selected) throw new Error('The selected audio model is no longer available. Refresh the model list.');
+    if (selected.selectionId.startsWith('package:') && selected.path && selected.family && selected.task) {
+      await endpointJson(audioBaseUrl, 'models/load', {
+        method: 'POST',
+        body: JSON.stringify({
+          id: selected.modelId,
+          path: selected.path,
+          family: selected.family,
+          task: selected.task,
+          mode: selected.mode || 'offline',
+          load_options: selected.loadOptions || {},
+          session_options: selected.sessionOptions || {}
+        })
+      }, signal);
+    }
+    return selected;
+  }
+
   async function refreshAudioModels() {
-    models = await endpointModels(audioBaseUrl);
+    const configured = (await endpointModels(audioBaseUrl)) as Array<OpenAIModel & { path?: string; mode?: string }>;
+    let installed: PipelineAudioModel[] = [];
+    try {
+      const [inventory, root] = await Promise.all([
+        endpointJson<PackageInventory>(audioBaseUrl, 'ui/models/package-sizes'),
+        endpointJson<{ models_root: string }>(audioBaseUrl, 'ui/models-root')
+      ]);
+      installed = installedAudioModels(inventory, root.models_root);
+    } catch { /* configured-only servers do not expose package management */ }
+    const installedPaths = new Set(installed.map((entry) => `${entry.modelId}\n${entry.path || ''}`));
+    models = [
+      ...installed,
+      ...configured.map(configuredAudioModel).filter((entry) =>
+        !installedPaths.has(`${entry.modelId}\n${entry.path || ''}`))
+    ];
     const nextDiarization = models.filter((entry) => entry.task === 'diar');
     const nextStt = models.filter((entry) => ['asr', 'stt'].includes(entry.task || ''));
     const nextTts = models.filter((entry) => ['tts', 'clon'].includes(entry.task || ''));
-    if (!nextDiarization.some((entry) => entry.id === diarizationModel)) diarizationModel = nextDiarization[0]?.id || '';
-    if (!nextStt.some((entry) => entry.id === sttModel)) sttModel = nextStt[0]?.id || '';
-    if (!nextTts.some((entry) => entry.id === ttsModel)) ttsModel = nextTts[0]?.id || '';
+    diarizationModel = keepSelection(nextDiarization, diarizationModel);
+    sttModel = keepSelection(nextStt, sttModel);
+    ttsModel = keepSelection(nextTts, ttsModel);
     await refreshVoices();
     save();
   }
@@ -75,11 +194,12 @@
 
   async function refreshVoices() {
     if (!ttsModel) { voices = []; return; }
+    const selected = selectedAudioModel(ttsModel);
     try {
-      const result = await endpointJson<{ voices?: string[] }>(audioBaseUrl, `audio/voices?model=${encodeURIComponent(ttsModel)}`);
-      voices = result.voices || [];
+      const result = await endpointJson<{ voices?: string[] }>(audioBaseUrl, `audio/voices?model=${encodeURIComponent(selected?.modelId || ttsModel)}`);
+      voices = result.voices || selected?.builtinVoices || [];
       if (!voices.includes(voice)) voice = voices[0] || '';
-    } catch { voices = []; }
+    } catch { voices = selected?.builtinVoices || []; }
   }
 
   function chooseFile(file: File | null) {
@@ -152,11 +272,24 @@
     return labelled || text;
   }
 
+  function formatDiarization(result: any): string {
+    const turns = Array.isArray(result?.speaker_turns) ? result.speaker_turns : [];
+    if (!turns.length) return JSON.stringify(result, null, 2) || 'No speaker turns detected.';
+    const sampleRate = Number(result.sample_rate) || 16000;
+    return turns.map((turn: any) => {
+      const start = Number(turn.start_sample || 0) / sampleRate;
+      const end = Number(turn.end_sample || 0) / sampleRate;
+      return `Speaker ${turn.speaker_id ?? 'unknown'}: ${start.toFixed(1)}–${end.toFixed(1)}s`;
+    }).join('\n');
+  }
+
   async function runPipeline() {
     if (!sourceFile || !canRun) return;
     aborter?.abort();
     aborter = new AbortController();
     running = true;
+    diarizationText = '';
+    sttText = '';
     transcript = '';
     llmResponse = '';
     diarization = null;
@@ -168,18 +301,22 @@
 
       if (useDiarization) {
         step('diarization', 'Separating speaker turns…');
+        const diarModel = await ensureAudioModel(diarizationModel, aborter.signal);
         diarization = await endpointJson<any>(audioBaseUrl, 'tasks/run', {
           method: 'POST',
-          body: JSON.stringify({ model: diarizationModel, audio: audioPath })
+          body: JSON.stringify({ model: diarModel.modelId, audio: audioPath })
         }, aborter.signal);
+        diarizationText = formatDiarization(diarization);
       }
 
       step('stt', 'Transcribing speech…');
+      const speechModel = await ensureAudioModel(sttModel, aborter.signal);
       const stt = await endpointJson<any>(audioBaseUrl, 'audio/transcriptions/details', {
         method: 'POST',
-        body: JSON.stringify({ model: sttModel, audio: audioPath, language })
+        body: JSON.stringify({ model: speechModel.modelId, audio: audioPath, language })
       }, aborter.signal);
       const plainTranscript = typeof stt.text === 'string' ? stt.text.trim() : '';
+      sttText = plainTranscript;
       transcript = useDiarization ? labelTranscript(plainTranscript, diarization, stt) : plainTranscript;
       if (!transcript) throw new Error('STT returned an empty transcript.');
 
@@ -205,7 +342,8 @@
       } catch { /* TTS can still proceed if this llama.cpp version cannot unload */ }
 
       step('tts', 'Synthesizing the response…');
-      const speechBody: Record<string, unknown> = { model: ttsModel, input: llmResponse, response_format: 'wav' };
+      const voiceModel = await ensureAudioModel(ttsModel, aborter.signal);
+      const speechBody: Record<string, unknown> = { model: voiceModel.modelId, input: llmResponse, response_format: 'wav' };
       if (voice) speechBody.voice = voice;
       const output = await endpointBlob(audioBaseUrl, 'audio/speech', speechBody, aborter.signal);
       outputUrl = URL.createObjectURL(output);
@@ -230,7 +368,7 @@
       ttsModel = saved.ttsModel || '';
       voice = saved.voice || '';
       language = saved.language || '';
-      systemPrompt = saved.systemPrompt || systemPrompt;
+      systemPrompt = localStorage.getItem('audiocpp.pipeline.systemPrompt') || systemPrompt;
       useDiarization = saved.useDiarization ?? useDiarization;
       temperature = Number(saved.temperature ?? temperature);
       maxTokens = Number(saved.maxTokens ?? maxTokens);
@@ -248,7 +386,7 @@
 
 <section class="page-head pipeline-head">
   <p class="eyebrow">VOICE AGENT PIPELINE</p>
-  <h1>Diarization → STT → LLM → TTS</h1>
+  <h1>Diar → STT → LLM → TTS</h1>
   <p>A Python-free voice round trip using audio.cpp, llama.cpp, and this Svelte interface.</p>
 </section>
 
@@ -266,11 +404,11 @@
     <p class="field-help">The WebUI securely uses the audio and language-model workers inside this container.</p>
     <label class="toggle pipeline-toggle"><input type="checkbox" bind:checked={useDiarization} on:change={save} /><span></span>Run speaker diarization</label>
     {#if useDiarization}
-      <label>Diarization model<select bind:value={diarizationModel} on:change={save}>{#each diarizationModels as entry}<option value={entry.id}>{entry.id}</option>{/each}</select></label>
+      <label>Diarization model<select bind:value={diarizationModel} on:change={save}>{#each diarizationModels as entry}<option value={entry.selectionId}>{entry.label}</option>{/each}</select></label>
     {/if}
-    <label>STT model<select bind:value={sttModel} on:change={save}>{#each sttModels as entry}<option value={entry.id}>{entry.id}</option>{/each}</select></label>
+    <label>STT model<select bind:value={sttModel} on:change={save}>{#each sttModels as entry}<option value={entry.selectionId}>{entry.label}</option>{/each}</select></label>
     <label>LLM instruct model<select bind:value={llmModel} on:change={save}>{#if !llmModels.length && llmModel}<option value={llmModel}>{llmModel}</option>{/if}{#each llmModels as entry}<option value={entry.id}>{entry.id}</option>{/each}</select></label>
-    <label>TTS model<select bind:value={ttsModel} on:change={() => { refreshVoices(); save(); }}>{#each ttsModels as entry}<option value={entry.id}>{entry.id}</option>{/each}</select></label>
+    <label>TTS model<select bind:value={ttsModel} on:change={() => { refreshVoices(); save(); }}>{#each ttsModels as entry}<option value={entry.selectionId}>{entry.label}</option>{/each}</select></label>
     <div class="field-grid">
       <label>Voice<select bind:value={voice} on:change={save}><option value="">Model default</option>{#each voices as item}<option value={item}>{item}</option>{/each}</select></label>
       <label>STT language<input bind:value={language} placeholder="auto" on:change={save} /></label>
@@ -285,7 +423,8 @@
       <span>WAV, MP3, FLAC, or browser recording</span>
       <div><button on:click={() => sourceInput?.click()}>Choose audio</button><button class:danger={recording} on:click={toggleRecording}>{recording ? 'Stop recording' : 'Record microphone'}</button></div>
     </div>
-    <label>System prompt<textarea bind:value={systemPrompt} rows="6" on:change={save}></textarea></label>
+    <label>System prompt (prompt.csv)<textarea bind:value={systemPrompt} rows="6"></textarea></label>
+    <div class="prompt-actions"><button on:click={saveSystemPromptCsv}>Save CSV</button></div>
     <div class="field-grid compact-fields">
       <label>Temperature<input type="number" min="0" max="2" step="0.05" bind:value={temperature} /></label>
       <label>Max tokens<input type="number" min="1" max="32768" bind:value={maxTokens} /></label>
@@ -298,17 +437,16 @@
   </section>
 
   <section class="panel page-panel pipeline-results">
-    <div class="section-title"><div><span>RESULTS</span><h2>Conversation</h2></div></div>
-    {#if diarization?.speaker_turns?.length}
-      <div class="speaker-turns">
-        {#each diarization.speaker_turns as turn}
-          <span><strong>Speaker {turn.speaker_id}</strong> {((turn.start_sample || 0) / (diarization.sample_rate || 16000)).toFixed(1)}–{((turn.end_sample || 0) / (diarization.sample_rate || 16000)).toFixed(1)}s</span>
-        {/each}
+    <div class="section-title"><div><span>RESULTS</span><h2>Stage outputs</h2></div></div>
+    {#if diarizationText}<article class="pipeline-message diarization"><span>DIARIZATION</span><p>{diarizationText}</p></article>{/if}
+    {#if sttText}<article class="pipeline-message user"><span>STT</span><p>{sttText}</p></article>{/if}
+    {#if llmResponse}<article class="pipeline-message assistant"><span>LLM</span><p>{llmResponse}</p></article>{/if}
+    {#if outputUrl}
+      <div class="pipeline-audio-result">
+        <span>TTS</span>
+        <div class="pipeline-audio"><audio controls autoplay src={outputUrl}></audio><a href={outputUrl} download="voice-response.wav">Save WAV</a></div>
       </div>
     {/if}
-    {#if transcript}<article class="pipeline-message user"><span>TRANSCRIPT</span><p>{transcript}</p></article>{/if}
-    {#if llmResponse}<article class="pipeline-message assistant"><span>ASSISTANT</span><p>{llmResponse}</p></article>{/if}
-    {#if outputUrl}<div class="pipeline-audio"><audio controls autoplay src={outputUrl}></audio><a href={outputUrl} download="voice-response.wav">Save WAV</a></div>{/if}
-    {#if !transcript && !llmResponse && !outputUrl}<div class="empty-output"><div class="wave">∿</div><p>Pipeline results will appear here.</p></div>{/if}
+    {#if !diarizationText && !sttText && !llmResponse && !outputUrl}<div class="empty-output"><div class="wave">∿</div><p>Pipeline results will appear here.</p></div>{/if}
   </section>
 </div>

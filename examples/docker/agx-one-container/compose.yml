@@ -1,6 +1,7 @@
 services:
   voice-ai:
     image: audio.cpp-agx-all-in-one:local
+    container_name: audiocpp
     build:
       context: ../../..
       dockerfile: .devops/cuda.Dockerfile
@@ -13,7 +14,7 @@ services:
         GCC_VERSION: ${GCC_VERSION:-11}
         CUDA_DOCKER_ARCH: ${CUDA_ARCH:-87-real}
         AUDIOCPP_MODEL_SET: custom
-        AUDIOCPP_MODELS: sortformer_diar,qwen3_asr,pocket_tts
+        AUDIOCPP_MODELS: ${AUDIOCPP_MODELS:-sortformer_diar,qwen3_asr,pocket_tts,qwen3_tts}
         AUDIOCPP_CPU_ALL_VARIANTS: "OFF"
         BUILD_JOBS: ${BUILD_JOBS:-2}
         LLAMA_CPP_REF: ${LLAMA_CPP_REF:-5202104b59ada9005db079eea43882a2b7bf5802}

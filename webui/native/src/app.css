@@ -354,12 +354,13 @@ pre { background: var(--code-bg); border: 1px solid var(--line); border-radius: 
 .audio-drop { display: grid; min-height: 128px; padding: 16px; place-content: center; gap: 5px; border: 1px dashed var(--control-border); border-radius: 10px; background: var(--code-bg); text-align: center; }
 .audio-drop > span { color: var(--muted); font-size: 10px; }
 .audio-drop > div { display: flex; justify-content: center; gap: 7px; margin-top: 9px; }
-.speaker-turns { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 10px; }
-.speaker-turns > span { padding: 5px 7px; border: 1px solid var(--line); border-radius: 999px; background: var(--code-bg); color: var(--muted); font-size: 9px; }
-.speaker-turns strong { color: var(--blue); }
+.prompt-actions { display: flex; justify-content: flex-end; margin-top: 7px; }
+.pipeline-message.diarization { border-left: 3px solid var(--muted); }
 .pipeline-message.user { border-left: 3px solid var(--blue); }
 .pipeline-message.assistant { border-left: 3px solid var(--cyan); }
-.pipeline-audio { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: center; margin-top: 14px; }
+.pipeline-audio-result { margin-top: 14px; padding: 14px; border: 1px solid var(--line); border-left: 3px solid var(--cyan); border-radius: 10px; background: var(--card-bg); }
+.pipeline-audio-result > span { color: var(--cyan); font-size: 9px; font-weight: 800; letter-spacing: .13em; }
+.pipeline-audio { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: center; margin-top: 7px; }
 .pipeline-audio a { color: var(--cyan); font-size: 11px; text-decoration: none; }
 footer { display: flex; justify-content: space-between; max-width: 1600px; margin: auto; padding: 14px 20px 20px; border-top: 1px solid var(--line); color: var(--footer-text); font-size: 10px; }
 

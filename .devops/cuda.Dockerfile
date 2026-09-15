@@ -14,6 +14,20 @@ ARG LLAMA_CPP_REF=5202104b59ada9005db079eea43882a2b7bf5802
 
 ARG BASE_CUDA_DEV_CONTAINER=docker.io/nvidia/cuda:${CUDA_VERSION}-devel-ubuntu${UBUNTU_VERSION}
 ARG BASE_CUDA_RUN_CONTAINER=docker.io/nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu${UBUNTU_VERSION}
+ARG BASE_NODE_CONTAINER=docker.io/library/node:22-alpine
+
+# ── WEBUI: Build the embedded Svelte application ──────────────────────────────
+FROM ${BASE_NODE_CONTAINER} AS webui-build
+
+WORKDIR /src
+COPY webui/native/package.json webui/native/package-lock.json ./webui/native/
+RUN npm --prefix webui/native ci
+
+COPY webui/native/ ./webui/native/
+COPY webui/configs/ ./webui/configs/
+COPY model_specs/ ./model_specs/
+COPY prompt.csv ./prompt.csv
+RUN npm --prefix webui/native run build
 
 FROM ${BASE_CUDA_DEV_CONTAINER} AS build
 
@@ -39,8 +53,10 @@ ENV CC=gcc-${GCC_VERSION} CXX=g++-${GCC_VERSION} CUDAHOSTCXX=g++-${GCC_VERSION}
 
 WORKDIR /app
 COPY . .
+COPY --from=webui-build /src/webui/native/dist/index.html ./webui/native/dist/index.html
 
-RUN if [ "${CUDA_DOCKER_ARCH}" != "default" ]; then \
+RUN --mount=type=cache,target=/app/build,sharing=locked \
+    if [ "${CUDA_DOCKER_ARCH}" != "default" ]; then \
         ADDITIONAL_CMAKE_ARGS="-DCMAKE_CUDA_ARCHITECTURES=${CUDA_DOCKER_ARCH}"; \
     fi && \
     cmake -S . -B build \
@@ -65,14 +81,9 @@ RUN if [ "${CUDA_DOCKER_ARCH}" != "default" ]; then \
         --target audiocpp_cli \
         --target audiocpp_server \
         --target audiocpp_model_manager \
-        --target model_perf
-
-# Collect shared libraries
-RUN mkdir -p /app/lib && \
-    find build -name "*.so*" -exec cp -P {} /app/lib \;
-
-# Collect binaries + multiplexer into /app/full
-RUN mkdir -p /app/full && \
+        --target model_perf && \
+    mkdir -p /app/lib /app/full && \
+    find build -name "*.so*" -exec cp -P {} /app/lib \; && \
     cp build/bin/audiocpp_cli build/bin/audiocpp_server build/bin/audiocpp_model_manager \
        build/bin/model_perf /app/full/ && \
     cp .devops/entrypoint.sh /app/full/entrypoint.sh && \

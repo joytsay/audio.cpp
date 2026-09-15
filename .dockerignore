@@ -19,5 +19,8 @@ patches/
 perf/
 target_proj/
 model_specs_v1/
+webui/native/node_modules/
+webui/native/.svelte-kit/
+webui/native/dist/
 *.md
 *.wav
