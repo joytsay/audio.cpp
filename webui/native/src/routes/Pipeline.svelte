@@ -5,7 +5,7 @@
   import { apiEndpoint, chatText, endpointBlob, endpointJson, endpointModels, endpointRouterModels, routerEndpoint, siblingWorkerEndpoint, type OpenAIModel } from '$lib/openai';
   import { graphCitations, graphContext, graphSearch } from '$lib/rag';
   import type { CatalogEntry, InstallPackageChoice, StringMap } from '$lib/types';
-  import knowledgeSystemPrompt from '../../../../knowledge/system-prompt.md?raw';
+  import bundledKnowledgeSystemPrompt from '../../../../knowledge/system-prompt.md?raw';
   import systemPromt from '../../../../prompt.csv?raw';
 
   type Stage = 'idle' | 'upload' | 'diarization' | 'stt' | 'rag' | 'llm' | 'tts' | 'done';
@@ -44,6 +44,7 @@
   let temperature = 0.2;
   let maxTokens = 512;
   let sourceFile: File | null = null;
+  let inputUrl = '';
   let sourceInput: HTMLInputElement | null = null;
   let recorder: MediaRecorder | null = null;
   let recordingStream: MediaStream | null = null;
@@ -211,8 +212,19 @@
     } catch { voices = selected?.builtinVoices || []; }
   }
 
+  async function currentKnowledgeSystemPrompt(signal?: AbortSignal): Promise<string> {
+    try {
+      const response = await endpointJson<{ files?: Array<{ path: string; content: string }> }>(audioBaseUrl, 'ui/knowledge', {}, signal);
+      return response.files?.find((file) => file.path === 'system-prompt.md')?.content || bundledKnowledgeSystemPrompt;
+    } catch {
+      return bundledKnowledgeSystemPrompt;
+    }
+  }
+
   function chooseFile(file: File | null) {
+    if (inputUrl) URL.revokeObjectURL(inputUrl);
     sourceFile = file;
+    inputUrl = file ? URL.createObjectURL(file) : '';
     status = file ? `${file.name} is ready.` : 'Choose or record a WAV file.';
   }
 
@@ -338,6 +350,7 @@
         ragText = graphContext(ragResult);
         ragSources = graphCitations(ragResult);
         if (!ragText) throw new Error('GraphRAG returned no relevant knowledge.');
+        const knowledgeSystemPrompt = await currentKnowledgeSystemPrompt(aborter.signal);
         llmSystemPrompt = `${knowledgeSystemPrompt.trim()}\n\nUse the retrieved knowledge below to normalize technical terms. Do not mention the retrieval process or citations in the output.\n\n${ragText}`;
       }
 
@@ -402,6 +415,7 @@
     aborter?.abort();
     if (recorder?.state === 'recording') recorder.stop();
     recordingStream?.getTracks().forEach((track) => track.stop());
+    if (inputUrl) URL.revokeObjectURL(inputUrl);
     if (outputUrl) URL.revokeObjectURL(outputUrl);
   });
 </script>
@@ -444,6 +458,7 @@
       <strong>{sourceFile?.name || 'No audio selected'}</strong>
       <span>WAV, MP3, FLAC, or browser recording</span>
       <div><button on:click={() => sourceInput?.click()}>Choose audio</button><button class:danger={recording} on:click={toggleRecording}>{recording ? 'Stop recording' : 'Record microphone'}</button></div>
+      {#if inputUrl}<audio class="pipeline-input-audio" controls src={inputUrl}></audio>{/if}
     </div>
     <label>LLM grounding<select bind:value={promptMode} on:change={save}><option value="system">System prompt (prompt.csv)</option><option value="graphrag">GraphRAG (knowledge/)</option></select></label>
     {#if promptMode === 'system'}

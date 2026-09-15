@@ -354,6 +354,7 @@ pre { background: var(--code-bg); border: 1px solid var(--line); border-radius: 
 .audio-drop { display: grid; min-height: 128px; padding: 16px; place-content: center; gap: 5px; border: 1px dashed var(--control-border); border-radius: 10px; background: var(--code-bg); text-align: center; }
 .audio-drop > span { color: var(--muted); font-size: 10px; }
 .audio-drop > div { display: flex; justify-content: center; gap: 7px; margin-top: 9px; }
+.pipeline-input-audio { width: min(100%, 420px); margin-top: 10px; }
 .prompt-actions { display: flex; justify-content: flex-end; margin-top: 7px; }
 .pipeline-message.diarization { border-left: 3px solid var(--muted); }
 .pipeline-message.user { border-left: 3px solid var(--blue); }
@@ -367,6 +368,16 @@ pre { background: var(--code-bg); border: 1px solid var(--line); border-radius: 
 .rag-citations { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
 .rag-citations strong { width: 100%; color: var(--muted); font-size: 9px; letter-spacing: .1em; text-transform: uppercase; }
 .rag-citations code { padding: 5px 7px; border: 1px solid var(--line); border-radius: 6px; background: var(--code-bg); color: var(--text-subtle); font-size: 9px; }
+.knowledge-editor { max-width: 1600px; margin: 12px auto 0; }
+.knowledge-accordion { display: grid; gap: 7px; margin-top: 12px; }
+.knowledge-accordion details { overflow: hidden; border: 1px solid var(--line); border-radius: 9px; background: var(--card-bg); }
+.knowledge-accordion summary { display: flex; padding: 11px 13px; align-items: center; justify-content: space-between; gap: 12px; cursor: pointer; color: var(--text-strong); font-size: 11px; font-weight: 700; }
+.knowledge-accordion summary small { color: var(--muted); font-size: 9px; font-weight: 400; }
+.knowledge-document { padding: 0 12px 12px; border-top: 1px solid var(--line); }
+.knowledge-document textarea { min-height: 280px; margin-top: 12px; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+.knowledge-actions { display: flex; justify-content: flex-end; margin-top: 8px; }
+.knowledge-status { margin: 10px 0 0; color: var(--muted); font-size: 10px; }
+.knowledge-status.busy { color: var(--cyan); }
 footer { display: flex; justify-content: space-between; max-width: 1600px; margin: auto; padding: 14px 20px 20px; border-top: 1px solid var(--line); color: var(--footer-text); font-size: 10px; }
 
 @media (max-width: 1200px) {

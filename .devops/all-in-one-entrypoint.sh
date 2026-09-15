@@ -26,13 +26,13 @@ saved_fingerprint="$(cat "$knowledge_fingerprint_file" 2>/dev/null || true)"
 if [[ ! -s "$knowledge_db" || "$knowledge_fingerprint" != "$saved_fingerprint" ]]; then
     echo "[all-in-one] indexing /app/knowledge with rag-cpp"
     knowledge_db_tmp=/app/rag-data/knowledge.ragdb.tmp
-    rm -f "$knowledge_db_tmp"
+    rm -f "$knowledge_db_tmp" "${knowledge_db}.wal"
     /app/ragcpp index /app/knowledge "$knowledge_db_tmp" --ext=.md --semantic
     mv "$knowledge_db_tmp" "$knowledge_db"
     printf '%s\n' "$knowledge_fingerprint" > "$knowledge_fingerprint_file"
 fi
 
-/app/ragcpp serve "$knowledge_db" --http 8083 --graph &
+/app/ragcpp serve "$knowledge_db" --http 8083 --write --graph &
 rag_pid=$!
 
 /app/audiocpp_server \

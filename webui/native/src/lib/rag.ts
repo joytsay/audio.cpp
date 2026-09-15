@@ -36,6 +36,11 @@ interface InitializeReply {
   error?: { code?: number; message?: string };
 }
 
+interface IndexReply {
+  result?: { ids?: Array<string | number>; chunks?: number };
+  error?: { code?: number; message?: string };
+}
+
 function rpcBody(id: number, method: string, params: Record<string, unknown>): string {
   return JSON.stringify({ jsonrpc: '2.0', id, method, params });
 }
@@ -75,6 +80,21 @@ export async function graphSearch(
   if (reply.error) throw new Error(reply.error.message || `GraphRAG error ${reply.error.code ?? ''}`.trim());
   if (!reply.result) throw new Error('GraphRAG returned an invalid response.');
   return reply.result;
+}
+
+export async function indexKnowledgeDocument(
+  baseUrl: string,
+  document: { uri: string; title: string; text: string },
+  signal?: AbortSignal
+): Promise<void> {
+  await initialize(baseUrl, signal);
+  const reply = await endpointJson<IndexReply>(baseUrl, 'rag/index/add', {
+    method: 'POST',
+    body: rpcBody(Date.now(), 'index/add', {
+      documents: [{ id: document.uri, uri: document.uri, title: document.title, text: document.text }]
+    })
+  }, signal);
+  if (reply.error) throw new Error(reply.error.message || `GraphRAG indexing error ${reply.error.code ?? ''}`.trim());
 }
 
 export function graphContext(result: GraphResult): string {

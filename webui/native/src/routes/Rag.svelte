@@ -1,8 +1,14 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { chatText, endpointJson, endpointRouterModels, siblingWorkerEndpoint, type OpenAIModel } from '$lib/openai';
-  import { graphCitations, graphContext, graphSearch, type GraphMode, type GraphResult } from '$lib/rag';
-  import knowledgeSystemPrompt from '../../../../knowledge/system-prompt.md?raw';
+  import { graphCitations, graphContext, graphSearch, indexKnowledgeDocument, type GraphMode, type GraphResult } from '$lib/rag';
+  import bundledKnowledgeSystemPrompt from '../../../../knowledge/system-prompt.md?raw';
+
+  interface KnowledgeFile {
+    path: string;
+    uri: string;
+    content: string;
+  }
 
   let audioBaseUrl = '';
   let llmBaseUrl = '';
@@ -17,10 +23,50 @@
   let status = 'Ask a question about the semiconductor knowledge base.';
   let result: GraphResult | null = null;
   let answer = '';
+  let knowledgeFiles: KnowledgeFile[] = [];
+  let knowledgeSystemPrompt = bundledKnowledgeSystemPrompt;
+  let knowledgeStatus = 'Loading knowledge files…';
+  let savingKnowledge = '';
 
   async function refreshModels() {
     models = await endpointRouterModels(llmBaseUrl);
     if (!models.some((entry) => entry.id === model)) model = models[0]?.id || '';
+  }
+
+  async function refreshKnowledge() {
+    knowledgeStatus = 'Loading knowledge files…';
+    try {
+      const response = await endpointJson<{ files?: KnowledgeFile[] }>(audioBaseUrl, 'ui/knowledge');
+      knowledgeFiles = response.files || [];
+      knowledgeSystemPrompt = knowledgeFiles.find((file) => file.path === 'system-prompt.md')?.content || bundledKnowledgeSystemPrompt;
+      knowledgeStatus = `${knowledgeFiles.length} Markdown files loaded.`;
+    } catch (error) {
+      knowledgeStatus = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  async function saveKnowledge(file: KnowledgeFile) {
+    if (savingKnowledge) return;
+    savingKnowledge = file.path;
+    knowledgeStatus = `Saving ${file.path}…`;
+    try {
+      const saved = await endpointJson<KnowledgeFile>(audioBaseUrl, 'ui/knowledge', {
+        method: 'POST',
+        body: JSON.stringify({ path: file.path, content: file.content })
+      });
+      await indexKnowledgeDocument(audioBaseUrl, {
+        uri: saved.uri,
+        title: saved.path.split('/').pop()?.replace(/\.md$/i, '') || saved.path,
+        text: saved.content
+      });
+      knowledgeFiles = knowledgeFiles.map((entry) => entry.path === saved.path ? saved : entry);
+      if (saved.path === 'system-prompt.md') knowledgeSystemPrompt = saved.content;
+      knowledgeStatus = `${saved.path} saved and reindexed.`;
+    } catch (error) {
+      knowledgeStatus = error instanceof Error ? error.message : String(error);
+    } finally {
+      savingKnowledge = '';
+    }
   }
 
   async function run() {
@@ -63,7 +109,7 @@
   onMount(async () => {
     audioBaseUrl = new URL('v1/', document.baseURI).toString().replace(/\/$/, '');
     llmBaseUrl = siblingWorkerEndpoint(8082);
-    try { await refreshModels(); }
+    try { await Promise.all([refreshModels(), refreshKnowledge()]); }
     catch (error) { status = error instanceof Error ? error.message : String(error); }
   });
 </script>
@@ -100,3 +146,27 @@
     {#if !result && !answer}<div class="empty-output"><div class="wave">⌘</div><p>GraphRAG context and citations will appear here.</p></div>{/if}
   </section>
 </div>
+
+<section class="panel page-panel knowledge-editor">
+  <div class="section-title">
+    <div><span>KNOWLEDGE</span><h2>Markdown editor</h2></div>
+    <button disabled={Boolean(savingKnowledge)} on:click={refreshKnowledge}>Refresh files</button>
+  </div>
+  <p class="field-help">Expand a document to edit it. Saving updates the Markdown file and the running GraphRAG index.</p>
+  <div class="knowledge-accordion">
+    {#each knowledgeFiles as file (file.path)}
+      <details>
+        <summary><span>{file.path}</span><small>{file.content.length.toLocaleString()} characters</small></summary>
+        <div class="knowledge-document">
+          <textarea bind:value={file.content} rows="16" spellcheck="false" aria-label={`Edit ${file.path}`}></textarea>
+          <div class="knowledge-actions">
+            <button class="primary" disabled={Boolean(savingKnowledge)} on:click={() => saveKnowledge(file)}>
+              {savingKnowledge === file.path ? 'Saving…' : 'Save Markdown'}
+            </button>
+          </div>
+        </div>
+      </details>
+    {/each}
+  </div>
+  <p class:busy={Boolean(savingKnowledge)} class="knowledge-status">{knowledgeStatus}</p>
+</section>

@@ -1137,11 +1137,20 @@ HttpResponse ServerState::handle(const HttpRequest & request) {
     else if (request.method == "POST" && request.path == "/v1/ui/upload") {
         response = handle_ui_upload(request);
     }
+    else if (request.method == "GET" && request.path == "/v1/ui/knowledge") {
+        response = handle_knowledge_list();
+    }
+    else if (request.method == "POST" && request.path == "/v1/ui/knowledge") {
+        response = handle_knowledge_save(request.body);
+    }
     else if (request.method == "POST" && request.path == "/v1/rag/initialize") {
         response = handle_rag_request(request.body, "initialize");
     }
     else if (request.method == "POST" && request.path == "/v1/rag/graph") {
         response = handle_rag_request(request.body, "graph");
+    }
+    else if (request.method == "POST" && request.path == "/v1/rag/index/add") {
+        response = handle_rag_request(request.body, "index/add");
     }
 #if defined(AUDIOCPP_HAS_NATIVE_MODEL_MANAGER)
     else if (request.method == "GET" && request.path == "/v1/ui/models-root") {
@@ -1428,6 +1437,115 @@ HttpResponse ServerState::handle_ui_upload(const HttpRequest & request) {
     return json_response(
         "{\"path\":" + json_quote(path.string()) +
         ",\"bytes\":" + std::to_string(request.body.size()) + "}");
+}
+
+std::filesystem::path ServerState::knowledge_root() const {
+    const auto base = repository_root_.empty() ? request_base_ : repository_root_;
+    std::error_code ec;
+    const auto root = std::filesystem::weakly_canonical(base / "knowledge", ec);
+    if (ec || !std::filesystem::is_directory(root)) {
+        throw std::runtime_error("knowledge directory is unavailable");
+    }
+    return root;
+}
+
+std::filesystem::path ServerState::resolve_knowledge_file(const std::string & relative_path) const {
+    const std::filesystem::path relative(relative_path);
+    if (relative.empty() || relative.is_absolute() || relative.extension() != ".md") {
+        throw std::runtime_error("knowledge path must name a relative Markdown file");
+    }
+    for (const auto & component : relative) {
+        if (component == "..") {
+            throw std::runtime_error("knowledge path cannot leave the knowledge directory");
+        }
+    }
+
+    const auto root = knowledge_root();
+    std::error_code ec;
+    const auto candidate = std::filesystem::weakly_canonical(root / relative, ec);
+    if (ec || !std::filesystem::is_regular_file(candidate)) {
+        throw std::runtime_error("knowledge Markdown file does not exist: " + relative_path);
+    }
+    auto root_it = root.begin();
+    auto candidate_it = candidate.begin();
+    for (; root_it != root.end() && candidate_it != candidate.end(); ++root_it, ++candidate_it) {
+        if (*root_it != *candidate_it) {
+            throw std::runtime_error("knowledge path cannot leave the knowledge directory");
+        }
+    }
+    if (root_it != root.end()) {
+        throw std::runtime_error("knowledge path cannot leave the knowledge directory");
+    }
+    return candidate;
+}
+
+HttpResponse ServerState::handle_knowledge_list() const {
+    if (!config_.ui_management) {
+        return error_response(403, "knowledge editing is disabled", "forbidden");
+    }
+    const auto root = knowledge_root();
+    std::vector<std::filesystem::path> files;
+    std::error_code ec;
+    for (std::filesystem::recursive_directory_iterator it(root, ec), end; it != end; it.increment(ec)) {
+        if (ec) {
+            ec.clear();
+            continue;
+        }
+        if (it->is_regular_file(ec) && !it->is_symlink(ec) && it->path().extension() == ".md") {
+            files.push_back(it->path());
+        }
+    }
+    std::sort(files.begin(), files.end());
+
+    std::string response = "{\"files\":[";
+    bool first = true;
+    for (const auto & file : files) {
+        std::ifstream input(file, std::ios::binary);
+        if (!input) continue;
+        std::ostringstream content;
+        content << input.rdbuf();
+        std::error_code relative_ec;
+        const auto relative = std::filesystem::relative(file, root, relative_ec);
+        if (relative_ec) continue;
+        if (!first) response += ",";
+        first = false;
+        response += "{\"path\":" + json_quote(relative.generic_string()) +
+            ",\"uri\":" + json_quote(file.string()) +
+            ",\"content\":" + json_quote(content.str()) + "}";
+    }
+    return json_response(response + "]}");
+}
+
+HttpResponse ServerState::handle_knowledge_save(const std::string & body_text) {
+    if (!config_.ui_management) {
+        return error_response(403, "knowledge editing is disabled", "forbidden");
+    }
+    constexpr size_t kMaxKnowledgeBytes = size_t{2} * 1024 * 1024;
+    const auto body = engine::io::json::parse(body_text);
+    const auto relative = engine::io::json::require_string(body, "path");
+    const auto content = engine::io::json::require_string(body, "content");
+    if (content.size() > kMaxKnowledgeBytes) {
+        return error_response(413, "knowledge file exceeds the 2 MiB limit", "invalid_request_error");
+    }
+    const auto destination = resolve_knowledge_file(relative);
+    auto temporary = destination;
+    temporary += ".audiocpp-" + std::to_string(next_upload_id_.fetch_add(1)) + ".tmp";
+    {
+        std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
+        if (!output) throw std::runtime_error("could not create temporary knowledge file");
+        output.write(content.data(), static_cast<std::streamsize>(content.size()));
+        if (!output) throw std::runtime_error("could not write knowledge file");
+    }
+    std::error_code rename_ec;
+    std::filesystem::rename(temporary, destination, rename_ec);
+    if (rename_ec) {
+        std::filesystem::remove(temporary);
+        throw std::runtime_error("could not replace knowledge file: " + rename_ec.message());
+    }
+    return json_response(
+        "{\"path\":" + json_quote(relative) +
+        ",\"uri\":" + json_quote(destination.string()) +
+        ",\"content\":" + json_quote(content) + "}");
 }
 
 #if defined(AUDIOCPP_HAS_NATIVE_MODEL_MANAGER)

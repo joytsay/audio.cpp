@@ -88,6 +88,8 @@ RUN --mount=type=cache,target=/app/build,sharing=locked \
     if [ "${CUDA_DOCKER_ARCH}" != "default" ]; then \
         ADDITIONAL_CMAKE_ARGS="-DCMAKE_CUDA_ARCHITECTURES=${CUDA_DOCKER_ARCH}"; \
     fi && \
+    mkdir -p build/webui/native/dist && \
+    cp ./webui/native/dist/index.html build/webui/native/dist/index.html && \
     cmake -S . -B build \
         -DCMAKE_BUILD_TYPE=Release \
         -DAUDIOCPP_MODEL_SET="${AUDIOCPP_MODEL_SET}" \
@@ -235,7 +237,7 @@ COPY knowledge/ /app/knowledge/
 
 RUN chmod +x /app/all-in-one-entrypoint.sh && \
     mkdir -p /app/models /app/llama-models /app/rag-data && \
-    chown -R ubuntu:ubuntu /app/models /app/llama-models /app/rag-data
+    chown -R ubuntu:ubuntu /app/models /app/llama-models /app/rag-data /app/knowledge
 
 USER ubuntu
 
