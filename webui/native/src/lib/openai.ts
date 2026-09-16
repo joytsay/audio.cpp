@@ -5,6 +5,17 @@ export interface OpenAIModel {
   loaded?: boolean;
 }
 
+export interface ChatMessage {
+  role: string;
+  content: string;
+}
+
+export function formatChatMessages(messages: ChatMessage[]): string {
+  return messages
+    .map((message) => `--- ${message.role.toUpperCase()} ---\n${message.content}`)
+    .join('\n\n');
+}
+
 export function apiEndpoint(base: string, path: string): string {
   const trimmed = base.trim();
   const root = trimmed || new URL('v1/', document.baseURI).toString();

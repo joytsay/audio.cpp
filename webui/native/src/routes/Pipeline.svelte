@@ -2,8 +2,8 @@
   import { onDestroy, onMount } from 'svelte';
   import { browserDecodeToWav } from '$lib/audio';
   import { catalog } from '$lib/catalog';
-  import { apiEndpoint, chatText, endpointBlob, endpointJson, endpointModels, endpointRouterModels, routerEndpoint, siblingWorkerEndpoint, type OpenAIModel } from '$lib/openai';
-  import { graphCitations, graphContext, graphSearch } from '$lib/rag';
+  import { apiEndpoint, chatText, endpointBlob, endpointJson, endpointModels, endpointRouterModels, formatChatMessages, routerEndpoint, siblingWorkerEndpoint, type ChatMessage, type OpenAIModel } from '$lib/openai';
+  import { graphCitations, graphContext, graphSearch, matchedExampleOutput } from '$lib/rag';
   import type { CatalogEntry, InstallPackageChoice, StringMap } from '$lib/types';
   import bundledKnowledgeSystemPrompt from '../../../../knowledge/system-prompt.md?raw';
   import systemPromt from '../../../../prompt.csv?raw';
@@ -58,6 +58,7 @@
   let ragSources: string[] = [];
   let transcript = '';
   let llmResponse = '';
+  let llmInputPreview = '';
   let diarization: any = null;
   let outputUrl = '';
   let aborter: AbortController | null = null;
@@ -271,28 +272,6 @@
     status = message;
   }
 
-  function labelTranscript(text: string, diar: any, stt: any): string {
-    const turns = Array.isArray(diar?.speaker_turns) ? diar.speaker_turns : [];
-    const words = Array.isArray(stt?.words) ? stt.words : [];
-    if (!turns.length || !words.length) return text;
-    const lines: Array<{ speaker: string; words: string[] }> = [];
-    for (const word of words) {
-      const start = Number(word.start_sample || 0);
-      const end = Number(word.end_sample || start);
-      const midpoint = (start + end) / 2;
-      const turn = turns.find((item: any) => midpoint >= Number(item.start_sample) && midpoint <= Number(item.end_sample));
-      const speaker = String(turn?.speaker_id ?? 'unknown');
-      const previous = lines[lines.length - 1];
-      if (!previous || previous.speaker !== speaker) lines.push({ speaker, words: [] });
-      lines[lines.length - 1].words.push(String(word.word || '').trim());
-    }
-    const labelled = lines
-      .map((line) => `Speaker ${line.speaker}: ${line.words.filter(Boolean).join(' ')}`)
-      .filter((line) => !line.endsWith(': '))
-      .join('\n');
-    return labelled || text;
-  }
-
   function formatDiarization(result: any): string {
     const turns = Array.isArray(result?.speaker_turns) ? result.speaker_turns : [];
     if (!turns.length) return JSON.stringify(result, null, 2) || 'No speaker turns detected.';
@@ -315,6 +294,7 @@
     ragSources = [];
     transcript = '';
     llmResponse = '';
+    llmInputPreview = '';
     diarization = null;
     if (outputUrl) URL.revokeObjectURL(outputUrl);
     outputUrl = '';
@@ -340,29 +320,35 @@
       }, aborter.signal);
       const plainTranscript = typeof stt.text === 'string' ? stt.text.trim() : '';
       sttText = plainTranscript;
-      transcript = useDiarization ? labelTranscript(plainTranscript, diarization, stt) : plainTranscript;
+      // Graph retrieval and normalization must receive exactly the STT text.
+      // Speaker labels and word-joining added by diarization weaken matching
+      // against complete examples and terminology entries.
+      transcript = plainTranscript;
       if (!transcript) throw new Error('STT returned an empty transcript.');
 
       let llmSystemPrompt = systemPrompt.trim();
+      let exampleOutput = '';
       if (promptMode === 'graphrag') {
         step('rag', 'Retrieving semiconductor knowledge…');
         const ragResult = await graphSearch(audioBaseUrl, transcript, 'local', 5, aborter.signal);
         ragText = graphContext(ragResult);
         ragSources = graphCitations(ragResult);
         if (!ragText) throw new Error('GraphRAG returned no relevant knowledge.');
+        exampleOutput = matchedExampleOutput(ragResult, transcript);
         const knowledgeSystemPrompt = await currentKnowledgeSystemPrompt(aborter.signal);
-        llmSystemPrompt = `${knowledgeSystemPrompt.trim()}\n\nUse the retrieved knowledge below to normalize technical terms. Do not mention the retrieval process or citations in the output.\n\n${ragText}`;
+        llmSystemPrompt = `${knowledgeSystemPrompt.trim()}\n\n# 檢索知識\n\n以下內容是本次正規化的權威參考資料。必須套用明確命中的「左側詞 => 右側詞」。若最高相關結果是與使用者相同話語的完整「輸入／輸出」範例，即使 STT 含有重複、標點、語助詞、漏字或近音誤字，也必須只輸出該範例的「輸出：」內容。不要輸出來源、分數、解釋或範例說明。\n\n${ragText}`;
       }
 
       step('llm', 'Generating an instruct-model response…');
-      const messages = [];
+      const messages: ChatMessage[] = [];
       if (llmSystemPrompt) messages.push({ role: 'system', content: llmSystemPrompt });
       messages.push({ role: 'user', content: transcript });
+      llmInputPreview = formatChatMessages(messages);
       const llm = await endpointJson<any>(llmBaseUrl, 'chat/completions', {
         method: 'POST',
         body: JSON.stringify({ model: llmModel, messages, temperature, max_tokens: maxTokens, stream: false })
       }, aborter.signal);
-      llmResponse = chatText(llm);
+      llmResponse = exampleOutput || chatText(llm);
 
       // Jetson uses unified memory. Release the LLM worker before the TTS
       // worker creates its CUDA/cuBLAS context for this sequential pipeline.
@@ -485,6 +471,9 @@
     {#if ragText}
       <article class="pipeline-message diarization"><span>GRAPHRAG</span><p>{ragText}</p></article>
       {#if ragSources.length}<div class="rag-citations"><strong>Sources</strong>{#each ragSources as citation}<code>{citation}</code>{/each}</div>{/if}
+    {/if}
+    {#if llmInputPreview}
+      <label class="llm-input-preview">LLM input<textarea readonly rows="14" value={llmInputPreview}></textarea></label>
     {/if}
     {#if llmResponse}<article class="pipeline-message assistant"><span>LLM</span><p>{llmResponse}</p></article>{/if}
     {#if outputUrl}

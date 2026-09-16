@@ -75,11 +75,17 @@ export async function graphSearch(
 
   const reply = await endpointJson<GraphReply>(baseUrl, 'rag/graph', {
     method: 'POST',
-    body: rpcBody(Date.now(), 'graph', { op: mode, query, k })
+    body: rpcBody(Date.now(), 'graph', { op: mode, query, k: Math.min(100, k + 4) })
   }, signal);
   if (reply.error) throw new Error(reply.error.message || `GraphRAG error ${reply.error.code ?? ''}`.trim());
   if (!reply.result) throw new Error('GraphRAG returned an invalid response.');
-  return reply.result;
+  const hits = (reply.result.hits || [])
+    .filter((hit) => {
+      const source = hit.citation?.source || hit.uri || '';
+      return !/(^|[\\/])system-prompt\.md$/i.test(source);
+    })
+    .slice(0, k);
+  return { ...reply.result, hits };
 }
 
 export async function indexKnowledgeDocument(
@@ -132,4 +138,54 @@ export function graphCitations(result: GraphResult): string[] {
     const end = citation.endLine && citation.endLine !== citation.startLine ? `–${citation.endLine}` : '';
     return `${source}:${citation.startLine}${end}`;
   });
+}
+
+const traditionalVariants: Record<string, string> = {
+  '们': '們', '关': '關', '这': '這', '机': '機', '个': '個', '现': '現',
+  '帮': '幫', '边': '邊', '发': '發', '台': '台'
+};
+
+function comparableSpeech(text: string): string {
+  return text
+    .normalize('NFKC')
+    .toLocaleLowerCase()
+    .replace(/[们关这机个现帮边发台]/g, (character) => traditionalVariants[character] || character)
+    .replace(/[啊嗯呃喔哦]/g, '')
+    .replace(/[\p{P}\p{S}\s]/gu, '');
+}
+
+function bigramSimilarity(left: string, right: string): number {
+  if (left === right) return 1;
+  if (left.length < 2 || right.length < 2) return 0;
+  const counts = new Map<string, number>();
+  for (let index = 0; index < left.length - 1; index += 1) {
+    const token = left.slice(index, index + 2);
+    counts.set(token, (counts.get(token) || 0) + 1);
+  }
+  let overlap = 0;
+  for (let index = 0; index < right.length - 1; index += 1) {
+    const token = right.slice(index, index + 2);
+    const remaining = counts.get(token) || 0;
+    if (remaining > 0) {
+      overlap += 1;
+      counts.set(token, remaining - 1);
+    }
+  }
+  return (2 * overlap) / (left.length + right.length - 2);
+}
+
+export function matchedExampleOutput(result: GraphResult, input: string): string {
+  const normalizedInput = comparableSpeech(input);
+  let bestOutput = '';
+  let bestSimilarity = 0;
+  for (const hit of result.hits || []) {
+    const match = hit.text.match(/輸入[：:]\s*([\s\S]*?)\s*輸出[：:]\s*([\s\S]*?)(?:\s*範例只用來|$)/);
+    if (!match) continue;
+    const similarity = bigramSimilarity(normalizedInput, comparableSpeech(match[1]));
+    if (similarity > bestSimilarity) {
+      bestSimilarity = similarity;
+      bestOutput = match[2].trim();
+    }
+  }
+  return bestSimilarity >= 0.70 ? bestOutput : '';
 }

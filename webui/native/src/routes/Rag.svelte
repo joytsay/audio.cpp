@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { chatText, endpointJson, endpointRouterModels, siblingWorkerEndpoint, type OpenAIModel } from '$lib/openai';
-  import { graphCitations, graphContext, graphSearch, indexKnowledgeDocument, type GraphMode, type GraphResult } from '$lib/rag';
+  import { chatText, endpointJson, endpointRouterModels, formatChatMessages, siblingWorkerEndpoint, type ChatMessage, type OpenAIModel } from '$lib/openai';
+  import { graphCitations, graphContext, graphSearch, indexKnowledgeDocument, matchedExampleOutput, type GraphMode, type GraphResult } from '$lib/rag';
   import bundledKnowledgeSystemPrompt from '../../../../knowledge/system-prompt.md?raw';
 
   interface KnowledgeFile {
@@ -23,6 +23,7 @@
   let status = 'Ask a question about the semiconductor knowledge base.';
   let result: GraphResult | null = null;
   let answer = '';
+  let llmInputPreview = '';
   let knowledgeFiles: KnowledgeFile[] = [];
   let knowledgeSystemPrompt = bundledKnowledgeSystemPrompt;
   let knowledgeStatus = 'Loading knowledge files…';
@@ -74,11 +75,21 @@
     searching = true;
     result = null;
     answer = '';
+    llmInputPreview = '';
     try {
       status = `Running GraphRAG ${mode} search…`;
       result = await graphSearch(audioBaseUrl, query.trim(), mode, topK);
       const context = graphContext(result);
       if (!context) throw new Error('GraphRAG returned no relevant knowledge.');
+      const exampleOutput = matchedExampleOutput(result, query.trim());
+      const messages: ChatMessage[] = [
+        {
+          role: 'system',
+          content: `${knowledgeSystemPrompt.trim()}\n\n# 檢索知識\n\n以下內容是本次正規化的權威參考資料。必須套用明確命中的「左側詞 => 右側詞」。若最高相關結果是與使用者相同話語的完整「輸入／輸出」範例，即使輸入含有重複、標點、語助詞、漏字或近音誤字，也必須只輸出該範例的「輸出：」內容。不要輸出來源、分數、解釋或範例說明。\n\n${context}`
+        },
+        { role: 'user', content: query.trim() }
+      ];
+      llmInputPreview = formatChatMessages(messages);
       if (!model) {
         status = 'Retrieval complete. Select an LLM to generate an answer.';
         return;
@@ -88,17 +99,14 @@
         method: 'POST',
         body: JSON.stringify({
           model,
-          messages: [
-            { role: 'system', content: `${knowledgeSystemPrompt.trim()}\n\nUse only the retrieved knowledge below when it is relevant. Preserve technical spelling exactly.\n\n${context}` },
-            { role: 'user', content: query.trim() }
-          ],
+          messages,
           temperature,
           max_tokens: maxTokens,
           stream: false
         })
       });
-      answer = chatText(response);
-      status = 'GraphRAG response complete.';
+      answer = exampleOutput || chatText(response);
+      status = exampleOutput ? 'GraphRAG response complete · matched normalization example.' : 'GraphRAG response complete.';
     } catch (error) {
       status = error instanceof Error ? error.message : String(error);
     } finally {
@@ -141,6 +149,9 @@
     {#if result}
       <article class="pipeline-message diarization"><span>GRAPH CONTEXT</span><p>{graphContext(result)}</p></article>
       {#if graphCitations(result).length}<div class="rag-citations"><strong>Sources</strong>{#each graphCitations(result) as citation}<code>{citation}</code>{/each}</div>{/if}
+    {/if}
+    {#if llmInputPreview}
+      <label class="llm-input-preview">LLM input<textarea readonly rows="14" value={llmInputPreview}></textarea></label>
     {/if}
     {#if answer}<article class="pipeline-message assistant"><span>LLM</span><p>{answer}</p></article>{/if}
     {#if !result && !answer}<div class="empty-output"><div class="wave">⌘</div><p>GraphRAG context and citations will appear here.</p></div>{/if}
