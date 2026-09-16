@@ -76,6 +76,11 @@
   let outputUrl = '';
   let aborter: AbortController | null = null;
   const defaultCloneVoiceName = 'wangSG';
+  type TimedStage = Exclude<Stage, 'idle' | 'done'>;
+  let stageRuntimes: Partial<Record<TimedStage, number>> = {};
+  let stageStartedAt = 0;
+  let runtimeTick = 0;
+  let runtimeTimer: ReturnType<typeof setInterval> | null = null;
 
   $: diarizationModels = models.filter((entry) => entry.task === 'diar');
   $: sttModels = models.filter((entry) => ['asr', 'stt'].includes(entry.task || ''));
@@ -389,9 +394,32 @@
     return (await response.json()).path;
   }
 
+  function finishActiveStage(now = performance.now()) {
+    if (stage !== 'idle' && stage !== 'done' && stageStartedAt) {
+      stageRuntimes = { ...stageRuntimes, [stage]: now - stageStartedAt };
+    }
+    stageStartedAt = 0;
+    runtimeTick = now;
+  }
+
   function step(next: Stage, message: string) {
+    const now = performance.now();
+    finishActiveStage(now);
     stage = next;
+    if (next !== 'done') stageStartedAt = now;
     status = message;
+  }
+
+  function stageRuntime(stageName: string, tick: number): number | undefined {
+    const completed = stageRuntimes[stageName as TimedStage];
+    if (completed !== undefined) return completed;
+    return stage === stageName && stageStartedAt ? tick - stageStartedAt : undefined;
+  }
+
+  function formatStageRuntime(milliseconds: number): string {
+    const seconds = Math.max(0, milliseconds) / 1000;
+    if (seconds < 60) return `${seconds.toFixed(1)}s`;
+    return `${Math.floor(seconds / 60)}m ${(seconds % 60).toFixed(1)}s`;
   }
 
   function formatDiarization(result: any): string {
@@ -420,6 +448,9 @@
     diarization = null;
     if (outputUrl) URL.revokeObjectURL(outputUrl);
     outputUrl = '';
+    stageRuntimes = {};
+    stageStartedAt = 0;
+    runtimeTick = performance.now();
     try {
       step('upload', 'Preparing 16 kHz WAV input…');
       const audioPath = await uploadAudio(sourceFile, aborter.signal);
@@ -509,6 +540,7 @@
       step('done', 'Pipeline complete.');
       save();
     } catch (error) {
+      finishActiveStage();
       stage = 'idle';
       status = error instanceof Error && error.name === 'AbortError' ? 'Pipeline stopped.' : error instanceof Error ? error.message : String(error);
     } finally {
@@ -538,9 +570,13 @@
     } catch { /* use defaults */ }
     refreshAll();
     refreshSavedCloneVoices();
+    runtimeTimer = setInterval(() => {
+      if (running && stageStartedAt) runtimeTick = performance.now();
+    }, 100);
   });
 
   onDestroy(() => {
+    if (runtimeTimer) clearInterval(runtimeTimer);
     aborter?.abort();
     if (recorder?.state === 'recording') recorder.stop();
     recordingStream?.getTracks().forEach((track) => track.stop());
@@ -557,8 +593,13 @@
 
 <section class="pipeline-steps" aria-label="Pipeline progress">
   {#each pipelineSteps as item, index}
+    {@const elapsed = stageRuntime(item[0], runtimeTick)}
     <div class:active={stage === item[0]} class:complete={stage === 'done' || pipelineSteps.findIndex((entry) => entry[0] === stage) > index}>
-      <span>{index + 1}</span><strong>{item[1]}</strong>
+      <span>{index + 1}</span>
+      <div>
+        <strong>{item[1]}</strong>
+        {#if elapsed !== undefined}<small>{formatStageRuntime(elapsed)}</small>{/if}
+      </div>
     </div>
   {/each}
 </section>
