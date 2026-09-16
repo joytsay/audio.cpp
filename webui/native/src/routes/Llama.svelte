@@ -22,8 +22,9 @@
   $: downloadUrl = `https://huggingface.co/${repo.trim() || '<owner/repository>'}/resolve/main/${encodeURIComponent(ggufFile.trim() || '<model.gguf>')}?download=true`;
 
   function save() {
+    localStorage.setItem('audiocpp.llama.systemPrompt', systemPrompt);
     localStorage.setItem('audiocpp.llama.settings', JSON.stringify({
-      model, systemPrompt, temperature, maxTokens, repo, quant, ggufFile
+      model, temperature, maxTokens, repo, quant, ggufFile
     }));
   }
 
@@ -163,7 +164,7 @@
     try {
       const saved = JSON.parse(localStorage.getItem('audiocpp.llama.settings') || '{}');
       model = saved.model || model;
-      systemPrompt = localStorage.getItem('audiocpp.llama.systemPrompt') || saved.systemPrompt || systemPrompt;
+      systemPrompt = localStorage.getItem('audiocpp.llama.systemPrompt') || systemPrompt;
       temperature = Number(saved.temperature ?? temperature);
       maxTokens = Number(saved.maxTokens ?? maxTokens);
       repo = saved.repo || repo;
@@ -214,8 +215,8 @@
   </section>
 
   <section class="panel page-panel">
-    <div class="section-title"><div><span>02 · INSTRUCT</span><h2>System prompt</h2></div></div>
-    <label>System instructions
+    <div class="section-title"><div><span>02 · INSTRUCT</span><h2>System prompt (prompt.csv)</h2></div></div>
+    <label>System instructions from prompt.csv
       <textarea bind:value={systemPrompt} rows="8" on:change={save}></textarea>
     </label>
     <div class="prompt-actions"><button on:click={saveSystemPromptCsv}>Save CSV</button></div>

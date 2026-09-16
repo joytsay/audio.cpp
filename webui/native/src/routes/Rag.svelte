@@ -77,10 +77,10 @@
     answer = '';
     llmInputPreview = '';
     try {
-      status = `Running GraphRAG ${mode} search…`;
+      status = `Running RAG ${mode} search…`;
       result = await graphSearch(audioBaseUrl, query.trim(), mode, topK);
       const context = graphContext(result);
-      if (!context) throw new Error('GraphRAG returned no relevant knowledge.');
+      if (!context) throw new Error('RAG returned no relevant knowledge.');
       const exampleOutput = matchedExampleOutput(result, query.trim());
       const messages: ChatMessage[] = [
         {
@@ -106,7 +106,7 @@
         })
       });
       answer = exampleOutput || chatText(response);
-      status = exampleOutput ? 'GraphRAG response complete · matched normalization example.' : 'GraphRAG response complete.';
+      status = exampleOutput ? 'RAG response complete · matched normalization example.' : 'RAG response complete.';
     } catch (error) {
       status = error instanceof Error ? error.message : String(error);
     } finally {
@@ -124,7 +124,7 @@
 
 <section class="page-head">
   <p class="eyebrow">KNOWLEDGE RETRIEVAL</p>
-  <h1>GraphRAG</h1>
+  <h1>RAG</h1>
   <p>Search the local semiconductor knowledge graph and generate a source-grounded response.</p>
 </section>
 
@@ -154,7 +154,7 @@
       <label class="llm-input-preview">LLM input<textarea readonly rows="14" value={llmInputPreview}></textarea></label>
     {/if}
     {#if answer}<article class="pipeline-message assistant"><span>LLM</span><p>{answer}</p></article>{/if}
-    {#if !result && !answer}<div class="empty-output"><div class="wave">⌘</div><p>GraphRAG context and citations will appear here.</p></div>{/if}
+    {#if !result && !answer}<div class="empty-output"><div class="wave">⌘</div><p>RAG context and citations will appear here.</p></div>{/if}
   </section>
 </div>
 
@@ -163,7 +163,7 @@
     <div><span>KNOWLEDGE</span><h2>Markdown editor</h2></div>
     <button disabled={Boolean(savingKnowledge)} on:click={refreshKnowledge}>Refresh files</button>
   </div>
-  <p class="field-help">Expand a document to edit it. Saving updates the Markdown file and the running GraphRAG index.</p>
+    <p class="field-help">Expand a document to edit it. Saving updates the Markdown file and the running RAG index.</p>
   <div class="knowledge-accordion">
     {#each knowledgeFiles as file (file.path)}
       <details>

@@ -90,7 +90,7 @@
   $: pipelineSteps = [
     ...(useDiarization ? [['diarization', 'Diarization']] : []),
     ['stt', 'Speech to text'],
-    ...(promptMode === 'graphrag' && useRag ? [['rag', 'GraphRAG']] : []),
+    ...(promptMode === 'graphrag' && useRag ? [['rag', 'RAG']] : []),
     ...(useLlm ? [['llm', 'Language model']] : []),
     ...(useTts ? [['tts', 'Text to speech']] : [])
   ];
@@ -433,7 +433,7 @@
         const ragResult = await graphSearch(audioBaseUrl, transcript, 'local', 5, aborter.signal);
         ragText = graphContext(ragResult);
         ragSources = graphCitations(ragResult);
-        if (!ragText) throw new Error('GraphRAG returned no relevant knowledge.');
+        if (!ragText) throw new Error('RAG returned no relevant knowledge.');
         exampleOutput = matchedExampleOutput(ragResult, transcript);
         const knowledgeSystemPrompt = await currentKnowledgeSystemPrompt(aborter.signal);
         llmSystemPrompt = `${knowledgeSystemPrompt.trim()}\n\n# 檢索知識\n\n以下內容是本次正規化的權威參考資料。必須套用明確命中的「左側詞 => 右側詞」。若最高相關結果是與使用者相同話語的完整「輸入／輸出」範例，即使 STT 含有重複、標點、語助詞、漏字或近音誤字，也必須只輸出該範例的「輸出：」內容。不要輸出來源、分數、解釋或範例說明。\n\n${ragText}`;
@@ -529,7 +529,7 @@
 
 <section class="page-head pipeline-head">
   <p class="eyebrow">VOICE AGENT PIPELINE</p>
-  <h1>Diar → STT → {promptMode === 'graphrag' && useRag ? 'GraphRAG → ' : ''}{useLlm ? 'LLM → ' : ''}{useTts ? 'TTS' : 'Text result'}</h1>
+  <h1>Diar → STT → RAG → LLM → TTS</h1>
   <p>A Python-free voice round trip using audio.cpp, llama.cpp, and this Svelte interface.</p>
 </section>
 
@@ -594,8 +594,8 @@
       <div><button on:click={() => sourceInput?.click()}>Choose audio</button><button class:danger={recording} on:click={toggleRecording}>{recording ? 'Stop recording' : 'Record microphone'}</button></div>
       {#if inputUrl}<audio class="pipeline-input-audio" controls src={inputUrl}></audio>{/if}
     </div>
-    <label>LLM grounding<select bind:value={promptMode} on:change={save}><option value="system">System prompt (prompt.csv)</option><option value="graphrag">GraphRAG (knowledge/)</option></select></label>
-    <label class="toggle pipeline-toggle"><input type="checkbox" bind:checked={useRag} disabled={promptMode !== 'graphrag'} on:change={save} /><span></span>Run GraphRAG retrieval</label>
+    <label>LLM grounding<select bind:value={promptMode} on:change={save}><option value="system">System prompt (prompt.csv)</option><option value="graphrag">RAG (knowledge/)</option></select></label>
+    <label class="toggle pipeline-toggle"><input type="checkbox" bind:checked={useRag} disabled={promptMode !== 'graphrag'} on:change={save} /><span></span>Run RAG retrieval</label>
     {#if promptMode === 'system' || !useRag}
       <label>System prompt (prompt.csv)<textarea bind:value={systemPrompt} rows="6"></textarea></label>
       <div class="prompt-actions"><button on:click={saveSystemPromptCsv}>Save CSV</button></div>
@@ -618,7 +618,7 @@
     {#if diarizationText}<article class="pipeline-message diarization"><span>DIARIZATION</span><p>{diarizationText}</p></article>{/if}
     {#if sttText}<article class="pipeline-message user"><span>STT</span><p>{sttText}</p></article>{/if}
     {#if ragText}
-      <article class="pipeline-message diarization"><span>GRAPHRAG</span><p>{ragText}</p></article>
+      <article class="pipeline-message diarization"><span>RAG</span><p>{ragText}</p></article>
       {#if ragSources.length}<div class="rag-citations"><strong>Sources</strong>{#each ragSources as citation}<code>{citation}</code>{/each}</div>{/if}
     {/if}
     {#if llmInputPreview}
