@@ -1143,6 +1143,9 @@ HttpResponse ServerState::handle(const HttpRequest & request) {
     else if (request.method == "POST" && request.path == "/v1/ui/knowledge") {
         response = handle_knowledge_save(request.body);
     }
+    else if (request.method == "POST" && request.path == "/v1/ui/prompt") {
+        response = handle_prompt_save(request.body);
+    }
     else if (request.method == "POST" && request.path == "/v1/rag/initialize") {
         response = handle_rag_request(request.body, "initialize");
     }
@@ -1545,6 +1548,40 @@ HttpResponse ServerState::handle_knowledge_save(const std::string & body_text) {
     return json_response(
         "{\"path\":" + json_quote(relative) +
         ",\"uri\":" + json_quote(destination.string()) +
+        ",\"content\":" + json_quote(content) + "}");
+}
+
+HttpResponse ServerState::handle_prompt_save(const std::string & body_text) {
+    if (!config_.ui_management) {
+        return error_response(403, "prompt editing is disabled", "forbidden");
+    }
+    constexpr size_t kMaxPromptBytes = size_t{2} * 1024 * 1024;
+    const auto body = engine::io::json::parse(body_text);
+    const auto content = engine::io::json::require_string(body, "content");
+    if (content.size() > kMaxPromptBytes) {
+        return error_response(413, "prompt file exceeds the 2 MiB limit", "invalid_request_error");
+    }
+    const auto base = repository_root_.empty() ? request_base_ : repository_root_;
+    const auto destination = std::filesystem::weakly_canonical(base / "prompt.csv");
+    if (!std::filesystem::is_regular_file(destination)) {
+        return error_response(404, "prompt.csv does not exist", "not_found");
+    }
+    auto temporary = destination;
+    temporary += ".audiocpp-" + std::to_string(next_upload_id_.fetch_add(1)) + ".tmp";
+    {
+        std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
+        if (!output) throw std::runtime_error("could not create temporary prompt file");
+        output.write(content.data(), static_cast<std::streamsize>(content.size()));
+        if (!output) throw std::runtime_error("could not write prompt file");
+    }
+    std::error_code rename_ec;
+    std::filesystem::rename(temporary, destination, rename_ec);
+    if (rename_ec) {
+        std::filesystem::remove(temporary);
+        throw std::runtime_error("could not replace prompt file: " + rename_ec.message());
+    }
+    return json_response(
+        "{\"path\":\"prompt.csv\",\"uri\":" + json_quote(destination.string()) +
         ",\"content\":" + json_quote(content) + "}");
 }
 

@@ -106,17 +106,18 @@
     }));
   }
 
-  function saveSystemPromptCsv() {
-    localStorage.setItem('audiocpp.pipeline.systemPrompt', systemPrompt);
-    const url = URL.createObjectURL(new Blob([systemPrompt], { type: 'text/csv;charset=utf-8' }));
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = 'prompt.csv';
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    URL.revokeObjectURL(url);
-    status = 'System prompt saved and prompt.csv downloaded.';
+  async function saveSystemPromptCsv() {
+    try {
+      const saved = await endpointJson<{ content?: string }>(audioBaseUrl, 'ui/prompt', {
+        method: 'POST',
+        body: JSON.stringify({ content: systemPrompt })
+      });
+      systemPrompt = saved.content ?? systemPrompt;
+      save();
+      status = 'System prompt saved to prompt.csv.';
+    } catch (error) {
+      status = error instanceof Error ? error.message : String(error);
+    }
   }
 
   function resolvedModelPath(path: string, modelsRoot: string): string {

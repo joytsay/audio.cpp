@@ -40,10 +40,12 @@ services:
       LLAMA_CTX_SIZE: 4096
       LLAMA_GPU_LAYERS: 99
     volumes:
-      - audio-models:/app/models
-      - llama-models:/app/llama-models
-      - rag-data:/app/rag-data
+      # Keep downloaded models, RAG index, knowledge, and prompt edits on the host.
+      - ../../../audio-models:/app/models
+      - ../../../llama-models:/app/llama-models
+      - ../../../rag-data:/app/rag-data
       - ../../../knowledge:/app/knowledge
+      - ../../../prompt.csv:/app/prompt.csv
       # Runtime-only routing changes must not require recompiling the native binaries.
       - ../../../.devops/all-in-one-entrypoint.sh:/app/all-in-one-entrypoint.sh:ro
       - ../../../.devops/all-in-one-server.json:/app/all-in-one-server.json:ro
@@ -55,8 +57,3 @@ services:
       timeout: 5s
       retries: 6
       start_period: 30s
-
-volumes:
-  audio-models:
-  llama-models:
-  rag-data:

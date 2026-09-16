@@ -106,6 +106,7 @@ private:
     HttpResponse handle_ui_upload(const HttpRequest & request);
     HttpResponse handle_knowledge_list() const;
     HttpResponse handle_knowledge_save(const std::string & body_text);
+    HttpResponse handle_prompt_save(const std::string & body_text);
     std::filesystem::path knowledge_root() const;
     std::filesystem::path resolve_knowledge_file(const std::string & relative_path) const;
 #if defined(AUDIOCPP_HAS_NATIVE_MODEL_MANAGER)

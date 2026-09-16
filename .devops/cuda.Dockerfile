@@ -234,10 +234,11 @@ COPY --from=rag-build /src/ragcpp /app/ragcpp
 COPY .devops/all-in-one-entrypoint.sh /app/all-in-one-entrypoint.sh
 COPY .devops/all-in-one-server.json /app/all-in-one-server.json
 COPY knowledge/ /app/knowledge/
+COPY prompt.csv /app/prompt.csv
 
 RUN chmod +x /app/all-in-one-entrypoint.sh && \
     mkdir -p /app/models /app/llama-models /app/rag-data && \
-    chown -R ubuntu:ubuntu /app/models /app/llama-models /app/rag-data /app/knowledge
+    chown -R ubuntu:ubuntu /app/models /app/llama-models /app/rag-data /app/knowledge /app/prompt.csv
 
 USER ubuntu
 

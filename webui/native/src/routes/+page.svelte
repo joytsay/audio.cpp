@@ -2059,15 +2059,15 @@
   });
 </script>
 
-<svelte:head><title>audio.cpp · Native Studio</title></svelte:head>
+<svelte:head><title>GeoVision IVR · Interactive Voice Response</title></svelte:head>
 <svelte:window on:keydown={handleShortcut} />
 
 <header class="topbar">
   <div class="brand">
     <div class="brand-logo">{@html logoCloud}</div>
     <div>
-      <strong>audio.cpp</strong>
-      <span>{tr('app.nativeStudio')}</span>
+      <strong>GeoVision IVR</strong>
+      <span>Interactive Voice Response.</span>
     </div>
   </div>
   <nav aria-label={tr('nav.primary')}>

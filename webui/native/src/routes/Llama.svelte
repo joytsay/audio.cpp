@@ -4,6 +4,7 @@
   import systemPromt from '../../../../prompt.csv?raw';
 
   let baseUrl = '';
+  let promptBaseUrl = '';
   let model = '';
   let models: OpenAIModel[] = [];
   let systemPrompt = systemPromt.trim();
@@ -28,18 +29,18 @@
     }));
   }
 
-  function saveSystemPromptCsv() {
-    localStorage.setItem('audiocpp.llama.systemPrompt', systemPrompt);
-    const url = URL.createObjectURL(new Blob([systemPrompt], { type: 'text/csv;charset=utf-8' }));
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = 'prompt.csv';
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    URL.revokeObjectURL(url);
-    save();
-    status = 'System prompt saved and prompt.csv downloaded.';
+  async function saveSystemPromptCsv() {
+    try {
+      const saved = await endpointJson<{ content?: string }>(promptBaseUrl, 'ui/prompt', {
+        method: 'POST',
+        body: JSON.stringify({ content: systemPrompt })
+      });
+      systemPrompt = saved.content ?? systemPrompt;
+      save();
+      status = 'System prompt saved to prompt.csv.';
+    } catch (error) {
+      status = error instanceof Error ? error.message : String(error);
+    }
   }
 
   async function refreshModels() {
@@ -161,6 +162,7 @@
 
   onMount(() => {
     baseUrl = siblingWorkerEndpoint(8082);
+    promptBaseUrl = new URL('v1/', document.baseURI).toString().replace(/\/$/, '');
     try {
       const saved = JSON.parse(localStorage.getItem('audiocpp.llama.settings') || '{}');
       model = saved.model || model;
