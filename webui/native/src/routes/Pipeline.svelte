@@ -44,6 +44,9 @@
   let systemPrompt = systemPromt.trim();
   let promptMode: PromptMode = 'system';
   let useDiarization = true;
+  let useRag = true;
+  let useLlm = true;
+  let useTts = true;
   let temperature = 0.2;
   let maxTokens = 512;
   let sourceFile: File | null = null;
@@ -84,15 +87,22 @@
     /^qwen3-tts(?:-|$)/i.test(selectedTtsModel?.modelId || '');
   $: supportsVoiceClone = selectedTtsModel?.task === 'clon' ||
     (selectedTtsIsQwen && !/custom/i.test(selectedTtsModel?.modelId || ''));
-  $: pipelineSteps = promptMode === 'graphrag'
-    ? [['diarization', 'Diarization'], ['stt', 'Speech to text'], ['rag', 'GraphRAG'], ['llm', 'Language model'], ['tts', 'Text to speech']]
-    : [['diarization', 'Diarization'], ['stt', 'Speech to text'], ['llm', 'Language model'], ['tts', 'Text to speech']];
-  $: canRun = Boolean(sourceFile && sttModel && llmModel && ttsModel && (!useDiarization || diarizationModel));
+  $: pipelineSteps = [
+    ...(useDiarization ? [['diarization', 'Diarization']] : []),
+    ['stt', 'Speech to text'],
+    ...(promptMode === 'graphrag' && useRag ? [['rag', 'GraphRAG']] : []),
+    ...(useLlm ? [['llm', 'Language model']] : []),
+    ...(useTts ? [['tts', 'Text to speech']] : [])
+  ];
+  $: canRun = Boolean(sourceFile && sttModel &&
+    (!useDiarization || diarizationModel) &&
+    (!useLlm || llmModel) &&
+    (!useTts || ttsModel));
 
   function save() {
     localStorage.setItem('audiocpp.pipeline.settings', JSON.stringify({
       diarizationModel, sttModel, llmModel, ttsModel,
-      voice, language, promptMode, useDiarization, temperature, maxTokens
+      voice, language, promptMode, useDiarization, useRag, useLlm, useTts, temperature, maxTokens
     }));
   }
 
@@ -418,7 +428,7 @@
 
       let llmSystemPrompt = systemPrompt.trim();
       let exampleOutput = '';
-      if (promptMode === 'graphrag') {
+      if (promptMode === 'graphrag' && useRag) {
         step('rag', 'Retrieving semiconductor knowledge…');
         const ragResult = await graphSearch(audioBaseUrl, transcript, 'local', 5, aborter.signal);
         ragText = graphContext(ragResult);
@@ -429,42 +439,51 @@
         llmSystemPrompt = `${knowledgeSystemPrompt.trim()}\n\n# 檢索知識\n\n以下內容是本次正規化的權威參考資料。必須套用明確命中的「左側詞 => 右側詞」。若最高相關結果是與使用者相同話語的完整「輸入／輸出」範例，即使 STT 含有重複、標點、語助詞、漏字或近音誤字，也必須只輸出該範例的「輸出：」內容。不要輸出來源、分數、解釋或範例說明。\n\n${ragText}`;
       }
 
-      step('llm', 'Generating an instruct-model response…');
       const messages: ChatMessage[] = [];
       if (llmSystemPrompt) messages.push({ role: 'system', content: llmSystemPrompt });
       messages.push({ role: 'user', content: transcript });
       llmInputPreview = formatChatMessages(messages);
-      const llm = await endpointJson<any>(llmBaseUrl, 'chat/completions', {
-        method: 'POST',
-        body: JSON.stringify({ model: llmModel, messages, temperature, max_tokens: maxTokens, stream: false })
-      }, aborter.signal);
-      llmResponse = exampleOutput || chatText(llm);
-
-      // Jetson uses unified memory. Release the LLM worker before the TTS
-      // worker creates its CUDA/cuBLAS context for this sequential pipeline.
-      try {
-        await fetch(routerEndpoint(llmBaseUrl, 'models/unload'), {
+      if (useLlm) {
+        step('llm', 'Generating an instruct-model response…');
+        const llm = await endpointJson<any>(llmBaseUrl, 'chat/completions', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ model: llmModel }),
+          body: JSON.stringify({ model: llmModel, messages, temperature, max_tokens: maxTokens, stream: false }),
           signal: aborter.signal
-        });
-      } catch { /* TTS can still proceed if this llama.cpp version cannot unload */ }
+        }, aborter.signal);
+        llmResponse = exampleOutput || chatText(llm);
 
-      step('tts', 'Synthesizing the response…');
-      const voiceModel = await ensureAudioModel(ttsModel, aborter.signal);
-      const speechBody: Record<string, unknown> = { model: voiceModel.modelId, input: llmResponse, response_format: 'wav' };
-      if (cloneVoiceFile && supportsVoiceClone) {
-        if (voiceModel.family === 'qwen3_tts' && !cloneReferenceText.trim()) {
-          throw new Error('Qwen3-TTS voice cloning requires the matching reference transcript.');
-        }
-        speechBody.voice_ref = await uploadFile(cloneVoiceFile, aborter.signal);
-        if (cloneReferenceText.trim()) speechBody.reference_text = cloneReferenceText.trim();
-      } else if (voice) {
-        speechBody.voice = voice;
+        // Jetson uses unified memory. Release the LLM worker before the TTS
+        // worker creates its CUDA/cuBLAS context for this sequential pipeline.
+        try {
+          await fetch(routerEndpoint(llmBaseUrl, 'models/unload'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ model: llmModel }),
+            signal: aborter.signal
+          });
+        } catch { /* TTS can still proceed if this llama.cpp version cannot unload */ }
+      } else {
+        // Preserve the exact STT result for an STT -> TTS pipeline.
+        llmResponse = transcript;
       }
-      const output = await endpointBlob(audioBaseUrl, 'audio/speech', speechBody, aborter.signal);
-      outputUrl = URL.createObjectURL(output);
+
+      if (useTts) {
+        step('tts', 'Synthesizing the response…');
+        const voiceModel = await ensureAudioModel(ttsModel, aborter.signal);
+        const speechBody: Record<string, unknown> = { model: voiceModel.modelId, input: llmResponse, response_format: 'wav' };
+        if (cloneVoiceFile && supportsVoiceClone) {
+          if (voiceModel.family === 'qwen3_tts' && !cloneReferenceText.trim()) {
+            throw new Error('Qwen3-TTS voice cloning requires the matching reference transcript.');
+          }
+          speechBody.voice_ref = await uploadFile(cloneVoiceFile, aborter.signal);
+          if (cloneReferenceText.trim()) speechBody.reference_text = cloneReferenceText.trim();
+        } else if (voice) {
+          speechBody.voice = voice;
+        }
+        const output = await endpointBlob(audioBaseUrl, 'audio/speech', speechBody, aborter.signal);
+        outputUrl = URL.createObjectURL(output);
+      }
       step('done', 'Pipeline complete.');
       save();
     } catch (error) {
@@ -489,6 +508,9 @@
       systemPrompt = localStorage.getItem('audiocpp.pipeline.systemPrompt') || systemPrompt;
       promptMode = saved.promptMode === 'graphrag' ? 'graphrag' : 'system';
       useDiarization = saved.useDiarization ?? useDiarization;
+      useRag = saved.useRag ?? useRag;
+      useLlm = saved.useLlm ?? useLlm;
+      useTts = saved.useTts ?? useTts;
       temperature = Number(saved.temperature ?? temperature);
       maxTokens = Number(saved.maxTokens ?? maxTokens);
     } catch { /* use defaults */ }
@@ -507,7 +529,7 @@
 
 <section class="page-head pipeline-head">
   <p class="eyebrow">VOICE AGENT PIPELINE</p>
-  <h1>Diar → STT → {promptMode === 'graphrag' ? 'GraphRAG → ' : ''}LLM → TTS</h1>
+  <h1>Diar → STT → {promptMode === 'graphrag' && useRag ? 'GraphRAG → ' : ''}{useLlm ? 'LLM → ' : ''}{useTts ? 'TTS' : 'Text result'}</h1>
   <p>A Python-free voice round trip using audio.cpp, llama.cpp, and this Svelte interface.</p>
 </section>
 
@@ -528,13 +550,19 @@
       <label>Diarization model<select bind:value={diarizationModel} on:change={save}>{#each diarizationModels as entry}<option value={entry.selectionId}>{entry.label}</option>{/each}</select></label>
     {/if}
     <label>STT model<select bind:value={sttModel} on:change={save}>{#each sttModels as entry}<option value={entry.selectionId}>{entry.label}</option>{/each}</select></label>
-    <label>LLM instruct model<select bind:value={llmModel} on:change={save}>{#if !llmModels.length && llmModel}<option value={llmModel}>{llmModel}</option>{/if}{#each llmModels as entry}<option value={entry.id}>{entry.id}</option>{/each}</select></label>
-    <label>TTS model<select bind:value={ttsModel} on:change={() => { refreshVoices(); save(); }}>{#each ttsModels as entry}<option value={entry.selectionId}>{entry.label}</option>{/each}</select></label>
-    <div class="field-grid">
-      <label>Voice<select bind:value={voice} on:change={() => { if (voice) clearCloneVoice(); save(); }}><option value="">Model default</option>{#each voices as item}<option value={item}>{item}</option>{/each}</select></label>
-      <label>STT language<input bind:value={language} placeholder="auto" on:change={save} /></label>
-    </div>
-    {#if supportsVoiceClone}
+    <label>STT language<input bind:value={language} placeholder="auto" on:change={save} /></label>
+    <label class="toggle pipeline-toggle"><input type="checkbox" bind:checked={useLlm} on:change={save} /><span></span>Run LLM instruct model</label>
+    {#if useLlm}
+      <label>LLM instruct model<select bind:value={llmModel} on:change={save}>{#if !llmModels.length && llmModel}<option value={llmModel}>{llmModel}</option>{/if}{#each llmModels as entry}<option value={entry.id}>{entry.id}</option>{/each}</select></label>
+    {/if}
+    <label class="toggle pipeline-toggle"><input type="checkbox" bind:checked={useTts} on:change={save} /><span></span>Run text to speech</label>
+    {#if useTts}
+      <label>TTS model<select bind:value={ttsModel} on:change={() => { refreshVoices(); save(); }}>{#each ttsModels as entry}<option value={entry.selectionId}>{entry.label}</option>{/each}</select></label>
+      <div class="field-grid">
+        <label>Voice<select bind:value={voice} on:change={() => { if (voice) clearCloneVoice(); save(); }}><option value="">Model default</option>{#each voices as item}<option value={item}>{item}</option>{/each}</select></label>
+      </div>
+    {/if}
+    {#if useTts && supportsVoiceClone}
       <div class="pipeline-clone-voice">
         <div class="section-title"><div><span>VOICE CLONE</span><h2>Reference voice</h2></div></div>
         <input class="hidden-file" bind:this={cloneVoiceInput} type="file" accept="audio/*" on:change={(event) => chooseCloneVoice(event.currentTarget.files?.[0] || null)} />
@@ -567,7 +595,8 @@
       {#if inputUrl}<audio class="pipeline-input-audio" controls src={inputUrl}></audio>{/if}
     </div>
     <label>LLM grounding<select bind:value={promptMode} on:change={save}><option value="system">System prompt (prompt.csv)</option><option value="graphrag">GraphRAG (knowledge/)</option></select></label>
-    {#if promptMode === 'system'}
+    <label class="toggle pipeline-toggle"><input type="checkbox" bind:checked={useRag} disabled={promptMode !== 'graphrag'} on:change={save} /><span></span>Run GraphRAG retrieval</label>
+    {#if promptMode === 'system' || !useRag}
       <label>System prompt (prompt.csv)<textarea bind:value={systemPrompt} rows="6"></textarea></label>
       <div class="prompt-actions"><button on:click={saveSystemPromptCsv}>Save CSV</button></div>
     {:else}
@@ -595,7 +624,7 @@
     {#if llmInputPreview}
       <label class="llm-input-preview">LLM input<textarea readonly rows="14" value={llmInputPreview}></textarea></label>
     {/if}
-    {#if llmResponse}<article class="pipeline-message assistant"><span>LLM</span><p>{llmResponse}</p></article>{/if}
+    {#if llmResponse}<article class="pipeline-message assistant"><span>{useLlm ? 'LLM' : 'STT · LLM BYPASSED'}</span><p>{llmResponse}</p></article>{/if}
     {#if outputUrl}
       <div class="pipeline-audio-result">
         <span>TTS</span>
