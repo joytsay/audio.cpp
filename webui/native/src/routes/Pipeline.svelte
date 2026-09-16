@@ -75,7 +75,7 @@
   let diarization: any = null;
   let outputUrl = '';
   let aborter: AbortController | null = null;
-  const defaultCloneVoiceName = 'wangSG';
+  const defaultCloneVoiceName = 'lingCL';
   type TimedStage = Exclude<Stage, 'idle' | 'done'>;
   let stageRuntimes: Partial<Record<TimedStage, number>> = {};
   let stageStartedAt = 0;
@@ -95,7 +95,10 @@
   // clone controls are never hidden merely because that metadata is absent.
   $: selectedTtsIsQwen = selectedTtsModel?.family === 'qwen3_tts' ||
     /^qwen3[-_]tts(?:[-_]|$)/i.test(selectedTtsModel?.modelId || '');
+  $: selectedTtsSupportsReference = ['voxcpm1', 'audio8_tts'].includes(
+    selectedTtsModel?.family || '');
   $: supportsVoiceClone = selectedTtsModel?.task === 'clon' ||
+    selectedTtsSupportsReference ||
     (selectedTtsIsQwen && !/custom/i.test(selectedTtsModel?.modelId || ''));
   $: pipelineSteps = [
     ...(useDiarization ? [['diarization', 'Diarization']] : []),
