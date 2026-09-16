@@ -1,11 +1,12 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
   import { chatText, endpointJson, endpointRouterModels, routerEndpoint, siblingWorkerEndpoint, type OpenAIModel } from '$lib/openai';
+  import systemPromt from '../../../../prompt.csv?raw';
 
   let baseUrl = '';
   let model = '';
   let models: OpenAIModel[] = [];
-  let systemPrompt = 'You are a helpful local assistant. Give concise, accurate answers.';
+  let systemPrompt = systemPromt.trim();
   let prompt = '';
   let temperature = 0.2;
   let maxTokens = 1024;
@@ -24,6 +25,20 @@
     localStorage.setItem('audiocpp.llama.settings', JSON.stringify({
       model, systemPrompt, temperature, maxTokens, repo, quant, ggufFile
     }));
+  }
+
+  function saveSystemPromptCsv() {
+    localStorage.setItem('audiocpp.llama.systemPrompt', systemPrompt);
+    const url = URL.createObjectURL(new Blob([systemPrompt], { type: 'text/csv;charset=utf-8' }));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'prompt.csv';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    save();
+    status = 'System prompt saved and prompt.csv downloaded.';
   }
 
   async function refreshModels() {
@@ -148,7 +163,7 @@
     try {
       const saved = JSON.parse(localStorage.getItem('audiocpp.llama.settings') || '{}');
       model = saved.model || model;
-      systemPrompt = saved.systemPrompt || systemPrompt;
+      systemPrompt = localStorage.getItem('audiocpp.llama.systemPrompt') || saved.systemPrompt || systemPrompt;
       temperature = Number(saved.temperature ?? temperature);
       maxTokens = Number(saved.maxTokens ?? maxTokens);
       repo = saved.repo || repo;
@@ -203,6 +218,7 @@
     <label>System instructions
       <textarea bind:value={systemPrompt} rows="8" on:change={save}></textarea>
     </label>
+    <div class="prompt-actions"><button on:click={saveSystemPromptCsv}>Save CSV</button></div>
     <div class="field-grid compact-fields">
       <label>Temperature<input type="number" min="0" max="2" step="0.05" bind:value={temperature} /></label>
       <label>Max tokens<input type="number" min="1" max="32768" step="1" bind:value={maxTokens} /></label>
