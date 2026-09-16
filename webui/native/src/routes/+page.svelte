@@ -48,6 +48,7 @@
     ServerHealth
   } from '$lib/types';
   import {
+    createLocalId,
     deleteVoice as deleteSavedVoice,
     listVoices,
     saveVoice,
@@ -101,6 +102,7 @@
   let chunkBudget = defaultChunkBudget(selected?.family || '');
   let savedVoices: SavedVoice[] = [];
   let savedVoiceId = '';
+  let savingVoice = false;
   let voiceName = '';
   let recorder: MediaRecorder | null = null;
   let recordingTarget: 'source' | 'voice' | null = null;
@@ -1436,20 +1438,35 @@
       status = 'Choose or record a voice reference first.';
       return;
     }
-    const name = voiceName.trim() || voiceFile.name.replace(/\.[^.]+$/, '');
-    const wav = await browserDecodeToWav(voiceFile);
-    const id = crypto.randomUUID();
-    await saveVoice({
-      id,
-      name,
-      transcript: referenceText,
-      audio: wav,
-      createdAt: Date.now()
-    });
-    await refreshVoices();
-    savedVoiceId = id;
-    voiceName = name;
-    status = `Saved voice “${name}” in this browser.`;
+    if (savingVoice) return;
+    savingVoice = true;
+    warningStatus = '';
+    errorStatus = '';
+    try {
+      const name = voiceName.trim() || voiceFile.name.replace(/\.[^.]+$/, '') || 'Saved voice';
+      status = `Saving voice “${name}”…`;
+      const wav = await browserDecodeToWav(voiceFile);
+      const id = createLocalId();
+      await saveVoice({
+        id,
+        name,
+        transcript: referenceText.trim(),
+        audio: wav,
+        createdAt: Date.now()
+      });
+      await refreshVoices();
+      savedVoiceId = id;
+      voiceName = name;
+      status = `Saved voice “${name}” in this browser.`;
+      log(status);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      status = `Could not save voice: ${message}`;
+      errorStatus = status;
+      log(status);
+    } finally {
+      savingVoice = false;
+    }
   }
 
   function chooseSavedVoice(id: string) {
@@ -2372,7 +2389,7 @@
               <input id="voice-name" bind:value={voiceName} placeholder={tr('voice.namePlaceholder')} />
             </div>
             <div class="library-actions">
-              <button type="button" disabled={!voiceFile} on:click={storeCurrentVoice}>{tr('voice.save')}</button>
+              <button type="button" disabled={!voiceFile || savingVoice} on:click={storeCurrentVoice}>{savingVoice ? 'Saving…' : tr('voice.save')}</button>
               <button class="danger" type="button" disabled={!savedVoiceId}
                 on:click={removeCurrentVoice}>{tr('common.delete')}</button>
             </div>

@@ -353,6 +353,10 @@ pre { background: var(--code-bg); border: 1px solid var(--line); border-radius: 
 .pipeline-grid { display: grid; grid-template-columns: minmax(280px, .75fr) minmax(340px, 1fr) minmax(340px, 1fr); gap: 12px; align-items: start; }
 .pipeline-config, .pipeline-input, .pipeline-results { min-width: 0; }
 .pipeline-toggle { display: flex!important; margin: 14px 0 5px; align-items: center; }
+.pipeline-clone-voice { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); }
+.pipeline-clone-voice .section-title { margin-bottom: 7px; }
+.pipeline-voice-library { grid-template-columns: minmax(0, 1fr); }
+.pipeline-voice-library .library-actions { padding-bottom: 0; }
 .audio-drop { display: grid; min-height: 128px; padding: 16px; place-content: center; gap: 5px; border: 1px dashed var(--control-border); border-radius: 10px; background: var(--code-bg); text-align: center; }
 .audio-drop > span { color: var(--muted); font-size: 10px; }
 .audio-drop > div { display: flex; justify-content: center; gap: 7px; margin-top: 9px; }

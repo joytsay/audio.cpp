@@ -1,10 +1,13 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
+  import { uploadFile } from '$lib/api';
   import { browserDecodeToWav } from '$lib/audio';
   import { catalog } from '$lib/catalog';
+  import MediaPreview from '$lib/MediaPreview.svelte';
   import { apiEndpoint, chatText, endpointBlob, endpointJson, endpointModels, endpointRouterModels, formatChatMessages, routerEndpoint, siblingWorkerEndpoint, type ChatMessage, type OpenAIModel } from '$lib/openai';
   import { graphCitations, graphContext, graphSearch, matchedExampleOutput } from '$lib/rag';
   import type { CatalogEntry, InstallPackageChoice, StringMap } from '$lib/types';
+  import { createLocalId, deleteVoice as deleteSavedVoice, listVoices, saveVoice, type SavedVoice } from '$lib/voices';
   import bundledKnowledgeSystemPrompt from '../../../../knowledge/system-prompt.md?raw';
   import systemPromt from '../../../../prompt.csv?raw';
 
@@ -46,6 +49,13 @@
   let sourceFile: File | null = null;
   let inputUrl = '';
   let sourceInput: HTMLInputElement | null = null;
+  let cloneVoiceInput: HTMLInputElement | null = null;
+  let cloneVoiceFile: File | null = null;
+  let cloneReferenceText = '';
+  let cloneVoiceName = '';
+  let savedCloneVoices: SavedVoice[] = [];
+  let savedCloneVoiceId = '';
+  let savingCloneVoice = false;
   let recorder: MediaRecorder | null = null;
   let recordingStream: MediaStream | null = null;
   let recording = false;
@@ -66,6 +76,14 @@
   $: diarizationModels = models.filter((entry) => entry.task === 'diar');
   $: sttModels = models.filter((entry) => ['asr', 'stt'].includes(entry.task || ''));
   $: ttsModels = models.filter((entry) => ['tts', 'clon'].includes(entry.task || ''));
+  $: selectedTtsModel = selectedAudioModel(ttsModel);
+  // A model loaded from server configuration may only expose its ID in an
+  // older cached model response. Recognize Qwen3-TTS by either source so the
+  // clone controls are never hidden merely because that metadata is absent.
+  $: selectedTtsIsQwen = selectedTtsModel?.family === 'qwen3_tts' ||
+    /^qwen3-tts(?:-|$)/i.test(selectedTtsModel?.modelId || '');
+  $: supportsVoiceClone = selectedTtsModel?.task === 'clon' ||
+    (selectedTtsIsQwen && !/custom/i.test(selectedTtsModel?.modelId || ''));
   $: pipelineSteps = promptMode === 'graphrag'
     ? [['diarization', 'Diarization'], ['stt', 'Speech to text'], ['rag', 'GraphRAG'], ['llm', 'Language model'], ['tts', 'Text to speech']]
     : [['diarization', 'Diarization'], ['stt', 'Speech to text'], ['llm', 'Language model'], ['tts', 'Text to speech']];
@@ -222,6 +240,78 @@
     }
   }
 
+  async function refreshSavedCloneVoices() {
+    try {
+      savedCloneVoices = await listVoices();
+    } catch (error) {
+      status = `Voice library unavailable: ${error instanceof Error ? error.message : String(error)}`;
+    }
+  }
+
+  function chooseCloneVoice(file: File | null) {
+    const changed = Boolean(file && cloneVoiceFile && cloneVoiceFile.name !== file.name);
+    cloneVoiceFile = file;
+    savedCloneVoiceId = '';
+    if (file) {
+      voice = '';
+      cloneVoiceName = file.name.replace(/\.[^.]+$/, '');
+      if (changed) cloneReferenceText = '';
+    }
+  }
+
+  function chooseSavedCloneVoice(id: string) {
+    savedCloneVoiceId = id;
+    const saved = savedCloneVoices.find((entry) => entry.id === id);
+    if (!saved) return;
+    voice = '';
+    cloneVoiceFile = new File([saved.audio], `${saved.name}.wav`, { type: 'audio/wav' });
+    cloneReferenceText = saved.transcript;
+    cloneVoiceName = saved.name;
+    if (cloneVoiceInput) cloneVoiceInput.value = '';
+    status = `Selected saved voice “${saved.name}”.`;
+  }
+
+  function clearCloneVoice() {
+    cloneVoiceFile = null;
+    cloneReferenceText = '';
+    cloneVoiceName = '';
+    savedCloneVoiceId = '';
+    if (cloneVoiceInput) cloneVoiceInput.value = '';
+  }
+
+  async function storeCloneVoice() {
+    if (!cloneVoiceFile || savingCloneVoice) return;
+    savingCloneVoice = true;
+    try {
+      const name = cloneVoiceName.trim() || cloneVoiceFile.name.replace(/\.[^.]+$/, '') || 'Saved voice';
+      status = `Saving voice “${name}”…`;
+      const audio = await browserDecodeToWav(cloneVoiceFile);
+      const id = createLocalId();
+      await saveVoice({ id, name, transcript: cloneReferenceText.trim(), audio, createdAt: Date.now() });
+      await refreshSavedCloneVoices();
+      savedCloneVoiceId = id;
+      cloneVoiceName = name;
+      status = `Saved voice “${name}” in this browser.`;
+    } catch (error) {
+      status = `Could not save voice: ${error instanceof Error ? error.message : String(error)}`;
+    } finally {
+      savingCloneVoice = false;
+    }
+  }
+
+  async function removeCloneVoice() {
+    if (!savedCloneVoiceId) return;
+    const saved = savedCloneVoices.find((entry) => entry.id === savedCloneVoiceId);
+    try {
+      await deleteSavedVoice(savedCloneVoiceId);
+      clearCloneVoice();
+      await refreshSavedCloneVoices();
+      status = `Deleted saved voice “${saved?.name || ''}”.`;
+    } catch (error) {
+      status = `Could not delete voice: ${error instanceof Error ? error.message : String(error)}`;
+    }
+  }
+
   function chooseFile(file: File | null) {
     if (inputUrl) URL.revokeObjectURL(inputUrl);
     sourceFile = file;
@@ -364,7 +454,15 @@
       step('tts', 'Synthesizing the response…');
       const voiceModel = await ensureAudioModel(ttsModel, aborter.signal);
       const speechBody: Record<string, unknown> = { model: voiceModel.modelId, input: llmResponse, response_format: 'wav' };
-      if (voice) speechBody.voice = voice;
+      if (cloneVoiceFile && supportsVoiceClone) {
+        if (voiceModel.family === 'qwen3_tts' && !cloneReferenceText.trim()) {
+          throw new Error('Qwen3-TTS voice cloning requires the matching reference transcript.');
+        }
+        speechBody.voice_ref = await uploadFile(cloneVoiceFile, aborter.signal);
+        if (cloneReferenceText.trim()) speechBody.reference_text = cloneReferenceText.trim();
+      } else if (voice) {
+        speechBody.voice = voice;
+      }
       const output = await endpointBlob(audioBaseUrl, 'audio/speech', speechBody, aborter.signal);
       outputUrl = URL.createObjectURL(output);
       step('done', 'Pipeline complete.');
@@ -395,6 +493,7 @@
       maxTokens = Number(saved.maxTokens ?? maxTokens);
     } catch { /* use defaults */ }
     refreshAll();
+    refreshSavedCloneVoices();
   });
 
   onDestroy(() => {
@@ -432,9 +531,30 @@
     <label>LLM instruct model<select bind:value={llmModel} on:change={save}>{#if !llmModels.length && llmModel}<option value={llmModel}>{llmModel}</option>{/if}{#each llmModels as entry}<option value={entry.id}>{entry.id}</option>{/each}</select></label>
     <label>TTS model<select bind:value={ttsModel} on:change={() => { refreshVoices(); save(); }}>{#each ttsModels as entry}<option value={entry.selectionId}>{entry.label}</option>{/each}</select></label>
     <div class="field-grid">
-      <label>Voice<select bind:value={voice} on:change={save}><option value="">Model default</option>{#each voices as item}<option value={item}>{item}</option>{/each}</select></label>
+      <label>Voice<select bind:value={voice} on:change={() => { if (voice) clearCloneVoice(); save(); }}><option value="">Model default</option>{#each voices as item}<option value={item}>{item}</option>{/each}</select></label>
       <label>STT language<input bind:value={language} placeholder="auto" on:change={save} /></label>
     </div>
+    {#if supportsVoiceClone}
+      <div class="pipeline-clone-voice">
+        <div class="section-title"><div><span>VOICE CLONE</span><h2>Reference voice</h2></div></div>
+        <input class="hidden-file" bind:this={cloneVoiceInput} type="file" accept="audio/*" on:change={(event) => chooseCloneVoice(event.currentTarget.files?.[0] || null)} />
+        <div class="media-actions">
+          <button type="button" on:click={() => cloneVoiceInput?.click()}>Choose reference audio</button>
+          <button type="button" disabled={!cloneVoiceFile} on:click={clearCloneVoice}>Clear</button>
+          {#if cloneVoiceFile}<span>{cloneVoiceFile.name}</span>{/if}
+        </div>
+        <MediaPreview file={cloneVoiceFile} kind="audio" label="Reference preview" />
+        <label>Reference transcript<textarea rows="2" bind:value={cloneReferenceText} placeholder="Exact words spoken in the reference audio"></textarea></label>
+        <div class="voice-library pipeline-voice-library">
+          <label>Saved voices<select value={savedCloneVoiceId} on:change={(event) => chooseSavedCloneVoice(event.currentTarget.value)}><option value="">Choose saved voice…</option>{#each savedCloneVoices as item}<option value={item.id}>{item.name}</option>{/each}</select></label>
+          <label>Voice name<input bind:value={cloneVoiceName} placeholder="Reference voice name" /></label>
+          <div class="library-actions">
+            <button type="button" disabled={!cloneVoiceFile || savingCloneVoice} on:click={storeCloneVoice}>{savingCloneVoice ? 'Saving…' : 'Save voice'}</button>
+            <button class="danger" type="button" disabled={!savedCloneVoiceId} on:click={removeCloneVoice}>Delete</button>
+          </div>
+        </div>
+      </div>
+    {/if}
   </section>
 
   <section class="panel page-panel pipeline-input">

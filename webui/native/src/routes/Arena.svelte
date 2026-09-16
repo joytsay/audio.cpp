@@ -15,6 +15,7 @@
   import type { Translator } from '$lib/i18n';
   import MediaPreview from '$lib/MediaPreview.svelte';
   import type { CatalogEntry, InstallPackageChoice, LoadedModel, ServerHealth } from '$lib/types';
+  import { createLocalId } from '$lib/voices';
 
   export let activeCatalog: CatalogEntry[] = [];
   export let loadedModels: LoadedModel[] = [];
@@ -344,7 +345,7 @@
       return;
     }
     arenaItems = [...arenaItems, {
-      id: crypto.randomUUID(),
+      id: createLocalId(),
       entryId: arenaEntry.id,
       packageId: choice?.id,
       label: arenaEntry.display_name,
