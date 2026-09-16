@@ -103,6 +103,7 @@ FROM base AS full
 
 COPY --from=build /app/full /app
 COPY model_specs/ /app/model_specs/
+COPY assets/framework/models/ /app/assets/framework/models/
 COPY tools/model_manager_v2.py /app/tools/model_manager_v2.py
 
 RUN mkdir -p /app/models && chown ubuntu:ubuntu /app/models

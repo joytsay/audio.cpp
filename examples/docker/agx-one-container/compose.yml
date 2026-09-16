@@ -13,8 +13,7 @@ services:
         BASE_CUDA_RUN_CONTAINER: ${BASE_CUDA_RUN_CONTAINER:-nvcr.io/nvidia/l4t-cuda:12.6.11-runtime}
         GCC_VERSION: ${GCC_VERSION:-11}
         CUDA_DOCKER_ARCH: ${CUDA_ARCH:-87-real}
-        AUDIOCPP_MODEL_SET: custom
-        AUDIOCPP_MODELS: ${AUDIOCPP_MODELS:-sortformer_diar,qwen3_asr,pocket_tts,qwen3_tts}
+        AUDIOCPP_MODEL_SET: full
         AUDIOCPP_CPU_ALL_VARIANTS: "OFF"
         BUILD_JOBS: ${BUILD_JOBS:-2}
         LLAMA_CPP_REF: ${LLAMA_CPP_REF:-5202104b59ada9005db079eea43882a2b7bf5802}

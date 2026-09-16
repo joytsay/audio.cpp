@@ -47,6 +47,10 @@ class VoxCPM2Loader final : public runtime::IVoiceModelLoader {
 public:
   std::string family() const override { return "voxcpm2"; }
 
+  std::vector<std::string> family_aliases() const override {
+    return {"voxcpm"};
+  }
+
   runtime::CapabilitySet advertised_capabilities() const override {
     runtime::CapabilitySet out;
     out.supported_tasks = {
@@ -66,7 +70,9 @@ public:
       (void)engine::model_spec::load_resource_bundle(
           request.model_path,
           engine::model_spec::default_spec_path(family()));
-      return !request.family_hint.has_value() || *request.family_hint == family();
+      return !request.family_hint.has_value() ||
+             *request.family_hint == family() ||
+             *request.family_hint == "voxcpm";
     } catch (...) {
       return false;
     }

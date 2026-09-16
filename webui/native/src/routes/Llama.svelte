@@ -14,6 +14,7 @@
   let response = '';
   let status = 'The local language-model worker is starting.';
   let busy = false;
+  let loadingModel = false;
   let downloading = false;
   let downloadEvents: EventSource | null = null;
   let repo = 'bartowski/Qwen2.5-3B-Instruct-GGUF';
@@ -79,6 +80,30 @@
       status = error instanceof Error ? error.message : String(error);
     } finally {
       busy = false;
+    }
+  }
+
+  function modelIsLoaded(id: string): boolean {
+    const entry = models.find((candidate) => candidate.id === id);
+    return entry?.loaded === true || entry?.status?.value === 'loaded';
+  }
+
+  async function loadSelectedModel() {
+    if (!model.trim() || modelIsLoaded(model)) return;
+    loadingModel = true;
+    status = `Loading ${model} into VRAM…`;
+    try {
+      await endpointJson<Record<string, unknown>>(routerEndpoint(baseUrl, ''), 'models/load', {
+        method: 'POST',
+        body: JSON.stringify({ model: model.trim() })
+      });
+      await refreshModels();
+      status = `${model} is loaded in VRAM and ready.`;
+      save();
+    } catch (error) {
+      status = error instanceof Error ? error.message : String(error);
+    } finally {
+      loadingModel = false;
     }
   }
 
@@ -212,6 +237,10 @@
           {#each models as entry}<option value={entry.id}>{entry.id}</option>{/each}
         </select>
       </label>
+      <button class="primary" disabled={busy || loadingModel || !model.trim() || modelIsLoaded(model)}
+        on:click={loadSelectedModel}>
+        {loadingModel ? 'Loading into VRAM…' : modelIsLoaded(model) ? 'Loaded in VRAM' : 'Load model'}
+      </button>
       <button disabled={busy} on:click={refreshModels}>Refresh models</button>
     </div>
   </section>

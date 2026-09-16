@@ -75,16 +75,21 @@
   let diarization: any = null;
   let outputUrl = '';
   let aborter: AbortController | null = null;
+  const defaultCloneVoiceName = 'wangSG';
 
   $: diarizationModels = models.filter((entry) => entry.task === 'diar');
   $: sttModels = models.filter((entry) => ['asr', 'stt'].includes(entry.task || ''));
   $: ttsModels = models.filter((entry) => ['tts', 'clon'].includes(entry.task || ''));
-  $: selectedTtsModel = selectedAudioModel(ttsModel);
+  // Keep this lookup inline: Svelte's legacy reactive dependency analysis
+  // cannot see `models` when it is accessed only inside selectedAudioModel().
+  // Without the direct reference, a saved TTS selection remains unresolved
+  // after the initial asynchronous model refresh until the user changes it.
+  $: selectedTtsModel = models.find((entry) => entry.selectionId === ttsModel);
   // A model loaded from server configuration may only expose its ID in an
   // older cached model response. Recognize Qwen3-TTS by either source so the
   // clone controls are never hidden merely because that metadata is absent.
   $: selectedTtsIsQwen = selectedTtsModel?.family === 'qwen3_tts' ||
-    /^qwen3-tts(?:-|$)/i.test(selectedTtsModel?.modelId || '');
+    /^qwen3[-_]tts(?:[-_]|$)/i.test(selectedTtsModel?.modelId || '');
   $: supportsVoiceClone = selectedTtsModel?.task === 'clon' ||
     (selectedTtsIsQwen && !/custom/i.test(selectedTtsModel?.modelId || ''));
   $: pipelineSteps = [
@@ -151,13 +156,22 @@
   }
 
   function configuredAudioModel(entry: OpenAIModel & { path?: string; mode?: string }): PipelineAudioModel {
+    // `/v1/models` from an already-running server can be an older, minimal
+    // response with just an ID.  Fill in the known catalog metadata so
+    // controls such as Qwen3-TTS voice cloning render on the first load.
+    const catalogEntry = catalog.find((candidate) => candidate.id === entry.id);
     return {
       ...entry,
       selectionId: `configured:${entry.id}`,
       modelId: entry.id,
       label: entry.id,
       path: entry.path,
-      mode: entry.mode || 'offline'
+      mode: entry.mode || 'offline',
+      family: entry.family || catalogEntry?.family,
+      task: entry.task || catalogEntry?.task,
+      loadOptions: catalogEntry?.load_options,
+      sessionOptions: catalogEntry?.session_options,
+      builtinVoices: catalogEntry?.builtin_voices
     };
   }
 
@@ -254,6 +268,13 @@
   async function refreshSavedCloneVoices() {
     try {
       savedCloneVoices = await listVoices();
+      // Prefer the operator's standard reference voice on a fresh Pipeline
+      // session, while preserving any voice file or saved voice already chosen.
+      if (!cloneVoiceFile && !savedCloneVoiceId) {
+        const defaultVoice = savedCloneVoices.find((entry) =>
+          entry.name.trim().toLowerCase() === defaultCloneVoiceName.toLowerCase());
+        if (defaultVoice) chooseSavedCloneVoice(defaultVoice.id);
+      }
     } catch (error) {
       status = `Voice library unavailable: ${error instanceof Error ? error.message : String(error)}`;
     }

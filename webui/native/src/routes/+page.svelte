@@ -508,10 +508,10 @@
   }
 
   function modelMatchesSelectedPackage(model: LoadedModel, entry: CatalogEntry | undefined) {
-    if (!entry) return comparablePath(model.path) === comparablePath(modelPath);
+    if (!entry) return catalogPathMatches(modelPath, model.path);
     const choice = selectedPackageChoice(entry);
-    if (!choice) return comparablePath(model.path) === comparablePath(modelPath);
-    return comparablePath(model.path) === comparablePath(modelPath) &&
+    if (!choice) return catalogPathMatches(modelPath, model.path);
+    return catalogPathMatches(modelPath, model.path) &&
       packageSessionOptionsMatch(entry, choice, model);
   }
 
@@ -2067,7 +2067,7 @@
     <div class="brand-logo">{@html logoCloud}</div>
     <div>
       <strong>GeoVision IVR</strong>
-      <span>Interactive Voice Response.</span>
+      <span>Interactive Voice Response</span>
     </div>
   </div>
   <nav aria-label={tr('nav.primary')}>

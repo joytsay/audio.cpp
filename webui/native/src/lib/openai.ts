@@ -3,6 +3,9 @@ export interface OpenAIModel {
   family?: string;
   task?: string;
   loaded?: boolean;
+  status?: {
+    value?: string;
+  };
 }
 
 export interface ChatMessage {
