@@ -26,6 +26,7 @@ RUN npm --prefix webui/native ci
 
 COPY webui/native/ ./webui/native/
 COPY webui/configs/ ./webui/configs/
+COPY assets/resources/ ./assets/resources/
 COPY model_specs/ ./model_specs/
 COPY knowledge/ ./knowledge/
 COPY prompt.csv ./prompt.csv

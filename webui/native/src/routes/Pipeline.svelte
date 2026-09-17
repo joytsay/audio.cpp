@@ -10,6 +10,11 @@
   import { createLocalId, deleteVoice as deleteSavedVoice, listVoices, saveVoice, type SavedVoice } from '$lib/voices';
   import bundledKnowledgeSystemPrompt from '../../../../knowledge/system-prompt.md?raw';
   import systemPromt from '../../../../prompt.csv?raw';
+  import centralStationExample from '../../../../assets/resources/中央監控站2.mp3?url';
+  import controlRoomExample from '../../../../assets/resources/中控室.mp3?url';
+  import employeeCheckpointExample from '../../../../assets/resources/員工檢查哨.mp3?url';
+  import lobbyExample from '../../../../assets/resources/大廳.mp3?url';
+  import vehicleCheckpointExample from '../../../../assets/resources/車輛檢查哨.mp3?url';
 
   type Stage = 'idle' | 'upload' | 'separation' | 'diarization' | 'vad' | 'stt' | 'rag' | 'llm' | 'tts' | 'done';
   type PromptMode = 'system' | 'graphrag';
@@ -52,7 +57,7 @@
   let systemPrompt = systemPromt.trim();
   let promptMode: PromptMode = 'system';
   let useSeparation = false;
-  let useDiarization = true;
+  let useDiarization = false;
   let useVad = false;
   let useStt = true;
   let useRag = true;
@@ -91,6 +96,13 @@
   let outputUrl = '';
   let aborter: AbortController | null = null;
   const defaultCloneVoiceName = 'lingCL';
+  const exampleAudioFiles = [
+    { name: '中央監控站2.mp3', url: centralStationExample },
+    { name: '中控室.mp3', url: controlRoomExample },
+    { name: '員工檢查哨.mp3', url: employeeCheckpointExample },
+    { name: '大廳.mp3', url: lobbyExample },
+    { name: '車輛檢查哨.mp3', url: vehicleCheckpointExample }
+  ];
   type TimedStage = Exclude<Stage, 'idle' | 'done'>;
   let stageRuntimes: Partial<Record<TimedStage, number>> = {};
   let stageStartedAt = 0;
@@ -401,6 +413,23 @@
     sourceFile = file;
     inputUrl = file ? URL.createObjectURL(file) : '';
     status = file ? `${file.name} is ready.` : 'Choose or record a WAV file.';
+  }
+
+  async function chooseExampleAudio(example: { name: string; url: string }) {
+    try {
+      if (example.url.startsWith('data:')) {
+        const comma = example.url.indexOf(',');
+        if (comma < 0) throw new Error(`Could not load ${example.name}.`);
+        const bytes = Uint8Array.from(atob(example.url.slice(comma + 1)), (char) => char.charCodeAt(0));
+        chooseFile(new File([bytes], example.name, { type: 'audio/mpeg' }));
+        return;
+      }
+      const response = await fetch(example.url);
+      if (!response.ok) throw new Error(`Could not load ${example.name}.`);
+      chooseFile(new File([await response.blob()], example.name, { type: 'audio/mpeg' }));
+    } catch (error) {
+      status = error instanceof Error ? error.message : String(error);
+    }
   }
 
   async function toggleRecording() {
@@ -784,7 +813,7 @@
 
 <section class="page-head pipeline-head">
   <p class="eyebrow">VOICE AGENT PIPELINE</p>
-  <h1>VS → SD → STT → RAG → LLM → TTS</h1>
+  <h1>VS → SD → VAD → STT → RAG → LLM → TTS</h1>
   <p>A Python-free voice round trip using audio.cpp, llama.cpp, and this Svelte interface.</p>
 </section>
 
@@ -871,6 +900,12 @@
       <strong>{sourceFile?.name || 'No audio selected'}</strong>
       <span>WAV, MP3, FLAC, or browser recording</span>
       <div><button on:click={() => sourceInput?.click()}>Choose audio</button><button class:danger={recording} on:click={toggleRecording}>{recording ? 'Stop recording' : 'Record microphone'}</button></div>
+      <div class="pipeline-example-audio">
+        <span>Example audio</span>
+        {#each exampleAudioFiles as example}
+          <button type="button" on:click={() => chooseExampleAudio(example)}>{example.name}</button>
+        {/each}
+      </div>
       {#if inputUrl}<audio class="pipeline-input-audio" controls src={inputUrl}></audio>{/if}
     </div>
     <label>LLM grounding<select bind:value={promptMode} on:change={save}><option value="system">System prompt (prompt.csv)</option><option value="graphrag">RAG (knowledge/)</option></select></label>

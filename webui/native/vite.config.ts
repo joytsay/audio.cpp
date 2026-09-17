@@ -10,6 +10,10 @@ export default defineConfig({
     }
   },
   build: {
-    target: 'es2022'
+    target: 'es2022',
+    // The native server embeds only dist/index.html. Inline the Pipeline
+    // example audio so it remains available without a separate static-file
+    // endpoint in the embedded WebUI.
+    assetsInlineLimit: 2_000_000
   }
 });
