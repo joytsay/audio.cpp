@@ -34,6 +34,7 @@ __pycache__/
 /*.wav
 /flutter/
 /.cache/
+voices/
 
 # --- portable bundle: distributed manually, never committed ---
 /audiocpp-portable/

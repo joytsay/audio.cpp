@@ -6,6 +6,7 @@
   "threads": 4,
   "ui": true,
   "ui_management": true,
+  "voice_dir": "/app/voices",
   "lazy_load": true,
   "max_loaded_models": 1,
   "idle_unload_ms": 60000,

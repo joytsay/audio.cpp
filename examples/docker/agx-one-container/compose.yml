@@ -44,6 +44,7 @@ services:
       - ../../../llama-models:/app/llama-models
       - ../../../rag-data:/app/rag-data
       - ../../../knowledge:/app/knowledge
+      - ../../../voices:/app/voices
       - ../../../prompt.csv:/app/prompt.csv
       # Runtime-only routing changes must not require recompiling the native binaries.
       - ../../../.devops/all-in-one-entrypoint.sh:/app/all-in-one-entrypoint.sh:ro
