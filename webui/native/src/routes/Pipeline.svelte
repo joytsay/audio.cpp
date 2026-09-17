@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
   import { uploadFile } from '$lib/api';
-  import { browserDecodeToWav } from '$lib/audio';
+  import { browserDecodeToWav, encodePcm16Wav } from '$lib/audio';
   import { catalog } from '$lib/catalog';
   import MediaPreview from '$lib/MediaPreview.svelte';
   import { apiEndpoint, chatText, endpointBlob, endpointJson, endpointModels, endpointRouterModels, formatChatMessages, routerEndpoint, siblingWorkerEndpoint, type ChatMessage, type OpenAIModel } from '$lib/openai';
@@ -11,7 +11,7 @@
   import bundledKnowledgeSystemPrompt from '../../../../knowledge/system-prompt.md?raw';
   import systemPromt from '../../../../prompt.csv?raw';
 
-  type Stage = 'idle' | 'upload' | 'diarization' | 'stt' | 'rag' | 'llm' | 'tts' | 'done';
+  type Stage = 'idle' | 'upload' | 'separation' | 'diarization' | 'stt' | 'rag' | 'llm' | 'tts' | 'done';
   type PromptMode = 'system' | 'graphrag';
 
   interface PipelineAudioModel extends OpenAIModel {
@@ -30,9 +30,16 @@
     data: Array<{ id: string; installed: boolean }>;
   }
 
+  interface SeparationStem {
+    id: string;
+    label: string;
+    file: File;
+  }
+
   let audioBaseUrl = '';
   let llmBaseUrl = '';
   let models: PipelineAudioModel[] = [];
+  let separationModel = '';
   let llmModels: OpenAIModel[] = [];
   let diarizationModel = '';
   let sttModel = '';
@@ -43,13 +50,17 @@
   let language = '';
   let systemPrompt = systemPromt.trim();
   let promptMode: PromptMode = 'system';
+  let useSeparation = false;
   let useDiarization = true;
+  let useStt = true;
   let useRag = true;
   let useLlm = true;
   let useTts = true;
   let temperature = 0.2;
   let maxTokens = 512;
   let sourceFile: File | null = null;
+  let textInput = '';
+  let selectedDiarizationSpeakers = ['SPEAKER_00', 'SPEAKER_01', 'SPEAKER_02', 'SPEAKER_03'];
   let inputUrl = '';
   let sourceInput: HTMLInputElement | null = null;
   let cloneVoiceInput: HTMLInputElement | null = null;
@@ -73,6 +84,7 @@
   let llmResponse = '';
   let llmInputPreview = '';
   let diarization: any = null;
+  let separationStems: SeparationStem[] = [];
   let outputUrl = '';
   let aborter: AbortController | null = null;
   const defaultCloneVoiceName = 'lingCL';
@@ -82,6 +94,7 @@
   let runtimeTick = 0;
   let runtimeTimer: ReturnType<typeof setInterval> | null = null;
 
+  $: separationModels = models.filter((entry) => entry.task === 'sep');
   $: diarizationModels = models.filter((entry) => entry.task === 'diar');
   $: sttModels = models.filter((entry) => ['asr', 'stt'].includes(entry.task || ''));
   $: ttsModels = models.filter((entry) => ['tts', 'clon'].includes(entry.task || ''));
@@ -101,21 +114,27 @@
     selectedTtsSupportsReference ||
     (selectedTtsIsQwen && !/custom/i.test(selectedTtsModel?.modelId || ''));
   $: pipelineSteps = [
-    ...(useDiarization ? [['diarization', 'Diarization']] : []),
-    ['stt', 'Speech to text'],
+    ...(useSeparation ? [['separation', 'Vocal separation']] : []),
+    ...(useDiarization ? [['diarization', 'Speach Diarization']] : []),
+    ...(useStt ? [['stt', 'Speech to text']] : []),
     ...(promptMode === 'graphrag' && useRag ? [['rag', 'RAG']] : []),
     ...(useLlm ? [['llm', 'Language model']] : []),
     ...(useTts ? [['tts', 'Text to speech']] : [])
   ];
-  $: canRun = Boolean(sourceFile && sttModel &&
+  $: requiresAudio = useSeparation || useDiarization || useStt;
+  $: canRun = Boolean((!requiresAudio || sourceFile) &&
+    (!useSeparation || separationModel) &&
     (!useDiarization || diarizationModel) &&
+    (!useStt || sttModel) &&
+    (useStt || textInput.trim()) &&
     (!useLlm || llmModel) &&
     (!useTts || ttsModel));
 
   function save() {
     localStorage.setItem('audiocpp.pipeline.settings', JSON.stringify({
-      diarizationModel, sttModel, llmModel, ttsModel,
-      voice, language, promptMode, useDiarization, useRag, useLlm, useTts, temperature, maxTokens
+      separationModel, diarizationModel, sttModel, llmModel, ttsModel,
+      voice, language, promptMode, useSeparation, useDiarization, useStt,
+      selectedDiarizationSpeakers, useRag, useLlm, useTts, temperature, maxTokens
     }));
   }
 
@@ -145,7 +164,7 @@
   ): PipelineAudioModel[] {
     const installed = new Set(inventory.data.filter((item) => item.installed).map((item) => item.id));
     return catalog.flatMap((entry: CatalogEntry) => {
-      if (!['diar', 'asr', 'stt', 'tts', 'clon'].includes(entry.task)) return [];
+      if (!['sep', 'diar', 'asr', 'stt', 'tts', 'clon'].includes(entry.task)) return [];
       const choices = (entry.install_packages || []).filter((choice) => installed.has(choice.id));
       return choices.map((choice: InstallPackageChoice) => ({
         selectionId: `package:${entry.id}:${choice.id}`,
@@ -230,8 +249,10 @@
         !installedPaths.has(`${entry.modelId}\n${entry.path || ''}`))
     ];
     const nextDiarization = models.filter((entry) => entry.task === 'diar');
+    const nextSeparation = models.filter((entry) => entry.task === 'sep');
     const nextStt = models.filter((entry) => ['asr', 'stt'].includes(entry.task || ''));
     const nextTts = models.filter((entry) => ['tts', 'clon'].includes(entry.task || ''));
+    separationModel = keepSelection(nextSeparation, separationModel);
     diarizationModel = keepSelection(nextDiarization, diarizationModel);
     sttModel = keepSelection(nextStt, sttModel);
     ttsModel = keepSelection(nextTts, ttsModel);
@@ -385,8 +406,13 @@
     }
   }
 
-  async function uploadAudio(file: File, signal: AbortSignal): Promise<string> {
-    const wav = await browserDecodeToWav(file, 16000, 1);
+  async function uploadAudio(
+    file: File,
+    signal: AbortSignal,
+    sampleRate = 16000,
+    channels = 1
+  ): Promise<string> {
+    const wav = await browserDecodeToWav(file, sampleRate, channels);
     const response = await fetch(apiEndpoint(audioBaseUrl, 'ui/upload'), {
       method: 'POST',
       headers: { 'Content-Type': 'audio/wav', 'X-AudioCPP-Filename': 'pipeline-input.wav' },
@@ -436,8 +462,44 @@
     }).join('\n');
   }
 
+  function wavFileFromBase64(audio: string, name: string): File {
+    const binary = atob(audio);
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+    return new File([bytes], name, { type: 'audio/wav' });
+  }
+
+  async function audioForSelectedSpeakers(
+    file: File,
+    diarizationResult: any,
+    speakerIds: string[]
+  ): Promise<File> {
+    const turns = Array.isArray(diarizationResult?.speaker_turns) ? diarizationResult.speaker_turns : [];
+    if (!turns.length) throw new Error('Diarization returned no speaker turns to select from.');
+    if (!speakerIds.length) throw new Error('Choose at least one diarization speaker.');
+    const context = new AudioContext();
+    try {
+      const input = await context.decodeAudioData(await file.arrayBuffer());
+      const selected = new Set(speakerIds);
+      const output = context.createBuffer(input.numberOfChannels, input.length, input.sampleRate);
+      const diarizationRate = Number(diarizationResult?.sample_rate) || input.sampleRate;
+      for (const turn of turns) {
+        if (!selected.has(String(turn.speaker_id))) continue;
+        const start = Math.max(0, Math.floor(Number(turn.start_sample || 0) * input.sampleRate / diarizationRate));
+        const end = Math.min(input.length, Math.ceil(Number(turn.end_sample || 0) * input.sampleRate / diarizationRate));
+        if (end <= start) continue;
+        for (let channel = 0; channel < input.numberOfChannels; channel += 1) {
+          output.copyToChannel(input.getChannelData(channel).slice(start, end), channel, start);
+        }
+      }
+      return new File([encodePcm16Wav(output)], 'pipeline-selected-speakers.wav', { type: 'audio/wav' });
+    } finally {
+      await context.close();
+    }
+  }
+
   async function runPipeline() {
-    if (!sourceFile || !canRun) return;
+    if (!canRun) return;
     aborter?.abort();
     aborter = new AbortController();
     running = true;
@@ -449,14 +511,48 @@
     llmResponse = '';
     llmInputPreview = '';
     diarization = null;
+    separationStems = [];
     if (outputUrl) URL.revokeObjectURL(outputUrl);
     outputUrl = '';
     stageRuntimes = {};
     stageStartedAt = 0;
     runtimeTick = performance.now();
     try {
-      step('upload', 'Preparing 16 kHz WAV input…');
-      const audioPath = await uploadAudio(sourceFile, aborter.signal);
+      let audioPath = '';
+      let workingAudioFile: File | null = null;
+      if (requiresAudio) {
+        if (!sourceFile) throw new Error('Choose or record an audio file.');
+        step('upload', 'Preparing 16 kHz WAV input…');
+        const separationInput = useSeparation;
+        const sampleRate = separationInput ? 44100 : 16000;
+        const channels = separationInput ? 2 : 1;
+        workingAudioFile = new File(
+          [await browserDecodeToWav(sourceFile, sampleRate, channels)], 'pipeline-input.wav', { type: 'audio/wav' });
+        audioPath = await uploadAudio(workingAudioFile, aborter.signal, sampleRate, channels);
+      }
+
+      if (useSeparation) {
+        step('separation', 'Separating vocals from accompaniment…');
+        const separation = await ensureAudioModel(separationModel, aborter.signal);
+        const result = await endpointJson<{ named_audio_outputs?: Array<{ id?: string; audio?: string }> }>(audioBaseUrl, 'tasks/run', {
+          method: 'POST',
+          body: JSON.stringify({ model: separation.modelId, audio: audioPath })
+        }, aborter.signal);
+        separationStems = (result.named_audio_outputs || [])
+          .filter((output): output is { id: string; audio: string } =>
+            typeof output.id === 'string' && typeof output.audio === 'string')
+          .map((output) => ({
+            id: output.id,
+            label: output.id === 'vocals' ? 'Vocals' : output.id === 'instrumental' ? 'Background / instrumental' : output.id,
+            file: wavFileFromBase64(output.audio, `pipeline-${output.id}.wav`)
+          }));
+        const vocals = separationStems.find((output) => output.id === 'vocals')?.file;
+        if (!vocals) throw new Error('Vocal separation did not return a vocals stem.');
+        workingAudioFile = new File(
+          [await browserDecodeToWav(vocals, 16000, 1)],
+          'pipeline-vocals-16khz.wav', { type: 'audio/wav' });
+        audioPath = await uploadAudio(workingAudioFile, aborter.signal);
+      }
 
       if (useDiarization) {
         step('diarization', 'Separating speaker turns…');
@@ -468,13 +564,21 @@
         diarizationText = formatDiarization(diarization);
       }
 
-      step('stt', 'Transcribing speech…');
-      const speechModel = await ensureAudioModel(sttModel, aborter.signal);
-      const stt = await endpointJson<any>(audioBaseUrl, 'audio/transcriptions/details', {
-        method: 'POST',
-        body: JSON.stringify({ model: speechModel.modelId, audio: audioPath, language })
-      }, aborter.signal);
-      const plainTranscript = typeof stt.text === 'string' ? stt.text.trim() : '';
+      let plainTranscript = textInput.trim();
+      if (useStt) {
+        if (useDiarization && workingAudioFile) {
+          const selectedAudio = await audioForSelectedSpeakers(
+            workingAudioFile, diarization, selectedDiarizationSpeakers);
+          audioPath = await uploadAudio(selectedAudio, aborter.signal);
+        }
+        step('stt', 'Transcribing speech…');
+        const speechModel = await ensureAudioModel(sttModel, aborter.signal);
+        const stt = await endpointJson<any>(audioBaseUrl, 'audio/transcriptions/details', {
+          method: 'POST',
+          body: JSON.stringify({ model: speechModel.modelId, audio: audioPath, language })
+        }, aborter.signal);
+        plainTranscript = typeof stt.text === 'string' ? stt.text.trim() : '';
+      }
       sttText = plainTranscript;
       // Graph retrieval and normalization must receive exactly the STT text.
       // Speaker labels and word-joining added by diarization weaken matching
@@ -556,6 +660,7 @@
     llmBaseUrl = siblingWorkerEndpoint(8082);
     try {
       const saved = JSON.parse(localStorage.getItem('audiocpp.pipeline.settings') || '{}');
+      separationModel = saved.separationModel || '';
       diarizationModel = saved.diarizationModel || '';
       sttModel = saved.sttModel || '';
       llmModel = saved.llmModel || '';
@@ -564,7 +669,14 @@
       language = saved.language || '';
       systemPrompt = localStorage.getItem('audiocpp.pipeline.systemPrompt') || systemPrompt;
       promptMode = saved.promptMode === 'graphrag' ? 'graphrag' : 'system';
+      useSeparation = saved.useSeparation ?? useSeparation;
       useDiarization = saved.useDiarization ?? useDiarization;
+      useStt = saved.useStt ?? useStt;
+      if (Array.isArray(saved.selectedDiarizationSpeakers)) {
+        selectedDiarizationSpeakers = saved.selectedDiarizationSpeakers
+          .filter((speaker: unknown): speaker is string => typeof speaker === 'string')
+          .slice(0, 4);
+      }
       useRag = saved.useRag ?? useRag;
       useLlm = saved.useLlm ?? useLlm;
       useTts = saved.useTts ?? useTts;
@@ -590,7 +702,7 @@
 
 <section class="page-head pipeline-head">
   <p class="eyebrow">VOICE AGENT PIPELINE</p>
-  <h1>Diar → STT → RAG → LLM → TTS</h1>
+  <h1>VS → SD → STT → RAG → LLM → TTS</h1>
   <p>A Python-free voice round trip using audio.cpp, llama.cpp, and this Svelte interface.</p>
 </section>
 
@@ -611,12 +723,27 @@
   <section class="panel page-panel pipeline-config">
     <div class="section-title"><div><span>WORKERS</span><h2>Local pipeline</h2></div><button disabled={running} on:click={refreshAll}>Refresh</button></div>
     <p class="field-help">The WebUI securely uses the audio and language-model workers inside this container.</p>
+    <label class="toggle pipeline-toggle"><input type="checkbox" bind:checked={useSeparation} on:change={save} /><span></span>Run vocal separation</label>
+    {#if useSeparation}
+      <label>Vocal separation model<select bind:value={separationModel} on:change={save}>{#each separationModels as entry}<option value={entry.selectionId}>{entry.label}</option>{/each}</select></label>
+    {/if}
     <label class="toggle pipeline-toggle"><input type="checkbox" bind:checked={useDiarization} on:change={save} /><span></span>Run speaker diarization</label>
     {#if useDiarization}
       <label>Diarization model<select bind:value={diarizationModel} on:change={save}>{#each diarizationModels as entry}<option value={entry.selectionId}>{entry.label}</option>{/each}</select></label>
+      <fieldset class="diarization-speakers">
+        <legend>Transcribe speakers</legend>
+        {#each ['SPEAKER_00', 'SPEAKER_01', 'SPEAKER_02', 'SPEAKER_03'] as speaker, index}
+          <label><input type="checkbox" bind:group={selectedDiarizationSpeakers} value={speaker} on:change={save} />Speaker {String(index).padStart(2, '0')}</label>
+        {/each}
+      </fieldset>
     {/if}
-    <label>STT model<select bind:value={sttModel} on:change={save}>{#each sttModels as entry}<option value={entry.selectionId}>{entry.label}</option>{/each}</select></label>
-    <label>STT language<input bind:value={language} placeholder="auto" on:change={save} /></label>
+    <label class="toggle pipeline-toggle"><input type="checkbox" bind:checked={useStt} on:change={() => { if (!useStt) { useSeparation = false; useDiarization = false; } save(); }} /><span></span>Run speech to text</label>
+    {#if useStt}
+      <label>STT model<select bind:value={sttModel} on:change={save}>{#each sttModels as entry}<option value={entry.selectionId}>{entry.label}</option>{/each}</select></label>
+      <label>STT language<input bind:value={language} placeholder="auto" on:change={save} /></label>
+    {:else}
+      <label>Text input<textarea rows="4" bind:value={textInput} placeholder="Enter the text to send to RAG, LLM, and TTS"></textarea></label>
+    {/if}
     <label class="toggle pipeline-toggle"><input type="checkbox" bind:checked={useLlm} on:change={save} /><span></span>Run LLM instruct model</label>
     {#if useLlm}
       <label>LLM instruct model<select bind:value={llmModel} on:change={save}>{#if !llmModels.length && llmModel}<option value={llmModel}>{llmModel}</option>{/if}{#each llmModels as entry}<option value={entry.id}>{entry.id}</option>{/each}</select></label>
@@ -681,6 +808,14 @@
 
   <section class="panel page-panel pipeline-results">
     <div class="section-title"><div><span>RESULTS</span><h2>Stage outputs</h2></div></div>
+    {#if separationStems.length}
+      <div class="pipeline-separation-results">
+        <span>VOCAL SEPARATION</span>
+        {#each separationStems as stem}
+          <MediaPreview file={stem.file} kind="audio" label={stem.label} />
+        {/each}
+      </div>
+    {/if}
     {#if diarizationText}<article class="pipeline-message diarization"><span>DIARIZATION</span><p>{diarizationText}</p></article>{/if}
     {#if sttText}<article class="pipeline-message user"><span>STT</span><p>{sttText}</p></article>{/if}
     {#if ragText}
@@ -697,6 +832,6 @@
         <div class="pipeline-audio"><audio controls autoplay src={outputUrl}></audio><a href={outputUrl} download="voice-response.wav">Save WAV</a></div>
       </div>
     {/if}
-    {#if !diarizationText && !sttText && !ragText && !llmResponse && !outputUrl}<div class="empty-output"><div class="wave">∿</div><p>Pipeline results will appear here.</p></div>{/if}
+    {#if !separationStems.length && !diarizationText && !sttText && !ragText && !llmResponse && !outputUrl}<div class="empty-output"><div class="wave">∿</div><p>Pipeline results will appear here.</p></div>{/if}
   </section>
 </div>

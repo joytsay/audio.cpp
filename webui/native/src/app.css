@@ -350,6 +350,11 @@ pre { background: var(--code-bg); border: 1px solid var(--line); border-radius: 
 .pipeline-steps strong { display: block; font-size: 10px; text-transform: uppercase; letter-spacing: .08em; }
 .pipeline-steps small { display: block; margin-top: 2px; font-size: 10px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .pipeline-steps div.active small { color: var(--cyan); }
+.diarization-speakers { display: flex; flex-wrap: wrap; gap: 8px 12px; margin: 8px 0 4px; padding: 8px; border: 1px solid var(--line); border-radius: 8px; }
+.diarization-speakers legend { padding: 0 4px; color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .08em; }
+.diarization-speakers label { display: flex; align-items: center; gap: 5px; margin: 0; font-size: 11px; }
+.pipeline-separation-results { margin-top: 12px; }
+.pipeline-separation-results > span { color: var(--cyan); font-size: 9px; font-weight: 800; letter-spacing: .13em; }
 .pipeline-steps div.active { border-color: var(--active-border); color: var(--cyan); box-shadow: inset 0 0 0 1px rgba(66,232,213,.12); }
 .pipeline-steps div.complete > span { border-color: var(--cyan); background: var(--cyan); color: var(--text-invert); }
 .pipeline-grid { display: grid; grid-template-columns: minmax(280px, .75fr) minmax(340px, 1fr) minmax(340px, 1fr); gap: 12px; align-items: start; }
