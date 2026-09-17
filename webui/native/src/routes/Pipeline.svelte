@@ -11,7 +11,7 @@
   import bundledKnowledgeSystemPrompt from '../../../../knowledge/system-prompt.md?raw';
   import systemPromt from '../../../../prompt.csv?raw';
 
-  type Stage = 'idle' | 'upload' | 'separation' | 'diarization' | 'stt' | 'rag' | 'llm' | 'tts' | 'done';
+  type Stage = 'idle' | 'upload' | 'separation' | 'diarization' | 'vad' | 'stt' | 'rag' | 'llm' | 'tts' | 'done';
   type PromptMode = 'system' | 'graphrag';
 
   interface PipelineAudioModel extends OpenAIModel {
@@ -40,6 +40,7 @@
   let llmBaseUrl = '';
   let models: PipelineAudioModel[] = [];
   let separationModel = '';
+  let vadModel = '';
   let llmModels: OpenAIModel[] = [];
   let diarizationModel = '';
   let sttModel = '';
@@ -52,6 +53,7 @@
   let promptMode: PromptMode = 'system';
   let useSeparation = false;
   let useDiarization = true;
+  let useVad = false;
   let useStt = true;
   let useRag = true;
   let useLlm = true;
@@ -77,6 +79,7 @@
   let stage: Stage = 'idle';
   let status = 'Choose or record a WAV file.';
   let diarizationText = '';
+  let vadText = '';
   let sttText = '';
   let ragText = '';
   let ragSources: string[] = [];
@@ -96,6 +99,7 @@
 
   $: separationModels = models.filter((entry) => entry.task === 'sep');
   $: diarizationModels = models.filter((entry) => entry.task === 'diar');
+  $: vadModels = models.filter((entry) => entry.task === 'vad');
   $: sttModels = models.filter((entry) => ['asr', 'stt'].includes(entry.task || ''));
   $: ttsModels = models.filter((entry) => ['tts', 'clon'].includes(entry.task || ''));
   // Keep this lookup inline: Svelte's legacy reactive dependency analysis
@@ -116,15 +120,17 @@
   $: pipelineSteps = [
     ...(useSeparation ? [['separation', 'Vocal separation']] : []),
     ...(useDiarization ? [['diarization', 'Speach Diarization']] : []),
+    ...(useVad ? [['vad', 'Voice activity detection']] : []),
     ...(useStt ? [['stt', 'Speech to text']] : []),
     ...(promptMode === 'graphrag' && useRag ? [['rag', 'RAG']] : []),
     ...(useLlm ? [['llm', 'Language model']] : []),
     ...(useTts ? [['tts', 'Text to speech']] : [])
   ];
-  $: requiresAudio = useSeparation || useDiarization || useStt;
+  $: requiresAudio = useSeparation || useDiarization || useVad || useStt;
   $: canRun = Boolean((!requiresAudio || sourceFile) &&
     (!useSeparation || separationModel) &&
     (!useDiarization || diarizationModel) &&
+    (!useVad || vadModel) &&
     (!useStt || sttModel) &&
     (useStt || textInput.trim()) &&
     (!useLlm || llmModel) &&
@@ -132,8 +138,8 @@
 
   function save() {
     localStorage.setItem('audiocpp.pipeline.settings', JSON.stringify({
-      separationModel, diarizationModel, sttModel, llmModel, ttsModel,
-      voice, language, promptMode, useSeparation, useDiarization, useStt,
+      separationModel, diarizationModel, vadModel, sttModel, llmModel, ttsModel,
+      voice, language, promptMode, useSeparation, useDiarization, useVad, useStt,
       selectedDiarizationSpeakers, useRag, useLlm, useTts, temperature, maxTokens
     }));
   }
@@ -164,8 +170,23 @@
   ): PipelineAudioModel[] {
     const installed = new Set(inventory.data.filter((item) => item.installed).map((item) => item.id));
     return catalog.flatMap((entry: CatalogEntry) => {
-      if (!['sep', 'diar', 'asr', 'stt', 'tts', 'clon'].includes(entry.task)) return [];
+      if (!['sep', 'diar', 'vad', 'asr', 'stt', 'tts', 'clon'].includes(entry.task)) return [];
       const choices = (entry.install_packages || []).filter((choice) => installed.has(choice.id));
+      if (entry.task === 'vad' && !entry.install_packages?.length) {
+        return [{
+          selectionId: `bundled:${entry.id}`,
+          modelId: entry.id,
+          id: entry.id,
+          label: entry.display_name,
+          family: entry.family,
+          task: entry.task,
+          mode: entry.mode || 'offline',
+          path: resolvedModelPath(entry.path, modelsRoot),
+          loadOptions: entry.load_options,
+          sessionOptions: entry.session_options,
+          builtinVoices: entry.builtin_voices
+        }];
+      }
       return choices.map((choice: InstallPackageChoice) => ({
         selectionId: `package:${entry.id}:${choice.id}`,
         modelId: entry.id,
@@ -215,7 +236,7 @@
   async function ensureAudioModel(selectionId: string, signal: AbortSignal): Promise<PipelineAudioModel> {
     const selected = selectedAudioModel(selectionId);
     if (!selected) throw new Error('The selected audio model is no longer available. Refresh the model list.');
-    if (selected.selectionId.startsWith('package:') && selected.path && selected.family && selected.task) {
+    if (!selected.selectionId.startsWith('configured:') && selected.path && selected.family && selected.task) {
       await endpointJson(audioBaseUrl, 'models/load', {
         method: 'POST',
         body: JSON.stringify({
@@ -250,10 +271,12 @@
     ];
     const nextDiarization = models.filter((entry) => entry.task === 'diar');
     const nextSeparation = models.filter((entry) => entry.task === 'sep');
+    const nextVad = models.filter((entry) => entry.task === 'vad');
     const nextStt = models.filter((entry) => ['asr', 'stt'].includes(entry.task || ''));
     const nextTts = models.filter((entry) => ['tts', 'clon'].includes(entry.task || ''));
     separationModel = keepSelection(nextSeparation, separationModel);
     diarizationModel = keepSelection(nextDiarization, diarizationModel);
+    vadModel = keepSelection(nextVad, vadModel);
     sttModel = keepSelection(nextStt, sttModel);
     ttsModel = keepSelection(nextTts, ttsModel);
     await refreshVoices();
@@ -462,6 +485,18 @@
     }).join('\n');
   }
 
+  function formatVad(result: any): string {
+    const segments = Array.isArray(result?.segments) ? result.segments :
+      Array.isArray(result?.speech_segments) ? result.speech_segments : [];
+    if (!segments.length) return 'No speech segments detected.';
+    const sampleRate = Number(result.sample_rate) || 16000;
+    return segments.map((segment: any) => {
+      const start = Number(segment.start_sample || 0) / sampleRate;
+      const end = Number(segment.end_sample || 0) / sampleRate;
+      return `${start.toFixed(1)}–${end.toFixed(1)}s`;
+    }).join('\n');
+  }
+
   function wavFileFromBase64(audio: string, name: string): File {
     const binary = atob(audio);
     const bytes = new Uint8Array(binary.length);
@@ -498,12 +533,45 @@
     }
   }
 
+  async function audioForSpeechSegments(file: File, vadResult: any): Promise<File> {
+    const segments = Array.isArray(vadResult?.segments) ? vadResult.segments :
+      Array.isArray(vadResult?.speech_segments) ? vadResult.speech_segments : [];
+    if (!segments.length) throw new Error('VAD returned no speech segments to transcribe.');
+    const context = new AudioContext();
+    try {
+      const input = await context.decodeAudioData(await file.arrayBuffer());
+      const vadRate = Number(vadResult?.sample_rate) || input.sampleRate;
+      const spans = (segments.map((segment: any) => ({
+        start: Math.max(0, Math.floor(Number(segment.start_sample || 0) * input.sampleRate / vadRate)),
+        end: Math.min(input.length, Math.ceil(Number(segment.end_sample || 0) * input.sampleRate / vadRate))
+      })) as Array<{ start: number; end: number }>).filter((span) => span.end > span.start);
+      if (!spans.length) throw new Error('VAD returned no usable speech segments to transcribe.');
+      // Join speech spans rather than leaving long silent holes between them.
+      // Some ASR models stop early after a sufficiently long silent region.
+      const output = context.createBuffer(
+        input.numberOfChannels,
+        spans.reduce((frames, span) => frames + span.end - span.start, 0),
+        input.sampleRate);
+      let destinationOffset = 0;
+      for (const span of spans) {
+        for (let channel = 0; channel < input.numberOfChannels; channel += 1) {
+          output.copyToChannel(input.getChannelData(channel).slice(span.start, span.end), channel, destinationOffset);
+        }
+        destinationOffset += span.end - span.start;
+      }
+      return new File([encodePcm16Wav(output)], 'pipeline-speech-segments.wav', { type: 'audio/wav' });
+    } finally {
+      await context.close();
+    }
+  }
+
   async function runPipeline() {
     if (!canRun) return;
     aborter?.abort();
     aborter = new AbortController();
     running = true;
     diarizationText = '';
+    vadText = '';
     sttText = '';
     ragText = '';
     ragSources = [];
@@ -562,6 +630,18 @@
           body: JSON.stringify({ model: diarModel.modelId, audio: audioPath })
         }, aborter.signal);
         diarizationText = formatDiarization(diarization);
+      }
+
+      if (useVad && workingAudioFile) {
+        step('vad', 'Detecting speech activity…');
+        const vad = await ensureAudioModel(vadModel, aborter.signal);
+        const vadResult = await endpointJson<any>(audioBaseUrl, 'tasks/run', {
+          method: 'POST',
+          body: JSON.stringify({ model: vad.modelId, audio: audioPath })
+        }, aborter.signal);
+        vadText = formatVad(vadResult);
+        workingAudioFile = await audioForSpeechSegments(workingAudioFile, vadResult);
+        audioPath = await uploadAudio(workingAudioFile, aborter.signal);
       }
 
       let plainTranscript = textInput.trim();
@@ -662,6 +742,7 @@
       const saved = JSON.parse(localStorage.getItem('audiocpp.pipeline.settings') || '{}');
       separationModel = saved.separationModel || '';
       diarizationModel = saved.diarizationModel || '';
+      vadModel = saved.vadModel || '';
       sttModel = saved.sttModel || '';
       llmModel = saved.llmModel || '';
       ttsModel = saved.ttsModel || '';
@@ -671,6 +752,7 @@
       promptMode = saved.promptMode === 'graphrag' ? 'graphrag' : 'system';
       useSeparation = saved.useSeparation ?? useSeparation;
       useDiarization = saved.useDiarization ?? useDiarization;
+      useVad = saved.useVad ?? useVad;
       useStt = saved.useStt ?? useStt;
       if (Array.isArray(saved.selectedDiarizationSpeakers)) {
         selectedDiarizationSpeakers = saved.selectedDiarizationSpeakers
@@ -737,7 +819,11 @@
         {/each}
       </fieldset>
     {/if}
-    <label class="toggle pipeline-toggle"><input type="checkbox" bind:checked={useStt} on:change={() => { if (!useStt) { useSeparation = false; useDiarization = false; } save(); }} /><span></span>Run speech to text</label>
+    <label class="toggle pipeline-toggle"><input type="checkbox" bind:checked={useVad} on:change={save} /><span></span>Run voice activity detection</label>
+    {#if useVad}
+      <label>VAD model<select bind:value={vadModel} on:change={save}>{#each vadModels as entry}<option value={entry.selectionId}>{entry.label}</option>{/each}</select></label>
+    {/if}
+    <label class="toggle pipeline-toggle"><input type="checkbox" bind:checked={useStt} on:change={() => { if (!useStt) { useSeparation = false; useDiarization = false; useVad = false; } save(); }} /><span></span>Run speech to text</label>
     {#if useStt}
       <label>STT model<select bind:value={sttModel} on:change={save}>{#each sttModels as entry}<option value={entry.selectionId}>{entry.label}</option>{/each}</select></label>
       <label>STT language<input bind:value={language} placeholder="auto" on:change={save} /></label>
@@ -817,6 +903,7 @@
       </div>
     {/if}
     {#if diarizationText}<article class="pipeline-message diarization"><span>DIARIZATION</span><p>{diarizationText}</p></article>{/if}
+    {#if vadText}<article class="pipeline-message diarization"><span>VAD</span><p>{vadText}</p></article>{/if}
     {#if sttText}<article class="pipeline-message user"><span>STT</span><p>{sttText}</p></article>{/if}
     {#if ragText}
       <article class="pipeline-message diarization"><span>RAG</span><p>{ragText}</p></article>
@@ -832,6 +919,6 @@
         <div class="pipeline-audio"><audio controls autoplay src={outputUrl}></audio><a href={outputUrl} download="voice-response.wav">Save WAV</a></div>
       </div>
     {/if}
-    {#if !separationStems.length && !diarizationText && !sttText && !ragText && !llmResponse && !outputUrl}<div class="empty-output"><div class="wave">∿</div><p>Pipeline results will appear here.</p></div>{/if}
+    {#if !separationStems.length && !diarizationText && !vadText && !sttText && !ragText && !llmResponse && !outputUrl}<div class="empty-output"><div class="wave">∿</div><p>Pipeline results will appear here.</p></div>{/if}
   </section>
 </div>
