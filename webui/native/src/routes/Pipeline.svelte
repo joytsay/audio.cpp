@@ -88,6 +88,8 @@
   let sttText = '';
   let ragText = '';
   let ragSources: string[] = [];
+  let ragResultCount = 5;
+  let ragSearchMode: 'local' | 'global' = 'local';
   let transcript = '';
   let llmResponse = '';
   let llmInputPreview = '';
@@ -152,7 +154,8 @@
     localStorage.setItem('audiocpp.pipeline.settings', JSON.stringify({
       separationModel, diarizationModel, vadModel, sttModel, llmModel, ttsModel,
       voice, language, promptMode, useSeparation, useDiarization, useVad, useStt,
-      selectedDiarizationSpeakers, useRag, useLlm, useTts, temperature, maxTokens
+      selectedDiarizationSpeakers, useRag, useLlm, useTts, temperature, maxTokens,
+      ragResultCount, ragSearchMode
     }));
   }
 
@@ -699,7 +702,7 @@
       let exampleOutput = '';
       if (promptMode === 'graphrag' && useRag) {
         step('rag', 'Retrieving semiconductor knowledge…');
-        const ragResult = await graphSearch(audioBaseUrl, transcript, 'local', 5, aborter.signal);
+        const ragResult = await graphSearch(audioBaseUrl, transcript, ragSearchMode, ragResultCount, aborter.signal);
         ragText = graphContext(ragResult);
         ragSources = graphCitations(ragResult);
         if (!ragText) throw new Error('RAG returned no relevant knowledge.');
@@ -789,6 +792,8 @@
           .slice(0, 4);
       }
       useRag = saved.useRag ?? useRag;
+      ragResultCount = Math.max(1, Math.min(20, Number(saved.ragResultCount ?? ragResultCount) || ragResultCount));
+      ragSearchMode = saved.ragSearchMode === 'global' ? 'global' : 'local';
       useLlm = saved.useLlm ?? useLlm;
       useTts = saved.useTts ?? useTts;
       temperature = Number(saved.temperature ?? temperature);
@@ -915,6 +920,10 @@
       <div class="prompt-actions"><button on:click={saveSystemPromptCsv}>Save CSV</button></div>
     {:else}
       <p class="field-help">The STT transcript retrieves related terms and rules from the local knowledge graph before the LLM runs.</p>
+      <div class="field-grid compact-fields">
+        <label>Graph search<select bind:value={ragSearchMode} on:change={save}><option value="local">Local — related passages</option><option value="global">Global — community overview</option></select></label>
+        <label>Results<input type="number" min="1" max="20" step="1" bind:value={ragResultCount} on:change={save} /></label>
+      </div>
     {/if}
     <div class="field-grid compact-fields">
       <label>Temperature<input type="number" min="0" max="2" step="0.05" bind:value={temperature} /></label>
