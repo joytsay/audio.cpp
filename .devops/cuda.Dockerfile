@@ -191,10 +191,11 @@ LABEL org.opencontainers.image.created=$BUILD_DATE \
       org.opencontainers.image.source=$IMAGE_SOURCE
 
 # Runtime deps: OpenMP threading, curl (healthcheck), ffmpeg (audio I/O),
-# python3 for the native WebUI's spec-backed model installer.
+# python3 for the native WebUI's spec-backed model installer, and eSpeak-ng
+# for the shared phonemizer used by the native TTS frontends.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        libgomp1 curl ffmpeg python3 ca-certificates && \
+        libgomp1 curl ffmpeg python3 ca-certificates espeak-ng libespeak-ng1 && \
     apt-get autoremove -y && \
     apt-get clean -y && \
     rm -rf /tmp/* /var/tmp/* && \
