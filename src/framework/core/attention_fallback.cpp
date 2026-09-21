@@ -10,7 +10,11 @@
 #include "ggml.h"
 #include "ggml-backend.h"
 
-#ifdef GGML_USE_CUDA
+// ggml-hip publicly defines GGML_USE_CUDA for its consumers (hipified CUDA
+// sources), so GGML_USE_CUDA alone does not imply a real CUDA toolchain with
+// the driver library linked. ENGINE_GGML_HIP_BACKEND marks the HIP case.
+#if defined(GGML_USE_CUDA) && !defined(ENGINE_GGML_HIP_BACKEND)
+#define AUDIOCPP_CUDA_DRIVER_PROBE 1
 // CUDA driver API, declared manually so this translation unit needs neither
 // the CUDA headers on its include path nor any CMake changes. The driver
 // library is already linked transitively through ggml-cuda. Attribute ids
@@ -21,7 +25,7 @@ typedef int kCcProbeCuResult;
 kCcProbeCuResult cuDeviceGet(kCcProbeCuDevice * device, int ordinal);
 kCcProbeCuResult cuDeviceGetAttribute(int * value, int attrib, kCcProbeCuDevice device);
 }
-#endif  // GGML_USE_CUDA
+#endif
 
 namespace engine::core {
 namespace {
@@ -59,7 +63,7 @@ AttentionPreference parse_preference_value(const std::string & value, const char
 // select the MMA kernel with no usable device code. Unknown backends and
 // query failures fail OPEN to preserve current behavior.
 bool cuda_device_wants_eager(ggml_backend_t backend) {
-#ifdef GGML_USE_CUDA
+#ifdef AUDIOCPP_CUDA_DRIVER_PROBE
     if (backend == nullptr) {
         return false;
     }
@@ -96,7 +100,7 @@ bool cuda_device_wants_eager(ggml_backend_t backend) {
 #else
     (void) backend;
     return false;
-#endif  // GGML_USE_CUDA
+#endif  // AUDIOCPP_CUDA_DRIVER_PROBE
 }
 
 }  // namespace
@@ -116,6 +120,31 @@ bool resolve_flash_attention(ggml_backend_t backend, int64_t head_dim, Attention
             break;
     }
     return !cuda_device_wants_eager(backend);
+}
+
+// The device description is the only vendor signal ggml-backend exposes for
+// Vulkan ("Intel(R) Graphics (BMG G31)", "Intel(R) Arc(tm) A770 Graphics", ...).
+// Any null handle, non-Vulkan device, or missing description answers false.
+bool vulkan_device_is_intel(ggml_backend_t backend) {
+    if (backend == nullptr) {
+        return false;
+    }
+    ggml_backend_dev_t device = ggml_backend_get_device(backend);
+    if (device == nullptr) {
+        return false;
+    }
+    if (ggml_backend_dev_type(device) != GGML_BACKEND_DEVICE_TYPE_GPU) {
+        return false;
+    }
+    const char * name = ggml_backend_dev_name(device);
+    if (name == nullptr || std::strncmp(name, "Vulkan", 6) != 0) {
+        return false;
+    }
+    const char * description = ggml_backend_dev_description(device);
+    if (description == nullptr) {
+        return false;
+    }
+    return to_lower(description).find("intel") != std::string::npos;
 }
 
 }  // namespace engine::core
