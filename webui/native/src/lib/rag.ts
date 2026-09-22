@@ -1,6 +1,7 @@
 import { endpointJson } from './openai';
 
 export type GraphMode = 'local' | 'global';
+export type RagMode = 'hybrid' | 'dense';
 
 export interface RagCitation {
   source: string;
@@ -23,6 +24,11 @@ export interface GraphResult {
 }
 
 interface GraphReply {
+  result?: GraphResult;
+  error?: { code?: number; message?: string };
+}
+
+interface RetrieveReply {
   result?: GraphResult;
   error?: { code?: number; message?: string };
 }
@@ -79,6 +85,35 @@ export async function graphSearch(
   }, signal);
   if (reply.error) throw new Error(reply.error.message || `GraphRAG error ${reply.error.code ?? ''}`.trim());
   if (!reply.result) throw new Error('GraphRAG returned an invalid response.');
+  const hits = (reply.result.hits || [])
+    .filter((hit) => {
+      const source = hit.citation?.source || hit.uri || '';
+      return !/(^|[\\/])system-prompt\.md$/i.test(source);
+    })
+    .slice(0, k);
+  return { ...reply.result, hits };
+}
+
+export async function ragSearch(
+  baseUrl: string,
+  query: string,
+  k: number,
+  signal?: AbortSignal,
+  mode: RagMode = 'hybrid'
+): Promise<GraphResult> {
+  await initialize(baseUrl, signal);
+
+  const reply = await endpointJson<RetrieveReply>(baseUrl, 'rag/retrieve', {
+    method: 'POST',
+    body: rpcBody(Date.now(), 'retrieve', {
+      query,
+      k: Math.min(100, k + 4),
+      mode,
+      includeText: true
+    })
+  }, signal);
+  if (reply.error) throw new Error(reply.error.message || `RAG error ${reply.error.code ?? ''}`.trim());
+  if (!reply.result) throw new Error('RAG returned an invalid response.');
   const hits = (reply.result.hits || [])
     .filter((hit) => {
       const source = hit.citation?.source || hit.uri || '';

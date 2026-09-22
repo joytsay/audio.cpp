@@ -32,7 +32,7 @@ COPY knowledge/ ./knowledge/
 COPY prompt.csv ./prompt.csv
 RUN npm --prefix webui/native run build
 
-# ── RAG.CPP: Static GraphRAG worker ──────────────────────────────────────────
+# ── RAG.CPP: Static RAG / GraphRAG worker ────────────────────────────────────
 FROM alpine:3.22 AS rag-build
 
 RUN apk add --no-cache build-base cmake git ca-certificates
@@ -48,8 +48,10 @@ RUN mkdir rag-cpp && \
     git checkout --detach FETCH_HEAD
 
 COPY .devops/rag-cpp-cjk-tokenizer.patch /tmp/rag-cpp-cjk-tokenizer.patch
+COPY .devops/rag-cpp-hash-embedder.patch /tmp/rag-cpp-hash-embedder.patch
 WORKDIR /src/rag-cpp
-RUN git apply /tmp/rag-cpp-cjk-tokenizer.patch
+RUN git apply /tmp/rag-cpp-cjk-tokenizer.patch && \
+    git apply /tmp/rag-cpp-hash-embedder.patch
 RUN --mount=type=cache,target=/src/rag-cpp/build,sharing=locked \
     cmake -S . -B build \
         -DCMAKE_BUILD_TYPE=Release \

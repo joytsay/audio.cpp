@@ -5,7 +5,7 @@
   import { catalog } from '$lib/catalog';
   import MediaPreview from '$lib/MediaPreview.svelte';
   import { apiEndpoint, chatText, endpointBlob, endpointJson, endpointModels, endpointRouterModels, formatChatMessages, routerEndpoint, siblingWorkerEndpoint, type ChatMessage, type OpenAIModel } from '$lib/openai';
-  import { graphCitations, graphContext, graphSearch, matchedExampleOutput } from '$lib/rag';
+  import { graphCitations, graphContext, graphSearch, matchedExampleOutput, ragSearch } from '$lib/rag';
   import type { CatalogEntry, InstallPackageChoice, StringMap } from '$lib/types';
   import { createLocalId, deleteVoice as deleteSavedVoice, listVoices, saveVoice, type SavedVoice } from '$lib/voices';
   import bundledKnowledgeSystemPrompt from '../../../../knowledge/system-prompt.md?raw';
@@ -17,7 +17,7 @@
   import vehicleCheckpointExample from '../../../../assets/resources/車輛檢查哨.mp3?url';
 
   type Stage = 'idle' | 'upload' | 'separation' | 'diarization' | 'vad' | 'stt' | 'rag' | 'llm' | 'tts' | 'done';
-  type PromptMode = 'system' | 'graphrag';
+  type PromptMode = 'system' | 'rag' | 'graphrag';
 
   interface PipelineAudioModel extends OpenAIModel {
     selectionId: string;
@@ -136,7 +136,7 @@
     ...(useDiarization ? [['diarization', 'Speach Diarization']] : []),
     ...(useVad ? [['vad', 'Voice activity detection']] : []),
     ...(useStt ? [['stt', 'Speech to text']] : []),
-    ...(promptMode === 'graphrag' && useRag ? [['rag', 'RAG']] : []),
+    ...(promptMode !== 'system' && useRag ? [['rag', 'RAG']] : []),
     ...(useLlm ? [['llm', 'Language model']] : []),
     ...(useTts ? [['tts', 'Text to speech']] : [])
   ];
@@ -692,7 +692,7 @@
         plainTranscript = typeof stt.text === 'string' ? stt.text.trim() : '';
       }
       sttText = plainTranscript;
-      // Graph retrieval and normalization must receive exactly the STT text.
+      // Retrieval and normalization must receive exactly the STT text.
       // Speaker labels and word-joining added by diarization weaken matching
       // against complete examples and terminology entries.
       transcript = plainTranscript;
@@ -700,9 +700,11 @@
 
       let llmSystemPrompt = systemPrompt.trim();
       let exampleOutput = '';
-      if (promptMode === 'graphrag' && useRag) {
+      if (promptMode !== 'system' && useRag) {
         step('rag', 'Retrieving semiconductor knowledge…');
-        const ragResult = await graphSearch(audioBaseUrl, transcript, ragSearchMode, ragResultCount, aborter.signal);
+        const ragResult = promptMode === 'rag'
+          ? await ragSearch(audioBaseUrl, transcript, ragResultCount, aborter.signal)
+          : await graphSearch(audioBaseUrl, transcript, ragSearchMode, ragResultCount, aborter.signal);
         ragText = graphContext(ragResult);
         ragSources = graphCitations(ragResult);
         if (!ragText) throw new Error('RAG returned no relevant knowledge.');
@@ -781,7 +783,9 @@
       voice = saved.voice || '';
       language = saved.language || '';
       systemPrompt = localStorage.getItem('audiocpp.pipeline.systemPrompt') || systemPrompt;
-      promptMode = saved.promptMode === 'graphrag' ? 'graphrag' : 'system';
+      promptMode = saved.promptMode === 'rag' || saved.promptMode === 'graphrag'
+        ? saved.promptMode
+        : 'system';
       useSeparation = saved.useSeparation ?? useSeparation;
       useDiarization = saved.useDiarization ?? useDiarization;
       useVad = saved.useVad ?? useVad;
@@ -913,15 +917,17 @@
       </div>
       {#if inputUrl}<audio class="pipeline-input-audio" controls src={inputUrl}></audio>{/if}
     </div>
-    <label>LLM grounding<select bind:value={promptMode} on:change={save}><option value="system">System prompt (prompt.csv)</option><option value="graphrag">RAG (knowledge/)</option></select></label>
-    <label class="toggle pipeline-toggle"><input type="checkbox" bind:checked={useRag} disabled={promptMode !== 'graphrag'} on:change={save} /><span></span>Run RAG retrieval</label>
+    <label>LLM grounding<select bind:value={promptMode} on:change={save}><option value="system">System prompt (prompt.csv)</option><option value="rag">Regular RAG (hybrid retrieval)</option><option value="graphrag">GraphRAG (knowledge graph)</option></select></label>
+    <label class="toggle pipeline-toggle"><input type="checkbox" bind:checked={useRag} disabled={promptMode === 'system'} on:change={save} /><span></span>Run RAG retrieval</label>
     {#if promptMode === 'system' || !useRag}
       <label>System prompt (prompt.csv)<textarea bind:value={systemPrompt} rows="6"></textarea></label>
       <div class="prompt-actions"><button on:click={saveSystemPromptCsv}>Save CSV</button></div>
     {:else}
-      <p class="field-help">The STT transcript retrieves related terms and rules from the local knowledge graph before the LLM runs.</p>
+      <p class="field-help">The STT transcript retrieves related terms and rules from the local knowledge base before the LLM runs.</p>
       <div class="field-grid compact-fields">
-        <label>Graph search<select bind:value={ragSearchMode} on:change={save}><option value="local">Local — related passages</option><option value="global">Global — community overview</option></select></label>
+        {#if promptMode === 'graphrag'}
+          <label>Graph search<select bind:value={ragSearchMode} on:change={save}><option value="local">Local — related passages</option><option value="global">Global — community overview</option></select></label>
+        {/if}
         <label>Results<input type="number" min="1" max="20" step="1" bind:value={ragResultCount} on:change={save} /></label>
       </div>
     {/if}

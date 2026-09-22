@@ -1,9 +1,10 @@
 # Semiconductor speech-normalization wiki
 
 This directory replaces the monolithic prompt with a wiki-shaped knowledge
-base. `system-prompt.md` is always sent to the LLM in GraphRAG mode. The
-remaining pages are indexed by rag-cpp and retrieved according to each query or
-pipeline transcript.
+base. `system-prompt.md` is always sent to the LLM in either RAG mode. The
+content pages are indexed by rag-cpp with BM25 and CJK-aware hash embeddings,
+which are persisted directly in the `.ragdb`. This navigation page and the
+system prompt are excluded from retrieval.
 
 ## Rules
 

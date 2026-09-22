@@ -83,7 +83,8 @@ all downloaded audio and LLM weights.
 - `:8082` is served directly by `llama-server` for model management and LLM
   inference.
 - rag-cpp listens only inside the container on `127.0.0.1:8083`; the native
-  server exposes its GraphRAG method to the WebUI at `/v1/rag/graph`.
+  server exposes regular RAG at `/v1/rag/retrieve` and GraphRAG at
+  `/v1/rag/graph`. Its C++ hash embeddings are stored in the existing `.ragdb`.
 - Both ports are published by Compose. The Svelte WebUI automatically connects
   to port 8082 on the same hostname. For example, a WebUI loaded from
   `http://192.168.5.151:8081` uses `http://192.168.5.151:8082/v1`. Compose binds

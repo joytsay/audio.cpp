@@ -1185,6 +1185,9 @@ HttpResponse ServerState::handle_request(const HttpRequest & request, bool use_f
     else if (request.method == "POST" && request.path == "/v1/rag/graph") {
         response = handle_rag_request(request.body, "graph");
     }
+    else if (request.method == "POST" && request.path == "/v1/rag/retrieve") {
+        response = handle_rag_request(request.body, "retrieve");
+    }
     else if (request.method == "POST" && request.path == "/v1/rag/index/add") {
         response = handle_rag_request(request.body, "index/add");
     }
@@ -1872,7 +1875,7 @@ HttpResponse ServerState::handle_rag_request(
         return error_response(404, "WebUI is disabled", "not_found");
     }
     if (body_text.empty()) {
-        return error_response(400, "GraphRAG request body is empty", "invalid_request_error");
+        return error_response(400, "RAG request body is empty", "invalid_request_error");
     }
 
     httplib::Client client("http://127.0.0.1:8083");
@@ -1882,7 +1885,7 @@ HttpResponse ServerState::handle_rag_request(
     if (!result) {
         return error_response(
             502,
-            "GraphRAG worker is unavailable: " + httplib::to_string(result.error()),
+            "RAG worker is unavailable: " + httplib::to_string(result.error()),
             "backend_unavailable");
     }
 

@@ -21,18 +21,19 @@ mkdir -p /app/models /app/llama-models /app/rag-data
 
 knowledge_db=/app/rag-data/knowledge.ragdb
 knowledge_fingerprint_file=/app/rag-data/knowledge.sha256
-knowledge_fingerprint="$({ printf '%s\n' 'cjk-unigram-bigram-v1'; find /app/knowledge -type f -name '*.md' -print0 | sort -z | xargs -0 sha256sum; } | sha256sum | awk '{print $1}')"
+knowledge_fingerprint="$({ printf '%s\n' 'cjk-hash-embed-v1-dim-512'; find /app/knowledge -type f -name '*.md' -print0 | sort -z | xargs -0 sha256sum; } | sha256sum | awk '{print $1}')"
 saved_fingerprint="$(cat "$knowledge_fingerprint_file" 2>/dev/null || true)"
 if [[ ! -s "$knowledge_db" || "$knowledge_fingerprint" != "$saved_fingerprint" ]]; then
     echo "[all-in-one] indexing /app/knowledge with rag-cpp"
     knowledge_db_tmp=/app/rag-data/knowledge.ragdb.tmp
     rm -f "$knowledge_db_tmp" "${knowledge_db}.wal"
-    /app/ragcpp index /app/knowledge "$knowledge_db_tmp" --ext=.md --semantic
+    /app/ragcpp index /app/knowledge "$knowledge_db_tmp" --ext=.md --semantic \
+        --hash-dim=512 --exclude=README.md --exclude=system-prompt.md
     mv "$knowledge_db_tmp" "$knowledge_db"
     printf '%s\n' "$knowledge_fingerprint" > "$knowledge_fingerprint_file"
 fi
 
-/app/ragcpp serve "$knowledge_db" --http 8083 --write --graph &
+/app/ragcpp serve "$knowledge_db" --http 8083 --write --graph --hash-dim=512 &
 rag_pid=$!
 
 /app/audiocpp_server \
@@ -102,7 +103,7 @@ bootstrap_pid=$!
 echo "[all-in-one] WebUI: http://0.0.0.0:8081"
 echo "[all-in-one] audio.cpp REST worker: http://0.0.0.0:8081/v1"
 echo "[all-in-one] llama.cpp REST worker: http://0.0.0.0:8082/v1"
-echo "[all-in-one] rag-cpp GraphRAG worker: http://127.0.0.1:8083/rcp"
+echo "[all-in-one] rag-cpp RAG/GraphRAG worker: http://127.0.0.1:8083/rcp"
 
 set +e
 wait -n "$audio_pid" "$llama_pid" "$rag_pid"
