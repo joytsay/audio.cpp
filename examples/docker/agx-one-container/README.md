@@ -82,14 +82,16 @@ all downloaded audio and LLM weights.
   Svelte WebUI and the audio.cpp REST API used for diarization, STT, and TTS.
 - `:8082` is served directly by `llama-server` for model management and LLM
   inference.
+- A second llama.cpp worker uses Qwen3-Embedding-0.6B internally on `:8084`.
+  It is not published to the host; rag-cpp calls it while indexing and querying.
 - rag-cpp listens only inside the container on `127.0.0.1:8083`; the native
   server exposes regular RAG at `/v1/rag/retrieve` and GraphRAG at
-  `/v1/rag/graph`. Its C++ hash embeddings are stored in the existing `.ragdb`.
+  `/v1/rag/graph`. Its Qwen embedding vectors are stored in the existing `.ragdb`.
 - Both ports are published by Compose. The Svelte WebUI automatically connects
   to port 8082 on the same hostname. For example, a WebUI loaded from
   `http://192.168.5.151:8081` uses `http://192.168.5.151:8082/v1`. Compose binds
   all host interfaces so this keeps working if DHCP changes the AGX address;
   worker addresses are not user-configurable.
 
-Override `AUDIOCPP_BOOTSTRAP_PACKAGES` or `LLAMA_BOOTSTRAP_MODEL` in `compose.yml`
-to change the initial downloads. An empty value disables that bootstrap.
+Override `AUDIOCPP_BOOTSTRAP_PACKAGES`, `LLAMA_BOOTSTRAP_MODEL`, or
+`RAG_EMBEDDING_MODEL` in `compose.yml` to change the initial downloads.

@@ -48,10 +48,10 @@ RUN mkdir rag-cpp && \
     git checkout --detach FETCH_HEAD
 
 COPY .devops/rag-cpp-cjk-tokenizer.patch /tmp/rag-cpp-cjk-tokenizer.patch
-COPY .devops/rag-cpp-hash-embedder.patch /tmp/rag-cpp-hash-embedder.patch
+COPY .devops/rag-cpp-llamacpp-embedder.patch /tmp/rag-cpp-llamacpp-embedder.patch
 WORKDIR /src/rag-cpp
 RUN git apply /tmp/rag-cpp-cjk-tokenizer.patch && \
-    git apply /tmp/rag-cpp-hash-embedder.patch
+    git apply /tmp/rag-cpp-llamacpp-embedder.patch
 RUN --mount=type=cache,target=/src/rag-cpp/build,sharing=locked \
     cmake -S . -B build \
         -DCMAKE_BUILD_TYPE=Release \

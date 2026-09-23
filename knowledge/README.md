@@ -2,9 +2,9 @@
 
 This directory replaces the monolithic prompt with a wiki-shaped knowledge
 base. `system-prompt.md` is always sent to the LLM in either RAG mode. The
-content pages are indexed by rag-cpp with BM25 and CJK-aware hash embeddings,
-which are persisted directly in the `.ragdb`. This navigation page and the
-system prompt are excluded from retrieval.
+content pages are indexed by rag-cpp with BM25 and Qwen3 embeddings generated
+by the bundled llama.cpp server. The vectors are persisted directly in the
+`.ragdb`. This navigation page and the system prompt are excluded from retrieval.
 
 ## Rules
 

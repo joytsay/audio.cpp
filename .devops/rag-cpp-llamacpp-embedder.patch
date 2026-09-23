@@ -1,0 +1,148 @@
+diff --git a/cli/main.cpp b/cli/main.cpp
+index 6df7f4c..0cb4802 100644
+--- a/cli/main.cpp
++++ b/cli/main.cpp
+@@ -1,8 +1,8 @@
+ // cli/main.cpp — the `ragcpp` turnkey command-line tool.
+ //
+-//   ragcpp index  <dir> <out.ragdb> [--ext=.md] [--semantic] [--proposition] [--source]
++//   ragcpp index  <dir> <out.ragdb> [--ext=.md] [--semantic] [--llamacpp-port=N] [--exclude=NAME]
+ //   ragcpp query  <db.ragdb> "<query>" [-k N] [--mmr] [--explain]
+-//   ragcpp serve  <db.ragdb> [--http PORT] [--write] [--graph] [--memory] [--feedback] [--all]
++//   ragcpp serve  <db.ragdb> [--http PORT] [--write] [--graph] [--llamacpp-port=N] [--all]
+ //   ragcpp eval   <beir-dir> [--split=test]
+ //   ragcpp info   <db.ragdb>
+ //
+@@ -15,6 +15,7 @@
+ #include <cstdio>
+ #include <cstring>
+ #include <filesystem>
++#include <optional>
+ #include <string>
+ #include <string_view>
+ #include <vector>
+@@ -30,9 +31,9 @@ int usage() {
+     std::printf(
+         "ragcpp — a type-theoretic RAG engine\n\n"
+         "usage:\n"
+-        "  ragcpp index <dir> <out.ragdb> [--ext=.md] [--semantic] [--proposition] [--source] [--contextual]\n"
++        "  ragcpp index <dir> <out.ragdb> [--ext=.md] [--semantic] [--llamacpp-port=N] [--exclude=NAME]\n"
+         "  ragcpp query <db.ragdb> \"<query>\" [-k N] [--mmr] [--explain]\n"
+-        "  ragcpp serve <db.ragdb> [--http PORT] [--write] [--graph] [--memory] [--feedback] [--all]\n"
++        "  ragcpp serve <db.ragdb> [--http PORT] [--write] [--graph] [--llamacpp-port=N] [--all]\n"
+         "  ragcpp eval  <beir-dir> [--split=test]\n"
+         "  ragcpp info  <db.ragdb>\n"
+         "  ragcpp list  [embedders|rerankers]\n");
+@@ -50,6 +51,28 @@ bool flag(const std::vector<std::string>& a, std::string_view f) {
+     return false;
+ }
+ 
++std::optional<rag::dense::AnyEmbedder>
++llamacpp_embedder(const std::vector<std::string>& args) {
++    const auto port = std::stoul(opt(args, "--llamacpp-port", "0"));
++    if (!port) return std::nullopt;
++    rag::dense::LlamaCppConfig config;
++    config.host = opt(args, "--llamacpp-host", "127.0.0.1");
++    config.port = static_cast<std::uint16_t>(port);
++    config.path = opt(args, "--llamacpp-path", "/embedding");
++    config.concurrency = std::stoul(opt(args, "--llamacpp-concurrency", "1"));
++    return rag::dense::AnyEmbedder{rag::dense::LlamaCppEmbedder{std::move(config)}};
++}
++
++bool excluded(const std::vector<std::string>& args, const std::string& uri) {
++    const std::string basename = std::filesystem::path(uri).filename().string();
++    for (const auto& arg : args) {
++        constexpr std::string_view prefix = "--exclude=";
++        if (arg.rfind(prefix, 0) == 0 && arg.substr(prefix.size()) == basename)
++            return true;
++    }
++    return false;
++}
++
+ int cmd_index(const std::vector<std::string>& args) {
+     if (args.size() < 2) return usage();
+     const std::string& dir = args[0];
+@@ -72,6 +95,8 @@ int cmd_index(const std::vector<std::string>& args) {
+     // uses the deterministic extractive context.
+     if (flag(args, "--contextual")) ccfg.contextual = true;
+     rag::index::Corpus corpus{ccfg};
++    if (auto embedder = llamacpp_embedder(args))
++        corpus.set_embedder(std::move(*embedder));
+     rag::loaders::DirOptions lo;
+     // --ext restricts by FILE EXTENSION. This was previously spelled --glob,
+     // which was actively misleading: it never accepted a pattern, so
+@@ -145,6 +170,7 @@ int cmd_index(const std::vector<std::string>& args) {
+ 
+     std::size_t n = 0;
+     for (auto& d : *docs) {
++        if (excluded(args, d.uri)) continue;
+         if (corpus.add_document(d.uri, d.text, d.meta, d.title)) ++n;
+     }
+     if (auto b = corpus.build(); !b) { std::printf("build error: %s\n", b.error().message.c_str()); return 1; }
+@@ -203,6 +229,8 @@ int cmd_serve(const std::vector<std::string>& args) {
+     if (args.empty()) return usage();
+     auto engine = rag::Engine::open(args[0]);
+     if (!engine) { std::printf("open error: %s\n", engine.error().message.c_str()); return 1; }
++    if (auto embedder = llamacpp_embedder(args))
++        engine->with_embedder(std::move(*embedder));
+ 
+     // Resolve --http PORT (space-separated) and boolean feature flags.
+     int http_port = -1;
+@@ -270,9 +298,22 @@ int cmd_info(const std::vector<std::string>& args) {
+ int cmd_info(const std::vector<std::string>& args) {
+     if (args.empty()) return usage();
+     auto corpus = rag::index::Corpus::load(args[0]);
+     if (!corpus) { std::printf("open error: %s\n", corpus.error().message.c_str()); return 1; }
+-    std::printf("%s\n  documents: %zu (live %zu)\n  chunks:    %zu\n  embedder:  %s\n",
++    std::printf("%s\n  documents: %zu (live %zu)\n  chunks:    %zu\n",
+                 args[0].c_str(), corpus->document_count(), corpus->live_document_count(),
+-                corpus->chunk_count(), corpus->has_embedder() ? "yes" : "no (lexical only)");
++                corpus->chunk_count());
++    // The embedder function is reattached by `serve`, not serialized. Inspect
++    // the saved chunk vectors to report whether dense retrieval was indexed.
++    const auto chunks = corpus->chunks();
++    std::size_t vectors = 0;
++    std::size_t dimension = 0;
++    for (const auto& chunk : chunks) {
++        if (chunk.embedding.empty()) continue;
++        ++vectors;
++        if (dimension == 0) dimension = chunk.embedding.size();
++    }
++    std::printf("  vectors:   %zu/%zu chunks", vectors, chunks.size());
++    if (vectors) std::printf(" (%zu dimensions)", dimension);
++    std::printf("\n");
+     return 0;
+ }
+diff --git a/src/dense/backends.cpp b/src/dense/backends.cpp
+index 375ebfe..6886121 100644
+--- a/src/dense/backends.cpp
++++ b/src/dense/backends.cpp
+@@ -155,9 +155,26 @@ Result<std::vector<Vector>> LlamaCppEmbedder::embed(std::span<const std::string>
+         if (j.contains("embedding")) emb = &j["embedding"];
+         else if (j.is_array() && !j.empty() && j[0].contains("embedding")) emb = &j[0]["embedding"];
+         if (!emb || !emb->is_array()) { set_err(Error{Errc::parse_error, "llamacpp: no embedding"}); return; }
++        // llama.cpp can wrap the pooled vector in one extra array, even when
++        // only one input was sent to /embedding. Reject token-level output:
++        // this backend needs exactly one vector per input text.
++        if (!emb->empty() && (*emb)[0].is_array()) {
++            if (emb->size() != 1) {
++                set_err(Error{Errc::parse_error, "llamacpp: expected one pooled embedding"});
++                return;
++            }
++            emb = &(*emb)[0];
++        }
++        if (emb->empty()) { set_err(Error{Errc::parse_error, "llamacpp: empty embedding"}); return; }
+-
++
+         Vector v; v.reserve(emb->size());
+-        for (const auto& x : *emb) v.push_back(x.get<float>());
++        for (const auto& x : *emb) {
++            if (!x.is_number()) {
++                set_err(Error{Errc::parse_error, "llamacpp: non-numeric embedding"});
++                return;
++            }
++            v.push_back(x.get<float>());
++        }
+         normalize(v);
+         out[i] = std::move(v);
+     };

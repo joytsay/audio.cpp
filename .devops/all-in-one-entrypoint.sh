@@ -3,12 +3,13 @@ set -Eeuo pipefail
 
 audio_pid=""
 llama_pid=""
+embedding_pid=""
 rag_pid=""
 bootstrap_pid=""
 
 shutdown() {
     trap - EXIT INT TERM
-    for pid in "$bootstrap_pid" "$rag_pid" "$llama_pid" "$audio_pid"; do
+    for pid in "$bootstrap_pid" "$rag_pid" "$embedding_pid" "$llama_pid" "$audio_pid"; do
         if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
             kill -TERM "$pid" 2>/dev/null || true
         fi
@@ -19,21 +20,61 @@ trap shutdown EXIT INT TERM
 
 mkdir -p /app/models /app/llama-models /app/rag-data
 
+rag_embedding_model="${RAG_EMBEDDING_MODEL:-Qwen/Qwen3-Embedding-0.6B-GGUF:Q8_0}"
+rag_embedding_port="${RAG_EMBEDDING_PORT:-8084}"
+if [[ "$rag_embedding_model" == *'"'* || "$rag_embedding_model" == *$'\n'* || "$rag_embedding_model" == *$'\r'* ]]; then
+    echo "[all-in-one] RAG_EMBEDDING_MODEL contains unsupported characters" >&2
+    exit 1
+fi
+if [[ ! "$rag_embedding_port" =~ ^[0-9]+$ ]]; then
+    echo "[all-in-one] RAG_EMBEDDING_PORT must be an integer from 1 to 65535" >&2
+    exit 1
+fi
+rag_embedding_port=$((10#$rag_embedding_port))
+if (( rag_embedding_port < 1 || rag_embedding_port > 65535 )); then
+    echo "[all-in-one] RAG_EMBEDDING_PORT must be an integer from 1 to 65535" >&2
+    exit 1
+fi
+
+echo "[all-in-one] starting llama.cpp embedding worker: $rag_embedding_model"
+LD_LIBRARY_PATH="/opt/llama.cpp${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" \
+/opt/llama.cpp/llama-server \
+    --host 127.0.0.1 \
+    --port "$rag_embedding_port" \
+    -hf "$rag_embedding_model" \
+    --embedding \
+    --pooling last \
+    --ctx-size "${RAG_EMBEDDING_CTX_SIZE:-4096}" \
+    --ubatch-size "${RAG_EMBEDDING_UBATCH_SIZE:-4096}" \
+    --n-gpu-layers "${RAG_EMBEDDING_GPU_LAYERS:-99}" \
+    --no-webui &
+embedding_pid=$!
+
+until curl -fsS "http://127.0.0.1:${rag_embedding_port}/health" >/dev/null; do
+    if ! kill -0 "$embedding_pid" 2>/dev/null; then
+        echo "[all-in-one] llama.cpp embedding worker exited before becoming ready" >&2
+        exit 1
+    fi
+    sleep 1
+done
+
 knowledge_db=/app/rag-data/knowledge.ragdb
 knowledge_fingerprint_file=/app/rag-data/knowledge.sha256
-knowledge_fingerprint="$({ printf '%s\n' 'cjk-hash-embed-v1-dim-512'; find /app/knowledge -type f -name '*.md' -print0 | sort -z | xargs -0 sha256sum; } | sha256sum | awk '{print $1}')"
+knowledge_fingerprint="$({ printf '%s\n' 'llamacpp-embed-v1' "$rag_embedding_model"; find /app/knowledge -type f -name '*.md' -print0 | sort -z | xargs -0 sha256sum; } | sha256sum | awk '{print $1}')"
 saved_fingerprint="$(cat "$knowledge_fingerprint_file" 2>/dev/null || true)"
 if [[ ! -s "$knowledge_db" || "$knowledge_fingerprint" != "$saved_fingerprint" ]]; then
     echo "[all-in-one] indexing /app/knowledge with rag-cpp"
     knowledge_db_tmp=/app/rag-data/knowledge.ragdb.tmp
     rm -f "$knowledge_db_tmp" "${knowledge_db}.wal"
     /app/ragcpp index /app/knowledge "$knowledge_db_tmp" --ext=.md --semantic \
-        --hash-dim=512 --exclude=README.md --exclude=system-prompt.md
+        --llamacpp-port="$rag_embedding_port" \
+        --exclude=README.md --exclude=system-prompt.md
     mv "$knowledge_db_tmp" "$knowledge_db"
     printf '%s\n' "$knowledge_fingerprint" > "$knowledge_fingerprint_file"
 fi
 
-/app/ragcpp serve "$knowledge_db" --http 8083 --write --graph --hash-dim=512 &
+/app/ragcpp serve "$knowledge_db" --http 8083 --write --graph \
+    --llamacpp-port="$rag_embedding_port" &
 rag_pid=$!
 
 /app/audiocpp_server \
@@ -103,10 +144,11 @@ bootstrap_pid=$!
 echo "[all-in-one] WebUI: http://0.0.0.0:8081"
 echo "[all-in-one] audio.cpp REST worker: http://0.0.0.0:8081/v1"
 echo "[all-in-one] llama.cpp REST worker: http://0.0.0.0:8082/v1"
+echo "[all-in-one] llama.cpp embedding worker: http://127.0.0.1:${rag_embedding_port}"
 echo "[all-in-one] rag-cpp RAG/GraphRAG worker: http://127.0.0.1:8083/rcp"
 
 set +e
-wait -n "$audio_pid" "$llama_pid" "$rag_pid"
+wait -n "$audio_pid" "$llama_pid" "$embedding_pid" "$rag_pid"
 status=$?
 set -e
 echo "[all-in-one] a required worker exited with status $status" >&2

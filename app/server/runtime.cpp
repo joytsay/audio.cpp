@@ -25,6 +25,7 @@
 #include <cmath>
 #include <cctype>
 #include <cstdint>
+#include <cstdio>
 #include <fstream>
 #include <functional>
 #include <iomanip>
@@ -1179,6 +1180,9 @@ HttpResponse ServerState::handle_request(const HttpRequest & request, bool use_f
     else if (request.method == "POST" && request.path == "/v1/ui/prompt") {
         response = handle_prompt_save(request.body);
     }
+    else if (request.method == "GET" && request.path == "/v1/rag/info") {
+        response = handle_rag_info();
+    }
     else if (request.method == "POST" && request.path == "/v1/rag/initialize") {
         response = handle_rag_request(request.body, "initialize");
     }
@@ -1867,6 +1871,32 @@ HttpResponse ServerState::handle_directory_browser(const std::string & body_text
     return json_response(response + "]}");
 }
 #endif
+
+HttpResponse ServerState::handle_rag_info() const {
+    if (!config_.ui_enabled) {
+        return error_response(404, "WebUI is disabled", "not_found");
+    }
+#if defined(_WIN32)
+    return error_response(501, "RAG index status is unavailable on Windows", "not_implemented");
+#else
+    // The fixed command mirrors `docker exec audiocpp /app/ragcpp info
+    // /app/rag-data/knowledge.ragdb`; no request input is passed to the shell.
+    FILE * pipe = popen("/app/ragcpp info /app/rag-data/knowledge.ragdb 2>&1", "r");
+    if (!pipe) {
+        return error_response(502, "Could not start ragcpp info", "backend_unavailable");
+    }
+    std::string output;
+    char buffer[1024];
+    while (fgets(buffer, sizeof(buffer), pipe) && output.size() < 65536) {
+        output += buffer;
+    }
+    const int status = pclose(pipe);
+    if (status != 0) {
+        return error_response(502, "ragcpp info failed: " + output, "backend_unavailable");
+    }
+    return json_response("{\"output\":" + json_quote(output) + "}");
+#endif
+}
 
 HttpResponse ServerState::handle_rag_request(
     const std::string & body_text,
