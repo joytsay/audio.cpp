@@ -4,11 +4,11 @@
   import { catalog } from '$lib/catalog';
   import MediaPreview from '$lib/MediaPreview.svelte';
   import { apiEndpoint, chatText, endpointBlob, endpointJson, endpointModels, endpointRouterModels, formatChatMessages, routerEndpoint, siblingWorkerEndpoint, type ChatMessage, type OpenAIModel } from '$lib/openai';
-  import { graphCitations, graphContext, graphSearch, matchedExampleOutput, ragSearch } from '$lib/rag';
+  import { graphCitations, graphContext, graphSearch, ragSearch } from '$lib/rag';
   import type { CatalogEntry, InstallPackageChoice, StringMap } from '$lib/types';
   import { createLocalId, deleteVoice as deleteSavedVoice, listVoices, saveVoice, type SavedVoice } from '$lib/voices';
-  import bundledKnowledgeSystemPrompt from '../../../../knowledge/system-prompt.md?raw';
   import systemPromt from '../../../../prompt.csv?raw';
+  import bundledHotwords from '../../../../hotword.csv?raw';
   import centralStationExample from '../../../../assets/resources/中央監控站2.mp3?url';
   import controlRoomExample from '../../../../assets/resources/中控室.mp3?url';
   import employeeCheckpointExample from '../../../../assets/resources/員工檢查哨.mp3?url';
@@ -45,7 +45,25 @@
   let voice = '';
   let voices: string[] = [];
   let language = '';
-  let asrContext = '';
+  function asrContextFromCsv(csv: string): string | null {
+    const match = csv.replace(/^\uFEFF/, '').match(/^context\r?\n"([\s\S]*)"\r?\n?$/);
+    return match ? match[1].replace(/""/g, '"') : null;
+  }
+  const defaultAsrContext = asrContextFromCsv(bundledHotwords) || 'Technical terms: X光機 T5';
+  let asrContext = defaultAsrContext;
+  let playbackStatus = '';
+  function autoplaySpeech(node: HTMLAudioElement) {
+    const play = () => {
+      playbackStatus = '';
+      document.querySelectorAll<HTMLAudioElement>('.conversation-turn .assistant audio').forEach((audio) => {
+        if (audio !== node) audio.pause();
+      });
+      void node.play().catch(() => { playbackStatus = 'Press Play on the response audio to enable playback.'; });
+    };
+    node.addEventListener('loadeddata', play, { once: true });
+    if (node.readyState >= 2) play();
+    return { destroy() { node.removeEventListener('loadeddata', play); node.pause(); } };
+  }
   let chatHistory: ChatMessage[] = [];
   interface ConversationTurn {
     id: string; name: string; inputAudio: string; transcript: string; reply: string;
@@ -79,7 +97,7 @@
     status = 'Type a message, choose an example, or record audio to start a new conversation.';
   }
   let systemPrompt = systemPromt.trim();
-  let promptMode: PromptMode = 'rag';
+  let promptMode: PromptMode = 'system';
   let useRag = true;
   let useLlm = true;
   let useTts = true;
@@ -177,7 +195,7 @@
 
   function save() {
     localStorage.setItem('audiocpp.conversation.settings', JSON.stringify({
-      vadModel, sttModel, llmModel, ttsModel,
+      promptDefaultsVersion: 2, vadModel, sttModel, llmModel, ttsModel,
       audioBaseUrl, llmBaseUrl, asrContext, voice, language, promptMode,
       useRag, useLlm, useTts, temperature, maxTokens,
       ragResultCount, ragSearchMode
@@ -195,6 +213,31 @@
       status = 'System prompt saved to prompt.csv.';
     } catch (error) {
       status = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  async function saveAsrContextCsv() {
+    try {
+      const content = `context\n"${asrContext.replace(/"/g, '""')}"\n`;
+      await endpointJson(audioBaseUrl, 'ui/hotword', {
+        method: 'POST', body: JSON.stringify({ content })
+      });
+      save();
+      status = 'Context prompt saved to hotword.csv.';
+    } catch (error) {
+      status = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  async function refreshPrompts() {
+    const results = await Promise.allSettled([
+      endpointJson<{ content: string }>(audioBaseUrl, 'ui/prompt'),
+      endpointJson<{ content: string }>(audioBaseUrl, 'ui/hotword')
+    ]);
+    if (results[0].status === 'fulfilled') systemPrompt = results[0].value.content;
+    if (results[1].status === 'fulfilled') {
+      const context = asrContextFromCsv(results[1].value.content);
+      if (context !== null) asrContext = context;
     }
   }
 
@@ -343,15 +386,6 @@
       voices = result.voices || selected?.builtinVoices || [];
       if (!voices.includes(voice)) voice = voices[0] || '';
     } catch { voices = selected?.builtinVoices || []; }
-  }
-
-  async function currentKnowledgeSystemPrompt(signal?: AbortSignal): Promise<string> {
-    try {
-      const response = await endpointJson<{ files?: Array<{ path: string; content: string }> }>(audioBaseUrl, 'ui/knowledge', {}, signal);
-      return response.files?.find((file) => file.path === 'system-prompt.md')?.content || bundledKnowledgeSystemPrompt;
-    } catch {
-      return bundledKnowledgeSystemPrompt;
-    }
   }
 
   async function refreshSavedCloneVoices() {
@@ -762,18 +796,15 @@
       if (!transcript) throw new Error('The message is empty.');
 
       let llmSystemPrompt = systemPrompt.trim();
-      let exampleOutput = '';
       if (promptMode !== 'system' && useRag) {
-        step('rag', 'Retrieving semiconductor knowledge…');
+        step('rag', 'Retrieving receptionist knowledge…');
         const ragResult = promptMode === 'rag'
           ? await ragSearch(audioBaseUrl, transcript, ragResultCount, aborter.signal)
           : await graphSearch(audioBaseUrl, transcript, ragSearchMode, ragResultCount, aborter.signal);
         ragText = graphContext(ragResult);
         ragSources = graphCitations(ragResult);
         if (!ragText) throw new Error('RAG returned no relevant knowledge.');
-        exampleOutput = matchedExampleOutput(ragResult, transcript);
-        const knowledgeSystemPrompt = await currentKnowledgeSystemPrompt(aborter.signal);
-        llmSystemPrompt = `${knowledgeSystemPrompt.trim()}\n\n# 檢索知識\n\n以下內容是本次正規化的權威參考資料。必須套用明確命中的「左側詞 => 右側詞」。若最高相關結果是與使用者相同話語的完整「輸入／輸出」範例，即使 STT 含有重複、標點、語助詞、漏字或近音誤字，也必須只輸出該範例的「輸出：」內容。不要輸出來源、分數、解釋或範例說明。\n\n${ragText}`;
+        llmSystemPrompt = `${systemPrompt.trim()}\n\n# 本次檢索參考資料\n\n以下資料用於查核部門、公開聯絡窗口與轉接規則。根據使用者問題選擇相關事實，並依上方客服角色與對話規則回答。不要朗讀來源、分數或檢索格式；未公開的分機不可推測。\n\n${ragText}`;
       }
 
       const messages: ChatMessage[] = [];
@@ -788,7 +819,7 @@
           body: JSON.stringify({ model: llmModel, messages, temperature, max_tokens: maxTokens, stream: false }),
           signal: aborter.signal
         }, aborter.signal);
-        llmResponse = exampleOutput || chatText(llm);
+        llmResponse = chatText(llm);
 
         // Jetson uses unified memory. Release the LLM worker before the TTS
         // worker creates its CUDA/cuBLAS context for this sequential pipeline.
@@ -847,17 +878,16 @@
       const saved = JSON.parse(localStorage.getItem('audiocpp.conversation.settings') || '{}');
       audioBaseUrl = saved.audioBaseUrl || audioBaseUrl;
       llmBaseUrl = saved.llmBaseUrl || llmBaseUrl;
-      asrContext = saved.asrContext || '';
+      asrContext = saved.asrContext ?? defaultAsrContext;
       vadModel = saved.vadModel || vadModel;
       sttModel = saved.sttModel || sttModel;
       llmModel = saved.llmModel || '';
       ttsModel = saved.ttsModel || ttsModel;
       voice = saved.voice || '';
       language = saved.language || '';
-      systemPrompt = localStorage.getItem('audiocpp.pipeline.systemPrompt') || systemPrompt;
-      promptMode = saved.promptMode === 'rag' || saved.promptMode === 'graphrag'
+      promptMode = saved.promptDefaultsVersion === 2 && (saved.promptMode === 'rag' || saved.promptMode === 'graphrag')
         ? saved.promptMode
-        : 'rag';
+        : 'system';
       useRag = saved.useRag ?? useRag;
       ragResultCount = Math.max(1, Math.min(20, Number(saved.ragResultCount ?? ragResultCount) || ragResultCount));
       ragSearchMode = saved.ragSearchMode === 'global' ? 'global' : 'local';
@@ -866,6 +896,7 @@
       temperature = Number(saved.temperature ?? temperature);
       maxTokens = Number(saved.maxTokens ?? maxTokens);
     } catch { /* use defaults */ }
+    refreshPrompts();
     refreshAll();
     refreshSavedCloneVoices();
     runtimeTimer = setInterval(() => {
@@ -911,6 +942,7 @@
     <p class="field-help">Silero VAD detects speech during continuous microphone input. Uploaded audio and examples go directly to ASR.</p>
     <label>ASR model<select bind:value={sttModel} on:change={save}>{#each sttModels as entry}<option value={entry.selectionId}>{entry.label}</option>{/each}</select></label>
     <label>Context prompt (optional)<textarea rows="2" bind:value={asrContext} on:change={save} placeholder="Terminology or names to recognize"></textarea></label>
+    <div class="prompt-actions"><button on:click={saveAsrContextCsv}>Save CSV</button></div>
     <label>ASR language<input bind:value={language} placeholder="auto" on:change={save} /></label>
     <label class="toggle pipeline-toggle"><input type="checkbox" bind:checked={useLlm} on:change={save} /><span></span>Run LLM instruct model</label>
     {#if useLlm}
@@ -980,7 +1012,7 @@
           </article>
           {#if turn.reply || turn.audio}
             <article class="pipeline-message assistant"><span>ASSISTANT</span><p>{turn.reply}</p>
-              {#if turn.audio}<div class="pipeline-audio"><audio controls autoplay={turn.id === activeTurnId} src={turn.audio} on:play={() => replyPlaying = true} on:pause={() => replyPlaying = false} on:ended={() => replyPlaying = false}></audio><a href={turn.audio} download={`voice-response-${index + 1}.wav`}>Save WAV</a></div>{/if}
+              {#if turn.audio}<div class="pipeline-audio"><audio controls autoplay use:autoplaySpeech src={turn.audio} on:play={() => replyPlaying = true} on:pause={() => replyPlaying = false} on:ended={() => replyPlaying = false}></audio><a href={turn.audio} download={`voice-response-${index + 1}.wav`}>Save WAV</a></div>{/if}
             </article>
           {/if}
           <p class="field-help" class:turn-error={turn.state === 'failed'}>{turn.status}</p>
@@ -996,6 +1028,7 @@
         <div class="empty-output"><div class="wave">∿</div><p>Type a message, choose an example, upload audio, or record a message to start a conversation.</p></div>
       {/each}
     </div>
+    {#if playbackStatus}<p class="field-help">{playbackStatus}</p>{/if}
     <div class="conversation-composer">
     <div class="continuous-microphone">
       <div><strong>Continuous microphone</strong><button class:danger={microphoneListening || microphoneStarting} disabled={!(microphoneListening || microphoneStarting) && (running || !canGenerateReply || !sttModel || !vadModel)} on:click={toggleMicrophone}>{microphoneListening || microphoneStarting ? 'Stop listening' : 'Start listening'}</button></div>

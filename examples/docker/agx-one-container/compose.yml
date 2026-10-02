@@ -49,8 +49,10 @@ services:
       - ../../../knowledge:/app/knowledge
       - ../../../voices:/app/voices
       - ../../../prompt.csv:/app/prompt.csv
+      - ../../../hotword.csv:/app/hotword.csv
       # Runtime-only routing changes must not require recompiling the native binaries.
       - ../../../.devops/all-in-one-entrypoint.sh:/app/all-in-one-entrypoint.sh:ro
+      - ../../../.devops/generate-prompt-knowledge.sh:/app/generate-prompt-knowledge.sh:ro
       - ../../../.devops/all-in-one-server.json:/app/all-in-one-server.json:ro
     healthcheck:
       test:

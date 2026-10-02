@@ -58,15 +58,18 @@ until curl -fsS "http://127.0.0.1:${rag_embedding_port}/health" >/dev/null; do
     sleep 1
 done
 
+# Generate both retrieval passages and linked GraphRAG documents from prompt.csv.
+bash /app/generate-prompt-knowledge.sh /app/prompt.csv /app/rag-data/receptionist-corpus
+rag_knowledge_dir=/app/rag-data/receptionist-corpus
 knowledge_db=/app/rag-data/knowledge.ragdb
 knowledge_fingerprint_file=/app/rag-data/knowledge.sha256
-knowledge_fingerprint="$({ printf '%s\n' 'llamacpp-embed-v1' "$rag_embedding_model"; find /app/knowledge -type f -name '*.md' -print0 | sort -z | xargs -0 sha256sum; } | sha256sum | awk '{print $1}')"
+knowledge_fingerprint="$({ printf '%s\n' 'receptionist-prompt-v1' "$rag_embedding_model"; sha256sum /app/prompt.csv /app/generate-prompt-knowledge.sh; find "$rag_knowledge_dir" -type f -name '*.md' -print0 | sort -z | xargs -0 sha256sum; } | sha256sum | awk '{print $1}')"
 saved_fingerprint="$(cat "$knowledge_fingerprint_file" 2>/dev/null || true)"
 if [[ ! -s "$knowledge_db" || "$knowledge_fingerprint" != "$saved_fingerprint" ]]; then
-    echo "[all-in-one] indexing /app/knowledge with rag-cpp"
+    echo "[all-in-one] indexing prompt.csv receptionist corpus with rag-cpp"
     knowledge_db_tmp=/app/rag-data/knowledge.ragdb.tmp
     rm -f "$knowledge_db_tmp" "${knowledge_db}.wal"
-    /app/ragcpp index /app/knowledge "$knowledge_db_tmp" --ext=.md --semantic \
+    /app/ragcpp index "$rag_knowledge_dir" "$knowledge_db_tmp" --ext=.md --semantic \
         --llamacpp-port="$rag_embedding_port" \
         --exclude=README.md --exclude=system-prompt.md
     mv "$knowledge_db_tmp" "$knowledge_db"

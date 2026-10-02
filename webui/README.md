@@ -59,7 +59,7 @@ generation, conversion, separation, VAD, diarization, alignment, and voice desig
   prompt (a direct browser download remains available as a fallback);
 - a dedicated `/#/pipeline` chatbot page with turn-by-turn audio, ASR transcripts, LLM replies,
   cloned speech, RAG sources, and conversation history passed to the LLM. It defaults to Silero VAD,
-  Qwen3-ASR 0.6B with an optional context prompt, regular RAG, and ZipVoice cloning. All five
+  Qwen3-ASR 0.6B with an optional context prompt, the receptionist system prompt in `prompt.csv`, and ZipVoice cloning. RAG remains selectable. All five
   Chinese example clips are bundled and selectable in the conversation composer. Typed messages
   use the same chat history and run RAG → LLM → TTS directly, while uploaded audio runs ASR first. The continuous microphone uses Silero VAD on live
   audio windows, collects speech until a silent window, and sends each spoken turn automatically.
@@ -115,3 +115,12 @@ The frontend consumes:
 - `webui/native/demo_voices/` for demo reference voices embedded in the server.
 
 English strings are built into `native/src/lib/i18n.ts` and are the fallback for missing translations.
+
+The pipeline page displays the bundled cloud logo and plays new TTS replies automatically
+when the browser permits playback. ASR Context prompt defaults to the expanded `hotword.csv` terminology beginning with
+`Technical terms: X光機 T5`, followed by a compact, deduplicated list of semiconductor keywords;
+its **Save CSV** button persists `hotword.csv` separately from the LLM's `prompt.csv`.
+Both CSVs reload from the server on page entry. Prompt editing requires `--ui-management`.
+The receptionist prompt uses public contacts verified from [TSMC contact information](https://www.tsmc.com/chinese/contact-us)
+and [business contacts](https://www.tsmc.com/chinese/aboutTSMC/business_contacts); it confirms
+routing requests and does not claim a completed telephone transfer without a telephony integration.

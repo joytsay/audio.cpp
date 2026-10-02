@@ -44,8 +44,9 @@ The first build downloads the L4T CUDA runtime and recompiles both native
 engines. It also installs the WebUI's Node dependencies and builds the Svelte
 application inside Docker, so host-side `npm ci` and `npm run build` commands
 are not required. Existing `audio-models`, `llama-models`, and `rag-data`
-volumes are reused. The knowledge index is rebuilt automatically when the
-bundled markdown corpus changes.
+volumes are reused. The receptionist index is generated from `prompt.csv` and rebuilt automatically when
+that source changes. Both regular RAG and GraphRAG use its linked department/contact pages.
+Restart `voice-ai` after saving prompt edits to refresh the index.
 
 `BUILD_JOBS=2` intentionally limits compiler memory use on Jetson. Increase it
 only when the board has enough free unified memory and swap. This deployment
@@ -102,12 +103,15 @@ all downloaded audio and LLM weights.
 
 The continuous microphone uses bundled Silero VAD for speech detection and automatic turns.
 Uploaded files and examples bypass VAD. Text messages bypass ASR and share the same conversation
-history as microphone and file inputs. The conversation runs Qwen3-ASR 0.6B, hybrid RAG, the existing
+history as microphone and file inputs. The conversation runs Qwen3-ASR 0.6B, the default `prompt.csv` grounding (with regular RAG and GraphRAG selectable), the existing
 `bartowski/Qwen2.5-3B-Instruct-GGUF:Q4_K_M` LLM, and ZipVoice-Distill voice cloning.
 The page sends prior completed user/assistant messages to the LLM, retains each turn's audio
 and stage details, and offers the five bundled Chinese MP3 examples. Enter a ZipVoice
 reference clip and its matching transcript or select a configured voice before sending audio.
-ASR terminology and names can be supplied in the optional Context prompt.
+ASR Context prompt loads the compact semiconductor keywords in `hotword.csv`,
+beginning with `Technical terms: X光機 T5`; Save CSV persists `hotword.csv`.
+The default LLM grounding is the 台積電 receptionist in `prompt.csv`.
+Regular RAG and GraphRAG are generated from that same source.
 
 After updating the frontend, rebuild and recreate this stack so the native server includes
 the new embedded UI and Caddy starts with its proxy configuration:

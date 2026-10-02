@@ -114,7 +114,8 @@ private:
     HttpResponse handle_ui_upload(const HttpRequest & request);
     HttpResponse handle_knowledge_list() const;
     HttpResponse handle_knowledge_save(const std::string & body_text);
-    HttpResponse handle_prompt_save(const std::string & body_text);
+    HttpResponse handle_prompt_get(const char * filename) const;
+    HttpResponse handle_prompt_save(const std::string & body_text, const char * filename = "prompt.csv");
     std::filesystem::path knowledge_root() const;
     std::filesystem::path resolve_knowledge_file(const std::string & relative_path) const;
 #if defined(AUDIOCPP_HAS_NATIVE_MODEL_MANAGER)
@@ -234,6 +235,7 @@ private:
     std::filesystem::path upload_root_;
     std::mutex upload_root_mutex_;
     std::filesystem::path repository_root_;
+    mutable std::mutex prompt_files_mutex_;
 #if defined(AUDIOCPP_HAS_NATIVE_MODEL_MANAGER)
     std::filesystem::path default_models_root_;
     std::filesystem::path models_root_;

@@ -23,3 +23,22 @@ by the bundled llama.cpp server. The vectors are persisted directly in the
 
 Each terminology page is intentionally small enough to form a focused RAGFlow
 document while retaining headings that describe its place in the hierarchy.
+
+## 台積電 receptionist corpus
+
+The chatbot deployment now indexes [receptionist/overview.md](receptionist/overview.md),
+section passages, and individual department/contact pages generated from `../prompt.csv`.
+Markdown links connect the passages for GraphRAG. Regular RAG uses the same documents.
+The original terminology pages remain available for other uses and are excluded from this
+receptionist index. All chatbot grounding modes use `prompt.csv` as the system prompt.
+
+Regenerate the repository corpus after editing `prompt.csv`:
+
+```bash
+bash .devops/generate-prompt-knowledge.sh prompt.csv knowledge/receptionist
+```
+
+The AGX entrypoint generates its runtime corpus under `/app/rag-data/receptionist-corpus`
+and rebuilds the shared BM25/Qwen embedding index whenever prompt content or the generator
+changes. The worker serves regular hybrid retrieval and GraphRAG local/global search.
+Restart the voice-ai container after a runtime prompt edit to rebuild its index.

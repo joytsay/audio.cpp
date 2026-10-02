@@ -30,6 +30,7 @@ COPY assets/resources/ ./assets/resources/
 COPY model_specs/ ./model_specs/
 COPY knowledge/ ./knowledge/
 COPY prompt.csv ./prompt.csv
+COPY hotword.csv ./hotword.csv
 RUN npm --prefix webui/native run build
 
 # ── RAG.CPP: Static RAG / GraphRAG worker ────────────────────────────────────
@@ -237,13 +238,15 @@ USER root
 COPY --from=llama-build /out/ /opt/llama.cpp/
 COPY --from=rag-build /src/ragcpp /app/ragcpp
 COPY .devops/all-in-one-entrypoint.sh /app/all-in-one-entrypoint.sh
+COPY .devops/generate-prompt-knowledge.sh /app/generate-prompt-knowledge.sh
 COPY .devops/all-in-one-server.json /app/all-in-one-server.json
 COPY knowledge/ /app/knowledge/
 COPY prompt.csv /app/prompt.csv
+COPY hotword.csv /app/hotword.csv
 
 RUN chmod +x /app/all-in-one-entrypoint.sh && \
     mkdir -p /app/models /app/llama-models /app/rag-data && \
-    chown -R ubuntu:ubuntu /app/models /app/llama-models /app/rag-data /app/knowledge /app/prompt.csv
+    chown -R ubuntu:ubuntu /app/models /app/llama-models /app/rag-data /app/knowledge /app/prompt.csv /app/hotword.csv
 
 USER ubuntu
 
