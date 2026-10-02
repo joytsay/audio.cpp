@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onDestroy, onMount, tick } from 'svelte';
   import { browserDecodeToWav, encodePcm16Wav } from '$lib/audio';
+  import { traditionalAsrText } from '$lib/asr-text';
   import { catalog } from '$lib/catalog';
   import MediaPreview from '$lib/MediaPreview.svelte';
   import { apiEndpoint, chatText, endpointBlob, endpointJson, endpointModels, endpointRouterModels, formatChatMessages, routerEndpoint, siblingWorkerEndpoint, type ChatMessage, type OpenAIModel } from '$lib/openai';
@@ -163,6 +164,9 @@
   let runtimeTimer: ReturnType<typeof setInterval> | null = null;
 
   $: vadModels = models.filter((entry) => entry.task === 'vad');
+  $: selectedVadModel = models.find((entry) => entry.selectionId === vadModel);
+  $: vadDetectorName = (catalog.find((entry) => entry.id === selectedVadModel?.modelId)?.display_name ||
+    selectedVadModel?.label || 'Selected VAD').replace(/\s*\([^)]*\)$/, '');
   $: sttModels = models.filter((entry) => ['asr', 'stt'].includes(entry.task || ''));
   $: ttsModels = models.filter((entry) => ['tts', 'clon'].includes(entry.task || ''));
   // Keep this lookup inline: Svelte's legacy reactive dependency analysis
@@ -530,6 +534,17 @@
     return new File([encodePcm16Wav(audio)], 'microphone-turn.wav', { type: 'audio/wav' });
   }
 
+  async function changeMicrophoneDetector() {
+    save();
+    const restart = microphoneListening || microphoneStarting;
+    if (restart) {
+      // Discard buffered speech and any response from the previous detector.
+      stopMicrophone();
+      await tick();
+      await toggleMicrophone();
+    }
+  }
+
   async function detectMicrophoneSpeech(samples: Float32Array, generation: number) {
     const context = microphoneContext;
     if (!context || !microphoneListening || microphoneDetecting) return;
@@ -546,7 +561,8 @@
       if (running || replyPlaying) { resetMicrophoneBuffers(); return; }
       const segments = Array.isArray(result?.segments) ? result.segments :
         Array.isArray(result?.speech_segments) ? result.speech_segments : [];
-      if (segments.some((segment: any) => Number(segment.end_sample) > Number(segment.start_sample))) {
+      const hasSpeech = segments.some((segment: any) => Number(segment.end_sample) > Number(segment.start_sample));
+      if (hasSpeech) {
         if (!microphoneSpeech.length && microphonePreRoll) {
           microphoneSpeech.push(microphonePreRoll);
           microphoneSpeechFrames += microphonePreRoll.length;
@@ -554,13 +570,13 @@
         microphoneSpeech.push(samples);
         microphoneSpeechFrames += samples.length;
         microphonePreRoll = null;
-        microphoneStatus = 'Speech detected · capturing your turn…';
+        microphoneStatus = `${vadDetectorName} · speech detected · capturing your turn…`;
       } else if (!microphoneSpeech.length) {
         microphonePreRoll = samples;
-        microphoneStatus = 'Listening · Silero VAD is detecting speech…';
+        microphoneStatus = `Listening · ${vadDetectorName} is detecting speech…`;
       }
       // A silent VAD window ends the turn; cap uninterrupted speech at 15 seconds.
-      if (microphoneSpeech.length && (!segments.length || microphoneSpeechFrames >= context.sampleRate * 15)) {
+      if (microphoneSpeech.length && (!hasSpeech || microphoneSpeechFrames >= context.sampleRate * 15)) {
         const utterance = microphoneWav(microphoneSpeech, context);
         resetMicrophoneBuffers();
         chooseFile(utterance, true);
@@ -569,7 +585,7 @@
         microphoneStatus = 'Processing your turn…';
         await runPipeline('audio');
         if (generation === microphoneGeneration && microphoneListening) {
-          microphoneStatus = replyPlaying ? 'Speaking · listening resumes after the reply' : 'Listening · Silero VAD is detecting speech…';
+          microphoneStatus = replyPlaying ? 'Speaking · listening resumes after the reply' : `Listening · ${vadDetectorName} is detecting speech…`;
         }
       }
     } catch (error) {
@@ -614,7 +630,7 @@
       microphoneMute.connect(microphoneContext.destination);
       microphoneListening = true;
       microphoneStarting = false;
-      microphoneStatus = 'Listening · Silero VAD is detecting speech…';
+      microphoneStatus = `Listening · ${vadDetectorName} is detecting speech…`;
       microphoneProcessor.onaudioprocess = (event) => {
         if (!microphoneListening || !microphoneContext) return;
         if (running || replyPlaying) {
@@ -788,10 +804,10 @@
           method: 'POST',
           body: JSON.stringify({ model: speechModel.modelId, audio: audioPath, language, ...(asrContext.trim() ? { text: asrContext.trim() } : {}) })
         }, aborter.signal);
-        plainTranscript = typeof stt.text === 'string' ? stt.text.trim() : '';
+        plainTranscript = typeof stt.text === 'string' ? traditionalAsrText(stt.text) : '';
       }
       sttText = plainTranscript;
-      // Use the submitted text or exact ASR transcript for retrieval and history.
+      // Typed text is unchanged; ASR uses Traditional Chinese for display, retrieval and history.
       transcript = plainTranscript;
       if (!transcript) throw new Error('The message is empty.');
 
@@ -938,8 +954,8 @@
     <fieldset class="pipeline-settings-fields" disabled={running}>
     <label>Audio & RAG API<input bind:value={audioBaseUrl} on:change={save} /></label>
     <label>LLM API<input bind:value={llmBaseUrl} on:change={save} /></label>
-    <label>Microphone speech detection<select bind:value={vadModel} on:change={save}>{#each vadModels as entry}<option value={entry.selectionId}>{entry.label}</option>{/each}</select></label>
-    <p class="field-help">Silero VAD detects speech during continuous microphone input. Uploaded audio and examples go directly to ASR.</p>
+    <label>Microphone speech detection<select bind:value={vadModel} on:change={changeMicrophoneDetector}>{#each vadModels as entry}<option value={entry.selectionId}>{entry.label}</option>{/each}</select></label>
+    <p class="field-help">{vadDetectorName} detects speech during continuous microphone input. Changing the model restarts detection. Uploaded audio and examples go directly to ASR.</p>
     <label>ASR model<select bind:value={sttModel} on:change={save}>{#each sttModels as entry}<option value={entry.selectionId}>{entry.label}</option>{/each}</select></label>
     <label>Context prompt (optional)<textarea rows="2" bind:value={asrContext} on:change={save} placeholder="Terminology or names to recognize"></textarea></label>
     <div class="prompt-actions"><button on:click={saveAsrContextCsv}>Save CSV</button></div>
@@ -1033,7 +1049,7 @@
     <div class="continuous-microphone">
       <div><strong>Continuous microphone</strong><button class:danger={microphoneListening || microphoneStarting} disabled={!(microphoneListening || microphoneStarting) && (running || !canGenerateReply || !sttModel || !vadModel)} on:click={toggleMicrophone}>{microphoneListening || microphoneStarting ? 'Stop listening' : 'Start listening'}</button></div>
       <p role="status">{microphoneStatus}</p>
-      <small>Speak naturally. Silero VAD detects speech and sends each turn after a pause. Listening pauses while the assistant responds.</small>
+      <small>Speak naturally. {vadDetectorName} detects speech and sends each turn after a pause. Listening pauses while the assistant responds.</small>
     </div>
     <label>Message<textarea class="chat-text-input" rows="3" bind:value={textInput} disabled={running} placeholder="Type a message… (Enter to send, Shift+Enter for a new line)" on:keydown={(event) => {
       if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {

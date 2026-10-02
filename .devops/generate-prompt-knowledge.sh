@@ -30,13 +30,13 @@ BEGIN {
     print $0 >> file
     if ($0 ~ /^\|/ && $0 !~ /^\| ---/ && $0 !~ /^\| 需求/) {
         count = split($0, fields, "|")
-        if (count >= 6) {
+        if (count >= 5) {
             contact++
-            for (i=2; i<=5; i++) gsub(/^[ \t]+|[ \t]+$/, "", fields[i])
+            for (i=2; i<=4; i++) gsub(/^[ \t]+|[ \t]+$/, "", fields[i])
             contactname = sprintf("contact-%02d.md", contact)
             contactfile = out "/" contactname
             print "# 台積電聯絡窗口：" fields[2] "\n\n來源：prompt.csv。\n" > contactfile
-            print "窗口 / 需求：" fields[2] "\n公開電話：" fields[3] "\n公開分機：" fields[4] "\n電子郵件：" fields[5] >> contactfile
+            print "窗口 / 需求：" fields[2] "\n公開電話：" fields[3] "\n公開分機：" fields[4] >> contactfile
             print "\n公開電話不等於內部分機。未公開的分機不可編造。電話與分機只適用於這個窗口；中國業務發展處的分機不適用於台灣總機。" >> contactfile
             print "\n[全部公開聯絡窗口](" filename ") · [客服導覽](overview.md)" >> contactfile
             print "- [" fields[2] "](" contactname ")" >> overview
