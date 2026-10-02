@@ -49,15 +49,15 @@ bundled markdown corpus changes.
 
 `BUILD_JOBS=2` intentionally limits compiler memory use on Jetson. Increase it
 only when the board has enough free unified memory and swap. This deployment
-builds only the three native audio families used by the pipeline rather than
-the full audio.cpp model catalog. It also builds llama.cpp with that same CUDA
+builds the full audio.cpp model catalog, including the pipeline models. It also builds llama.cpp with that same CUDA
 toolkit and SM87 target; a newer prebuilt llama.cpp CUDA image is not mixed into
 the JetPack runtime. NCCL is disabled because AGX Orin uses one CUDA device;
 this also keeps the Jetson runtime independent of the build image's NCCL ABI.
 
-Open `http://AGX-IP-ADDRESS:8081`. The WebUI becomes available while the native
-model manager downloads the default diarization, ASR, and TTS packages and
-llama.cpp downloads the instruct model. Downloads persist in two named volumes,
+Open `https://192.168.5.151:8083/` for the dedicated voice chatbot, or
+`http://AGX-IP-ADDRESS:8081` for Studio. The WebUI becomes available while the native
+model manager downloads the default ASR and ZipVoice packages and
+llama.cpp downloads the instruct model. Downloads persist in the host model directories,
 so later starts reuse them.
 
 Check service state with:
@@ -87,11 +87,34 @@ all downloaded audio and LLM weights.
 - rag-cpp listens only inside the container on `127.0.0.1:8083`; the native
   server exposes regular RAG at `/v1/rag/retrieve` and GraphRAG at
   `/v1/rag/graph`. Its Qwen embedding vectors are stored in the existing `.ragdb`.
-- Both ports are published by Compose. The Svelte WebUI automatically connects
-  to port 8082 on the same hostname. For example, a WebUI loaded from
-  `http://192.168.5.151:8081` uses `http://192.168.5.151:8082/v1`. Compose binds
-  all host interfaces so this keeps working if DHCP changes the AGX address;
-  worker addresses are not user-configurable.
+- Caddy publishes HTTPS on host port `8083`, using the same internal-CA and IP/SNI setup
+  as Realtime-Venus. This host port is separate from rag-cpp's container-local port 8083.
+  `/llm/*` proxies to llama.cpp; all other requests proxy to audio.cpp, including RAG.
+  Open `https://192.168.5.151:8083/#/pipeline` directly, or use the root address, which
+  opens the chatbot automatically on port 8083. Studio remains available from its navigation link.
+- Set `AUDIOCPP_HTTPS_HOST` and `AUDIOCPP_HTTPS_PORT` to change the published address.
+  With a custom port, open `/#/pipeline` directly. Caddy stores its CA and certificates in
+  persistent `audiocpp-https-data` and `audiocpp-https-config` volumes.
+  Trust Caddy's `/data/caddy/pki/authorities/local/root.crt` on each client, as in the
+  existing Realtime-Venus deployment. This stack creates its own CA.
+- Direct HTTP ports 8081 and 8082 remain published. HTTPS chatbot API requests stay on
+  the same origin through Caddy, supporting microphone access without mixed-content requests.
+
+The continuous microphone uses bundled Silero VAD for speech detection and automatic turns.
+Uploaded files and examples bypass VAD. Text messages bypass ASR and share the same conversation
+history as microphone and file inputs. The conversation runs Qwen3-ASR 0.6B, hybrid RAG, the existing
+`bartowski/Qwen2.5-3B-Instruct-GGUF:Q4_K_M` LLM, and ZipVoice-Distill voice cloning.
+The page sends prior completed user/assistant messages to the LLM, retains each turn's audio
+and stage details, and offers the five bundled Chinese MP3 examples. Enter a ZipVoice
+reference clip and its matching transcript or select a configured voice before sending audio.
+ASR terminology and names can be supplied in the optional Context prompt.
+
+After updating the frontend, rebuild and recreate this stack so the native server includes
+the new embedded UI and Caddy starts with its proxy configuration:
+
+```bash
+docker compose -f examples/docker/agx-one-container/compose.yml up -d --build
+```
 
 Override `AUDIOCPP_BOOTSTRAP_PACKAGES`, `LLAMA_BOOTSTRAP_MODEL`, or
 `RAG_EMBEDDING_MODEL` in `compose.yml` to change the initial downloads.

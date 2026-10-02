@@ -1,0 +1,20 @@
+{
+	auto_https disable_redirects
+	skip_install_trust
+	# Match the working Realtime-Venus setup for clients connecting by IP.
+	default_sni {$AUDIOCPP_HTTPS_HOST:192.168.5.151}
+}
+
+https://{$AUDIOCPP_HTTPS_HOST:192.168.5.151}:443 {
+	tls internal
+
+	# Keep llama.cpp requests on the same HTTPS origin, including router APIs.
+	handle_path /llm/* {
+		reverse_proxy voice-ai:8082
+	}
+
+	# The native server serves the embedded UI, audio API, uploads, and RAG.
+	handle {
+		reverse_proxy voice-ai:8081
+	}
+}

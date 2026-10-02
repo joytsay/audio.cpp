@@ -12,10 +12,10 @@
   "idle_unload_ms": 60000,
   "models": [
     {
-      "id": "sortformer-diar",
-      "family": "sortformer_diar",
-      "path": "/app/models/Sortformer-Diar-4spk-v1-GGUF/sortformer-diar-4spk-v1-q8_0.gguf",
-      "task": "diar",
+      "id": "silero-vad",
+      "family": "silero_vad",
+      "path": "/app/assets/framework/models/silero_vad",
+      "task": "vad",
       "mode": "offline"
     },
     {
@@ -26,10 +26,10 @@
       "mode": "offline"
     },
     {
-      "id": "pocket-tts",
-      "family": "pocket_tts",
-      "path": "/app/models/PocketTTS-GGUF/english/pocket-tts-english-q8_0.gguf",
-      "task": "tts",
+      "id": "zipvoice",
+      "family": "zipvoice",
+      "path": "/app/models/ZipVoice-Distill-GGUF",
+      "task": "clon",
       "mode": "offline"
     }
   ]

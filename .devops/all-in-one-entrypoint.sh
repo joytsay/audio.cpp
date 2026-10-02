@@ -94,10 +94,10 @@ LD_LIBRARY_PATH="/opt/llama.cpp${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" \
     --n-gpu-layers "${LLAMA_GPU_LAYERS:-99}" &
 llama_pid=$!
 
-# Bootstrap weights without delaying the WebUI. All three audio installs use the
+# Bootstrap weights without delaying the WebUI. The ASR and ZipVoice installs use the
 # native C++ manager. Set either variable to an empty string to disable downloads.
 bootstrap_models() {
-    local packages="${AUDIOCPP_BOOTSTRAP_PACKAGES:-sortformer_diar_4spk_v1_q8_0,qwen3_asr_0_6b_q8_0,pocket_tts_english_q8_0}"
+    local packages="${AUDIOCPP_BOOTSTRAP_PACKAGES:-qwen3_asr_0_6b_q8_0,zipvoice_distill_gguf}"
     if [[ -n "$packages" ]]; then
         local package
         IFS=',' read -r -a package_list <<< "$packages"

@@ -37,8 +37,8 @@
   import { modelStudioPanelFor, type GenericControlReplacements } from '$lib/models/panels';
   import Arena from './Arena.svelte';
   import Llama from './Llama.svelte';
-  import Pipeline from './Pipeline.svelte';
   import Rag from './Rag.svelte';
+  import { goto } from '$app/navigation';
   import logoCloud from '../../static/logo_cloud.svg?raw';
   import type {
     AudioOutput,
@@ -57,7 +57,7 @@
   } from '$lib/voices';
   import '../app.css';
 
-  let tab: 'studio' | 'arena' | 'llama' | 'rag' | 'pipeline' | 'models' | 'logs' = 'studio';
+  let tab: 'studio' | 'arena' | 'llama' | 'rag' | 'models' | 'logs' = 'studio';
   let arenaComponent: { runArena: () => Promise<void> } | null = null;
   let selectedId = catalog[0]?.id || '';
   let selected: CatalogEntry = catalog[0];
@@ -2093,6 +2093,10 @@
   }
 
   onMount(async () => {
+    if (location.port === '8083' && !location.hash.includes('?studio')) {
+      await goto('#/pipeline', { replaceState: true });
+      return;
+    }
     await clearLegacyUiCaches();
     themePreferenceQuery = window.matchMedia('(prefers-color-scheme: dark)');
     systemPrefersDark = themePreferenceQuery.matches;
@@ -2185,7 +2189,7 @@
     <button class:active={tab === 'arena'} on:click={() => tab = 'arena'}>{tr('nav.arena')}</button>
     <button class:active={tab === 'llama'} on:click={() => tab = 'llama'}>LLM</button>
     <button class:active={tab === 'rag'} on:click={() => tab = 'rag'}>RAG</button>
-    <button class:active={tab === 'pipeline'} on:click={() => tab = 'pipeline'}>Pipeline</button>
+    <a class="nav-link" href="#/pipeline">Pipeline</a>
     {#if server?.ui_management !== false}
       <button class:active={tab === 'models'} on:click={openModelsPage}>{tr('nav.models')}</button>
     {/if}
@@ -2696,8 +2700,6 @@
     <Llama />
   {:else if tab === 'rag'}
     <Rag />
-  {:else if tab === 'pipeline'}
-    <Pipeline />
   {:else if tab === 'models'}
     <section class="page-head">
       <p class="eyebrow">{tr('models.eyebrow')}</p><h1>{tr('models.title')}</h1>

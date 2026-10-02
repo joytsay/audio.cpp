@@ -57,11 +57,23 @@ generation, conversion, separation, VAD, diarization, alignment, and voice desig
 - a llama.cpp page that uses llama-server's native model manager to download instruct-model GGUFs
   with live progress, discovers local models, and runs chat completions with a configurable system
   prompt (a direct browser download remains available as a fallback);
-- a native diarization → STT → LLM → TTS page that chains audio.cpp and llama.cpp.
+- a dedicated `/#/pipeline` chatbot page with turn-by-turn audio, ASR transcripts, LLM replies,
+  cloned speech, RAG sources, and conversation history passed to the LLM. It defaults to Silero VAD,
+  Qwen3-ASR 0.6B with an optional context prompt, regular RAG, and ZipVoice cloning. All five
+  Chinese example clips are bundled and selectable in the conversation composer. Typed messages
+  use the same chat history and run RAG → LLM → TTS directly, while uploaded audio runs ASR first. The continuous microphone uses Silero VAD on live
+  audio windows, collects speech until a silent window, and sends each spoken turn automatically.
+  Listening pauses during processing and assistant playback, then resumes. Start and stop
+  continuous listening from the microphone control in the chat composer.
+  Send text with Enter (Shift+Enter adds a line) or the Send text button.
 
-The all-in-one AGX deployment has no reverse proxy. `audiocpp_server` directly serves the
-embedded WebUI and audio API on port 8081, while llama.cpp directly serves its API on port 8082.
-The LLM and pipeline pages derive port 8082 from the WebUI hostname automatically.
+The all-in-one AGX deployment adds Caddy HTTPS on `https://192.168.5.151:8083/`.
+That address opens the dedicated chatbot page. Caddy forwards audio and RAG requests to the native
+server on 8081 and `/llm/*` requests to llama.cpp on 8082. HTTPS pipeline requests use that same
+origin; the direct HTTP interface derives the LLM worker on port 8082. API URLs remain editable
+on the chatbot page. See the [AGX deployment guide](../examples/docker/agx-one-container/README.md)
+for certificate trust and configuration. ZipVoice needs a reference clip and its exact transcript,
+or a configured voice preset. Conversation history lasts until New conversation or page navigation.
 
 Uploaded request files use a per-process temporary directory and are deleted when the server exits.
 Saved voices remain in the current browser profile and are only uploaded when selected for a request.

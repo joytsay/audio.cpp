@@ -1,6 +1,5 @@
 <script lang="ts">
-  import { onDestroy, onMount } from 'svelte';
-  import { uploadFile } from '$lib/api';
+  import { onDestroy, onMount, tick } from 'svelte';
   import { browserDecodeToWav, encodePcm16Wav } from '$lib/audio';
   import { catalog } from '$lib/catalog';
   import MediaPreview from '$lib/MediaPreview.svelte';
@@ -16,7 +15,7 @@
   import lobbyExample from '../../../../assets/resources/大廳.mp3?url';
   import vehicleCheckpointExample from '../../../../assets/resources/車輛檢查哨.mp3?url';
 
-  type Stage = 'idle' | 'upload' | 'separation' | 'diarization' | 'vad' | 'stt' | 'rag' | 'llm' | 'tts' | 'done';
+  type Stage = 'idle' | 'upload' | 'vad' | 'stt' | 'rag' | 'llm' | 'tts' | 'done';
   type PromptMode = 'system' | 'rag' | 'graphrag';
 
   interface PipelineAudioModel extends OpenAIModel {
@@ -35,31 +34,52 @@
     data: Array<{ id: string; installed: boolean }>;
   }
 
-  interface SeparationStem {
-    id: string;
-    label: string;
-    file: File;
-  }
-
   let audioBaseUrl = '';
   let llmBaseUrl = '';
   let models: PipelineAudioModel[] = [];
-  let separationModel = '';
-  let vadModel = '';
+  let vadModel = 'silero-vad';
   let llmModels: OpenAIModel[] = [];
-  let diarizationModel = '';
-  let sttModel = '';
+  let sttModel = 'qwen3-asr';
   let llmModel = '';
-  let ttsModel = '';
+  let ttsModel = 'zipvoice';
   let voice = '';
   let voices: string[] = [];
   let language = '';
+  let asrContext = '';
+  let chatHistory: ChatMessage[] = [];
+  interface ConversationTurn {
+    id: string; name: string; inputAudio: string; transcript: string; reply: string;
+    audio: string; vad: string; rag: string; sources: string[]; llmInput: string;
+    status: string; state: 'running' | 'complete' | 'failed';
+    runtimes: Partial<Record<TimedStage, number>>;
+  }
+  let turns: ConversationTurn[] = [];
+  let activeTurnId = '';
+  let conversationLog: HTMLDivElement;
+  $: if (turns.length && conversationLog) {
+    tick().then(() => { if (conversationLog) conversationLog.scrollTo({ top: conversationLog.scrollHeight }); });
+  }
+  $: if (activeTurnId) updateTurn({ transcript: sttText, reply: llmResponse, audio: outputUrl,
+    vad: vadText, rag: ragText, sources: ragSources, llmInput: llmInputPreview, status, runtimes: stageRuntimes });
+  function updateTurn(values: Partial<ConversationTurn>) {
+    turns = turns.map((turn) => turn.id === activeTurnId ? { ...turn, ...values } : turn);
+  }
+  function clearConversation() {
+    for (const turn of turns) {
+      if (turn.inputAudio) URL.revokeObjectURL(turn.inputAudio);
+      if (turn.audio) URL.revokeObjectURL(turn.audio);
+    }
+    replyPlaying = false;
+    resetMicrophoneBuffers();
+    turns = [];
+    chatHistory = [];
+    outputUrl = '';
+    stage = 'idle';
+    stageRuntimes = {};
+    status = 'Type a message, choose an example, or record audio to start a new conversation.';
+  }
   let systemPrompt = systemPromt.trim();
-  let promptMode: PromptMode = 'system';
-  let useSeparation = false;
-  let useDiarization = false;
-  let useVad = false;
-  let useStt = true;
+  let promptMode: PromptMode = 'rag';
   let useRag = true;
   let useLlm = true;
   let useTts = true;
@@ -67,7 +87,7 @@
   let maxTokens = 512;
   let sourceFile: File | null = null;
   let textInput = '';
-  let selectedDiarizationSpeakers = ['SPEAKER_00', 'SPEAKER_01', 'SPEAKER_02', 'SPEAKER_03'];
+  let turnInput: 'audio' | 'text' = 'audio';
   let inputUrl = '';
   let sourceInput: HTMLInputElement | null = null;
   let cloneVoiceInput: HTMLInputElement | null = null;
@@ -77,13 +97,28 @@
   let savedCloneVoices: SavedVoice[] = [];
   let savedCloneVoiceId = '';
   let savingCloneVoice = false;
-  let recorder: MediaRecorder | null = null;
   let recordingStream: MediaStream | null = null;
-  let recording = false;
+  let microphoneListening = false;
+  let microphoneStarting = false;
+  let microphoneDetecting = false;
+  let microphoneContext: AudioContext | null = null;
+  let microphoneProcessor: ScriptProcessorNode | null = null;
+  let microphoneSource: MediaStreamAudioSourceNode | null = null;
+  let microphoneMute: GainNode | null = null;
+  let microphoneSamples: Float32Array[] = [];
+  let microphoneFrames = 0;
+  let microphoneSpeech: Float32Array[] = [];
+  let microphoneSpeechFrames = 0;
+  let microphonePreRoll: Float32Array | null = null;
+  let microphoneAborter: AbortController | null = null;
+  let microphoneGeneration = 0;
+  let microphoneStatus = 'Microphone off';
+  let sourceFromMicrophone = false;
+  let turnFromMicrophone = false;
+  let replyPlaying = false;
   let running = false;
   let stage: Stage = 'idle';
-  let status = 'Choose or record a WAV file.';
-  let diarizationText = '';
+  let status = 'Type a message or choose audio.';
   let vadText = '';
   let sttText = '';
   let ragText = '';
@@ -93,8 +128,6 @@
   let transcript = '';
   let llmResponse = '';
   let llmInputPreview = '';
-  let diarization: any = null;
-  let separationStems: SeparationStem[] = [];
   let outputUrl = '';
   let aborter: AbortController | null = null;
   const defaultCloneVoiceName = 'lingCL';
@@ -111,8 +144,6 @@
   let runtimeTick = 0;
   let runtimeTimer: ReturnType<typeof setInterval> | null = null;
 
-  $: separationModels = models.filter((entry) => entry.task === 'sep');
-  $: diarizationModels = models.filter((entry) => entry.task === 'diar');
   $: vadModels = models.filter((entry) => entry.task === 'vad');
   $: sttModels = models.filter((entry) => ['asr', 'stt'].includes(entry.task || ''));
   $: ttsModels = models.filter((entry) => ['tts', 'clon'].includes(entry.task || ''));
@@ -132,29 +163,23 @@
     selectedTtsSupportsReference ||
     (selectedTtsIsQwen && !/custom/i.test(selectedTtsModel?.modelId || ''));
   $: pipelineSteps = [
-    ...(useSeparation ? [['separation', 'Vocal separation']] : []),
-    ...(useDiarization ? [['diarization', 'Speach Diarization']] : []),
-    ...(useVad ? [['vad', 'Voice activity detection']] : []),
-    ...(useStt ? [['stt', 'Speech to text']] : []),
+    ...(turnInput === 'audio' && turnFromMicrophone ? [['vad', 'Voice activity detection']] : []),
+    ...(turnInput === 'audio' ? [['stt', 'Speech to text']] : []),
     ...(promptMode !== 'system' && useRag ? [['rag', 'RAG']] : []),
     ...(useLlm ? [['llm', 'Language model']] : []),
     ...(useTts ? [['tts', 'Text to speech']] : [])
   ];
-  $: requiresAudio = useSeparation || useDiarization || useVad || useStt;
-  $: canRun = Boolean((!requiresAudio || sourceFile) &&
-    (!useSeparation || separationModel) &&
-    (!useDiarization || diarizationModel) &&
-    (!useVad || vadModel) &&
-    (!useStt || sttModel) &&
-    (useStt || textInput.trim()) &&
-    (!useLlm || llmModel) &&
-    (!useTts || ttsModel));
+  $: canGenerateReply = Boolean((!useLlm || llmModel) &&
+    (!useTts || (ttsModel && (selectedTtsModel?.family !== 'zipvoice' ||
+      (cloneVoiceFile && cloneReferenceText.trim()) || voice))));
+  $: canSendAudio = Boolean(sourceFile && sttModel && (!sourceFromMicrophone || vadModel) && canGenerateReply);
+  $: canSendText = Boolean(textInput.trim() && canGenerateReply);
 
   function save() {
-    localStorage.setItem('audiocpp.pipeline.settings', JSON.stringify({
-      separationModel, diarizationModel, vadModel, sttModel, llmModel, ttsModel,
-      voice, language, promptMode, useSeparation, useDiarization, useVad, useStt,
-      selectedDiarizationSpeakers, useRag, useLlm, useTts, temperature, maxTokens,
+    localStorage.setItem('audiocpp.conversation.settings', JSON.stringify({
+      vadModel, sttModel, llmModel, ttsModel,
+      audioBaseUrl, llmBaseUrl, asrContext, voice, language, promptMode,
+      useRag, useLlm, useTts, temperature, maxTokens,
       ragResultCount, ragSearchMode
     }));
   }
@@ -185,7 +210,7 @@
   ): PipelineAudioModel[] {
     const installed = new Set(inventory.data.filter((item) => item.installed).map((item) => item.id));
     return catalog.flatMap((entry: CatalogEntry) => {
-      if (!['sep', 'diar', 'vad', 'asr', 'stt', 'tts', 'clon'].includes(entry.task)) return [];
+      if (!['vad', 'asr', 'stt', 'tts', 'clon'].includes(entry.task)) return [];
       const choices = (entry.install_packages || []).filter((choice) => installed.has(choice.id));
       if (entry.task === 'vad' && !entry.install_packages?.length) {
         return [{
@@ -284,13 +309,9 @@
       ...configured.map(configuredAudioModel).filter((entry) =>
         !installedPaths.has(`${entry.modelId}\n${entry.path || ''}`))
     ];
-    const nextDiarization = models.filter((entry) => entry.task === 'diar');
-    const nextSeparation = models.filter((entry) => entry.task === 'sep');
     const nextVad = models.filter((entry) => entry.task === 'vad');
     const nextStt = models.filter((entry) => ['asr', 'stt'].includes(entry.task || ''));
     const nextTts = models.filter((entry) => ['tts', 'clon'].includes(entry.task || ''));
-    separationModel = keepSelection(nextSeparation, separationModel);
-    diarizationModel = keepSelection(nextDiarization, diarizationModel);
     vadModel = keepSelection(nextVad, vadModel);
     sttModel = keepSelection(nextStt, sttModel);
     ttsModel = keepSelection(nextTts, ttsModel);
@@ -300,7 +321,8 @@
 
   async function refreshLlmModels() {
     llmModels = await endpointRouterModels(llmBaseUrl);
-    if (!llmModels.some((entry) => entry.id === llmModel)) llmModel = llmModels[0]?.id || llmModel;
+    if (!llmModels.some((entry) => entry.id === llmModel)) llmModel =
+      llmModels.find((entry) => /qwen2\.[45].*instruct.*q4_k_m/i.test(entry.id))?.id || llmModels[0]?.id || llmModel;
     save();
   }
 
@@ -411,11 +433,12 @@
     }
   }
 
-  function chooseFile(file: File | null) {
+  function chooseFile(file: File | null, fromMicrophone = false) {
+    sourceFromMicrophone = fromMicrophone;
     if (inputUrl) URL.revokeObjectURL(inputUrl);
     sourceFile = file;
     inputUrl = file ? URL.createObjectURL(file) : '';
-    status = file ? `${file.name} is ready.` : 'Choose or record a WAV file.';
+    status = file ? `${file.name} is ready.` : 'Type a message or choose audio.';
   }
 
   async function chooseExampleAudio(example: { name: string; url: string }) {
@@ -435,29 +458,154 @@
     }
   }
 
-  async function toggleRecording() {
-    if (recording && recorder) { recorder.stop(); return; }
+  function resetMicrophoneBuffers() {
+    microphoneSamples = [];
+    microphoneFrames = 0;
+    microphoneSpeech = [];
+    microphoneSpeechFrames = 0;
+    microphonePreRoll = null;
+  }
+
+  function stopMicrophone() {
+    microphoneGeneration += 1;
+    microphoneListening = false;
+    microphoneStarting = false;
+    microphoneDetecting = false;
+    microphoneAborter?.abort();
+    microphoneAborter = null;
+    if (microphoneProcessor) microphoneProcessor.onaudioprocess = null;
+    microphoneProcessor?.disconnect();
+    microphoneSource?.disconnect();
+    microphoneMute?.disconnect();
+    recordingStream?.getTracks().forEach((track) => track.stop());
+    recordingStream = null;
+    if (microphoneContext) void microphoneContext.close();
+    microphoneContext = null;
+    microphoneProcessor = null;
+    microphoneSource = null;
+    microphoneMute = null;
+    resetMicrophoneBuffers();
+    microphoneStatus = 'Microphone off';
+  }
+
+  function microphoneWav(parts: Float32Array[], context: AudioContext): File {
+    const frames = parts.reduce((total, part) => total + part.length, 0);
+    const audio = context.createBuffer(1, frames, context.sampleRate);
+    let offset = 0;
+    for (const part of parts) { audio.getChannelData(0).set(part, offset); offset += part.length; }
+    return new File([encodePcm16Wav(audio)], 'microphone-turn.wav', { type: 'audio/wav' });
+  }
+
+  async function detectMicrophoneSpeech(samples: Float32Array, generation: number) {
+    const context = microphoneContext;
+    if (!context || !microphoneListening || microphoneDetecting) return;
+    microphoneDetecting = true;
+    const controller = new AbortController();
+    microphoneAborter = controller;
     try {
-      recordingStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const chunks: Blob[] = [];
-      recorder = new MediaRecorder(recordingStream);
-      recorder.ondataavailable = (event) => event.data.size && chunks.push(event.data);
-      recorder.onstop = async () => {
-        recording = false;
-        recordingStream?.getTracks().forEach((track) => track.stop());
-        const recorded = new File(chunks, 'microphone-recording.webm', { type: recorder?.mimeType || 'audio/webm' });
-        try {
-          const wav = await browserDecodeToWav(recorded, 16000, 1);
-          chooseFile(new File([wav], 'microphone-recording.wav', { type: 'audio/wav' }));
-        } catch (error) {
-          status = error instanceof Error ? error.message : String(error);
+      const vad = await ensureAudioModel(vadModel, controller.signal);
+      const audio = await uploadAudio(microphoneWav([samples], context), controller.signal);
+      const result = await endpointJson<any>(audioBaseUrl, 'tasks/run', {
+        method: 'POST', body: JSON.stringify({ model: vad.modelId, audio })
+      }, controller.signal);
+      if (generation !== microphoneGeneration || !microphoneListening) return;
+      if (running || replyPlaying) { resetMicrophoneBuffers(); return; }
+      const segments = Array.isArray(result?.segments) ? result.segments :
+        Array.isArray(result?.speech_segments) ? result.speech_segments : [];
+      if (segments.some((segment: any) => Number(segment.end_sample) > Number(segment.start_sample))) {
+        if (!microphoneSpeech.length && microphonePreRoll) {
+          microphoneSpeech.push(microphonePreRoll);
+          microphoneSpeechFrames += microphonePreRoll.length;
+        }
+        microphoneSpeech.push(samples);
+        microphoneSpeechFrames += samples.length;
+        microphonePreRoll = null;
+        microphoneStatus = 'Speech detected · capturing your turn…';
+      } else if (!microphoneSpeech.length) {
+        microphonePreRoll = samples;
+        microphoneStatus = 'Listening · Silero VAD is detecting speech…';
+      }
+      // A silent VAD window ends the turn; cap uninterrupted speech at 15 seconds.
+      if (microphoneSpeech.length && (!segments.length || microphoneSpeechFrames >= context.sampleRate * 15)) {
+        const utterance = microphoneWav(microphoneSpeech, context);
+        resetMicrophoneBuffers();
+        chooseFile(utterance, true);
+        await tick();
+        if (generation !== microphoneGeneration || !microphoneListening) return;
+        microphoneStatus = 'Processing your turn…';
+        await runPipeline('audio');
+        if (generation === microphoneGeneration && microphoneListening) {
+          microphoneStatus = replyPlaying ? 'Speaking · listening resumes after the reply' : 'Listening · Silero VAD is detecting speech…';
+        }
+      }
+    } catch (error) {
+      if (generation === microphoneGeneration && microphoneListening) {
+        const message = error instanceof Error ? error.message : String(error);
+        stopMicrophone();
+        microphoneStatus = `Microphone stopped: ${message}`;
+      }
+    } finally {
+      if (generation === microphoneGeneration) {
+        microphoneDetecting = false;
+        microphoneAborter = null;
+      }
+    }
+  }
+
+  async function toggleMicrophone() {
+    if (microphoneListening || microphoneStarting) { stopMicrophone(); return; }
+    if (!canGenerateReply || !sttModel || !vadModel) {
+      microphoneStatus = 'Choose ASR, VAD, and response settings before starting the microphone.';
+      return;
+    }
+    const generation = ++microphoneGeneration;
+    microphoneStarting = true;
+    microphoneStatus = 'Opening microphone…';
+    let stream: MediaStream | null = null;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: {
+        echoCancellation: true, noiseSuppression: true, autoGainControl: true
+      } });
+      if (generation !== microphoneGeneration) { stream.getTracks().forEach((track) => track.stop()); return; }
+      recordingStream = stream;
+      microphoneContext = new AudioContext();
+      await microphoneContext.resume();
+      if (generation !== microphoneGeneration) return;
+      microphoneSource = microphoneContext.createMediaStreamSource(stream);
+      microphoneProcessor = microphoneContext.createScriptProcessor(4096, 1, 1);
+      microphoneMute = microphoneContext.createGain();
+      microphoneMute.gain.value = 0;
+      microphoneSource.connect(microphoneProcessor);
+      microphoneProcessor.connect(microphoneMute);
+      microphoneMute.connect(microphoneContext.destination);
+      microphoneListening = true;
+      microphoneStarting = false;
+      microphoneStatus = 'Listening · Silero VAD is detecting speech…';
+      microphoneProcessor.onaudioprocess = (event) => {
+        if (!microphoneListening || !microphoneContext) return;
+        if (running || replyPlaying) {
+          resetMicrophoneBuffers();
+          microphoneStatus = replyPlaying ? 'Speaking · listening resumes after the reply' : 'Processing your turn…';
+          return;
+        }
+        const chunk = new Float32Array(event.inputBuffer.getChannelData(0));
+        microphoneSamples.push(chunk);
+        microphoneFrames += chunk.length;
+        if (!microphoneDetecting && microphoneFrames >= microphoneContext.sampleRate) {
+          const samples = new Float32Array(microphoneFrames);
+          let offset = 0;
+          for (const part of microphoneSamples) { samples.set(part, offset); offset += part.length; }
+          microphoneSamples = [];
+          microphoneFrames = 0;
+          void detectMicrophoneSpeech(samples, generation);
         }
       };
-      recorder.start();
-      recording = true;
-      status = 'Recording microphone…';
     } catch (error) {
-      status = error instanceof Error ? error.message : String(error);
+      stream?.getTracks().forEach((track) => track.stop());
+      if (generation === microphoneGeneration) {
+        stopMicrophone();
+        microphoneStatus = error instanceof Error ? error.message : String(error);
+      }
     }
   }
 
@@ -506,17 +654,6 @@
     return `${Math.floor(seconds / 60)}m ${(seconds % 60).toFixed(1)}s`;
   }
 
-  function formatDiarization(result: any): string {
-    const turns = Array.isArray(result?.speaker_turns) ? result.speaker_turns : [];
-    if (!turns.length) return JSON.stringify(result, null, 2) || 'No speaker turns detected.';
-    const sampleRate = Number(result.sample_rate) || 16000;
-    return turns.map((turn: any) => {
-      const start = Number(turn.start_sample || 0) / sampleRate;
-      const end = Number(turn.end_sample || 0) / sampleRate;
-      return `Speaker ${turn.speaker_id ?? 'unknown'}: ${start.toFixed(1)}–${end.toFixed(1)}s`;
-    }).join('\n');
-  }
-
   function formatVad(result: any): string {
     const segments = Array.isArray(result?.segments) ? result.segments :
       Array.isArray(result?.speech_segments) ? result.speech_segments : [];
@@ -527,42 +664,6 @@
       const end = Number(segment.end_sample || 0) / sampleRate;
       return `${start.toFixed(1)}–${end.toFixed(1)}s`;
     }).join('\n');
-  }
-
-  function wavFileFromBase64(audio: string, name: string): File {
-    const binary = atob(audio);
-    const bytes = new Uint8Array(binary.length);
-    for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
-    return new File([bytes], name, { type: 'audio/wav' });
-  }
-
-  async function audioForSelectedSpeakers(
-    file: File,
-    diarizationResult: any,
-    speakerIds: string[]
-  ): Promise<File> {
-    const turns = Array.isArray(diarizationResult?.speaker_turns) ? diarizationResult.speaker_turns : [];
-    if (!turns.length) throw new Error('Diarization returned no speaker turns to select from.');
-    if (!speakerIds.length) throw new Error('Choose at least one diarization speaker.');
-    const context = new AudioContext();
-    try {
-      const input = await context.decodeAudioData(await file.arrayBuffer());
-      const selected = new Set(speakerIds);
-      const output = context.createBuffer(input.numberOfChannels, input.length, input.sampleRate);
-      const diarizationRate = Number(diarizationResult?.sample_rate) || input.sampleRate;
-      for (const turn of turns) {
-        if (!selected.has(String(turn.speaker_id))) continue;
-        const start = Math.max(0, Math.floor(Number(turn.start_sample || 0) * input.sampleRate / diarizationRate));
-        const end = Math.min(input.length, Math.ceil(Number(turn.end_sample || 0) * input.sampleRate / diarizationRate));
-        if (end <= start) continue;
-        for (let channel = 0; channel < input.numberOfChannels; channel += 1) {
-          output.copyToChannel(input.getChannelData(channel).slice(start, end), channel, start);
-        }
-      }
-      return new File([encodePcm16Wav(output)], 'pipeline-selected-speakers.wav', { type: 'audio/wav' });
-    } finally {
-      await context.close();
-    }
   }
 
   async function audioForSpeechSegments(file: File, vadResult: any): Promise<File> {
@@ -597,74 +698,43 @@
     }
   }
 
-  async function runPipeline() {
-    if (!canRun) return;
+  async function runPipeline(input: 'audio' | 'text') {
+    if (running || (input === 'audio' ? !canSendAudio : !canSendText)) return;
+    turnInput = input;
+    turnFromMicrophone = input === 'audio' && sourceFromMicrophone;
+    const submittedText = input === 'text' ? textInput.trim() : '';
+    if (input === 'text') textInput = '';
     aborter?.abort();
     aborter = new AbortController();
     running = true;
-    diarizationText = '';
     vadText = '';
-    sttText = '';
+    sttText = submittedText;
     ragText = '';
     ragSources = [];
     transcript = '';
     llmResponse = '';
     llmInputPreview = '';
-    diarization = null;
-    separationStems = [];
-    if (outputUrl) URL.revokeObjectURL(outputUrl);
     outputUrl = '';
+    activeTurnId = createLocalId();
+    turns = [...turns, { id: activeTurnId, name: input === 'audio' ? sourceFile?.name || 'Audio message' : 'Text message',
+      inputAudio: input === 'audio' && sourceFile ? URL.createObjectURL(sourceFile) : '', transcript: submittedText, reply: '',
+      audio: '', vad: '', rag: '', sources: [], llmInput: '', status: 'Preparing turn…',
+      state: 'running', runtimes: {} }];
     stageRuntimes = {};
     stageStartedAt = 0;
     runtimeTick = performance.now();
     try {
       let audioPath = '';
       let workingAudioFile: File | null = null;
-      if (requiresAudio) {
+      if (input === 'audio') {
         if (!sourceFile) throw new Error('Choose or record an audio file.');
         step('upload', 'Preparing 16 kHz WAV input…');
-        const separationInput = useSeparation;
-        const sampleRate = separationInput ? 44100 : 16000;
-        const channels = separationInput ? 2 : 1;
         workingAudioFile = new File(
-          [await browserDecodeToWav(sourceFile, sampleRate, channels)], 'pipeline-input.wav', { type: 'audio/wav' });
-        audioPath = await uploadAudio(workingAudioFile, aborter.signal, sampleRate, channels);
-      }
-
-      if (useSeparation) {
-        step('separation', 'Separating vocals from accompaniment…');
-        const separation = await ensureAudioModel(separationModel, aborter.signal);
-        const result = await endpointJson<{ named_audio_outputs?: Array<{ id?: string; audio?: string }> }>(audioBaseUrl, 'tasks/run', {
-          method: 'POST',
-          body: JSON.stringify({ model: separation.modelId, audio: audioPath })
-        }, aborter.signal);
-        separationStems = (result.named_audio_outputs || [])
-          .filter((output): output is { id: string; audio: string } =>
-            typeof output.id === 'string' && typeof output.audio === 'string')
-          .map((output) => ({
-            id: output.id,
-            label: output.id === 'vocals' ? 'Vocals' : output.id === 'instrumental' ? 'Background / instrumental' : output.id,
-            file: wavFileFromBase64(output.audio, `pipeline-${output.id}.wav`)
-          }));
-        const vocals = separationStems.find((output) => output.id === 'vocals')?.file;
-        if (!vocals) throw new Error('Vocal separation did not return a vocals stem.');
-        workingAudioFile = new File(
-          [await browserDecodeToWav(vocals, 16000, 1)],
-          'pipeline-vocals-16khz.wav', { type: 'audio/wav' });
+          [await browserDecodeToWav(sourceFile, 16000, 1)], 'pipeline-input.wav', { type: 'audio/wav' });
         audioPath = await uploadAudio(workingAudioFile, aborter.signal);
       }
 
-      if (useDiarization) {
-        step('diarization', 'Separating speaker turns…');
-        const diarModel = await ensureAudioModel(diarizationModel, aborter.signal);
-        diarization = await endpointJson<any>(audioBaseUrl, 'tasks/run', {
-          method: 'POST',
-          body: JSON.stringify({ model: diarModel.modelId, audio: audioPath })
-        }, aborter.signal);
-        diarizationText = formatDiarization(diarization);
-      }
-
-      if (useVad && workingAudioFile) {
+      if (turnFromMicrophone && workingAudioFile) {
         step('vad', 'Detecting speech activity…');
         const vad = await ensureAudioModel(vadModel, aborter.signal);
         const vadResult = await endpointJson<any>(audioBaseUrl, 'tasks/run', {
@@ -676,27 +746,20 @@
         audioPath = await uploadAudio(workingAudioFile, aborter.signal);
       }
 
-      let plainTranscript = textInput.trim();
-      if (useStt) {
-        if (useDiarization && workingAudioFile) {
-          const selectedAudio = await audioForSelectedSpeakers(
-            workingAudioFile, diarization, selectedDiarizationSpeakers);
-          audioPath = await uploadAudio(selectedAudio, aborter.signal);
-        }
+      let plainTranscript = submittedText;
+      if (input === 'audio') {
         step('stt', 'Transcribing speech…');
         const speechModel = await ensureAudioModel(sttModel, aborter.signal);
         const stt = await endpointJson<any>(audioBaseUrl, 'audio/transcriptions/details', {
           method: 'POST',
-          body: JSON.stringify({ model: speechModel.modelId, audio: audioPath, language })
+          body: JSON.stringify({ model: speechModel.modelId, audio: audioPath, language, ...(asrContext.trim() ? { text: asrContext.trim() } : {}) })
         }, aborter.signal);
         plainTranscript = typeof stt.text === 'string' ? stt.text.trim() : '';
       }
       sttText = plainTranscript;
-      // Retrieval and normalization must receive exactly the STT text.
-      // Speaker labels and word-joining added by diarization weaken matching
-      // against complete examples and terminology entries.
+      // Use the submitted text or exact ASR transcript for retrieval and history.
       transcript = plainTranscript;
-      if (!transcript) throw new Error('STT returned an empty transcript.');
+      if (!transcript) throw new Error('The message is empty.');
 
       let llmSystemPrompt = systemPrompt.trim();
       let exampleOutput = '';
@@ -715,7 +778,7 @@
 
       const messages: ChatMessage[] = [];
       if (llmSystemPrompt) messages.push({ role: 'system', content: llmSystemPrompt });
-      messages.push({ role: 'user', content: transcript });
+      messages.push(...chatHistory, { role: 'user', content: transcript });
       llmInputPreview = formatChatMessages(messages);
       if (useLlm) {
         step('llm', 'Generating an instruct-model response…');
@@ -738,19 +801,21 @@
           });
         } catch { /* TTS can still proceed if this llama.cpp version cannot unload */ }
       } else {
-        // Preserve the exact STT result for an STT -> TTS pipeline.
+        // Preserve the user message when the LLM is bypassed.
         llmResponse = transcript;
       }
+
+      chatHistory = [...chatHistory, { role: 'user', content: transcript }, { role: 'assistant', content: llmResponse }];
 
       if (useTts) {
         step('tts', 'Synthesizing the response…');
         const voiceModel = await ensureAudioModel(ttsModel, aborter.signal);
         const speechBody: Record<string, unknown> = { model: voiceModel.modelId, input: llmResponse, response_format: 'wav' };
         if (cloneVoiceFile && supportsVoiceClone) {
-          if (voiceModel.family === 'qwen3_tts' && !cloneReferenceText.trim()) {
-            throw new Error('Qwen3-TTS voice cloning requires the matching reference transcript.');
+          if (['qwen3_tts', 'zipvoice'].includes(voiceModel.family || '') && !cloneReferenceText.trim()) {
+            throw new Error('Voice cloning requires the matching reference transcript.');
           }
-          speechBody.voice_ref = await uploadFile(cloneVoiceFile, aborter.signal);
+          speechBody.voice_ref = await uploadAudio(cloneVoiceFile, aborter.signal, 24000);
           if (cloneReferenceText.trim()) speechBody.reference_text = cloneReferenceText.trim();
         } else if (voice) {
           speechBody.voice = voice;
@@ -759,42 +824,40 @@
         outputUrl = URL.createObjectURL(output);
       }
       step('done', 'Pipeline complete.');
+      updateTurn({ state: 'complete' });
       save();
     } catch (error) {
+      updateTurn({ state: 'failed' });
       finishActiveStage();
       stage = 'idle';
       status = error instanceof Error && error.name === 'AbortError' ? 'Pipeline stopped.' : error instanceof Error ? error.message : String(error);
     } finally {
+      await tick();
+      activeTurnId = '';
       running = false;
     }
   }
 
   onMount(() => {
     audioBaseUrl = new URL('v1/', document.baseURI).toString().replace(/\/$/, '');
-    llmBaseUrl = siblingWorkerEndpoint(8082);
+    llmBaseUrl = location.protocol === 'https:'
+      ? new URL('llm/v1/', document.baseURI).toString().replace(/\/$/, '')
+      : siblingWorkerEndpoint(8082);
     try {
-      const saved = JSON.parse(localStorage.getItem('audiocpp.pipeline.settings') || '{}');
-      separationModel = saved.separationModel || '';
-      diarizationModel = saved.diarizationModel || '';
-      vadModel = saved.vadModel || '';
-      sttModel = saved.sttModel || '';
+      const saved = JSON.parse(localStorage.getItem('audiocpp.conversation.settings') || '{}');
+      audioBaseUrl = saved.audioBaseUrl || audioBaseUrl;
+      llmBaseUrl = saved.llmBaseUrl || llmBaseUrl;
+      asrContext = saved.asrContext || '';
+      vadModel = saved.vadModel || vadModel;
+      sttModel = saved.sttModel || sttModel;
       llmModel = saved.llmModel || '';
-      ttsModel = saved.ttsModel || '';
+      ttsModel = saved.ttsModel || ttsModel;
       voice = saved.voice || '';
       language = saved.language || '';
       systemPrompt = localStorage.getItem('audiocpp.pipeline.systemPrompt') || systemPrompt;
       promptMode = saved.promptMode === 'rag' || saved.promptMode === 'graphrag'
         ? saved.promptMode
-        : 'system';
-      useSeparation = saved.useSeparation ?? useSeparation;
-      useDiarization = saved.useDiarization ?? useDiarization;
-      useVad = saved.useVad ?? useVad;
-      useStt = saved.useStt ?? useStt;
-      if (Array.isArray(saved.selectedDiarizationSpeakers)) {
-        selectedDiarizationSpeakers = saved.selectedDiarizationSpeakers
-          .filter((speaker: unknown): speaker is string => typeof speaker === 'string')
-          .slice(0, 4);
-      }
+        : 'rag';
       useRag = saved.useRag ?? useRag;
       ragResultCount = Math.max(1, Math.min(20, Number(saved.ragResultCount ?? ragResultCount) || ragResultCount));
       ragSearchMode = saved.ragSearchMode === 'global' ? 'global' : 'local';
@@ -813,17 +876,16 @@
   onDestroy(() => {
     if (runtimeTimer) clearInterval(runtimeTimer);
     aborter?.abort();
-    if (recorder?.state === 'recording') recorder.stop();
-    recordingStream?.getTracks().forEach((track) => track.stop());
+    stopMicrophone();
     if (inputUrl) URL.revokeObjectURL(inputUrl);
-    if (outputUrl) URL.revokeObjectURL(outputUrl);
+    clearConversation();
   });
 </script>
 
 <section class="page-head pipeline-head">
   <p class="eyebrow">VOICE AGENT PIPELINE</p>
-  <h1>VS → SD → VAD → STT → RAG → LLM → TTS</h1>
-  <p>A Python-free voice round trip using audio.cpp, llama.cpp, and this Svelte interface.</p>
+  <h1>Voice conversation</h1>
+  <p>Silero VAD → Qwen3-ASR 0.6B → Qwen Instruct with RAG → ZipVoice voice cloning.</p>
 </section>
 
 <section class="pipeline-steps" aria-label="Pipeline progress">
@@ -839,35 +901,17 @@
   {/each}
 </section>
 
-<div class="pipeline-grid">
+<div class="pipeline-grid conversation-grid">
   <section class="panel page-panel pipeline-config">
     <div class="section-title"><div><span>WORKERS</span><h2>Local pipeline</h2></div><button disabled={running} on:click={refreshAll}>Refresh</button></div>
-    <p class="field-help">The WebUI securely uses the audio and language-model workers inside this container.</p>
-    <label class="toggle pipeline-toggle"><input type="checkbox" bind:checked={useSeparation} on:change={save} /><span></span>Run vocal separation</label>
-    {#if useSeparation}
-      <label>Vocal separation model<select bind:value={separationModel} on:change={save}>{#each separationModels as entry}<option value={entry.selectionId}>{entry.label}</option>{/each}</select></label>
-    {/if}
-    <label class="toggle pipeline-toggle"><input type="checkbox" bind:checked={useDiarization} on:change={save} /><span></span>Run speaker diarization</label>
-    {#if useDiarization}
-      <label>Diarization model<select bind:value={diarizationModel} on:change={save}>{#each diarizationModels as entry}<option value={entry.selectionId}>{entry.label}</option>{/each}</select></label>
-      <fieldset class="diarization-speakers">
-        <legend>Transcribe speakers</legend>
-        {#each ['SPEAKER_00', 'SPEAKER_01', 'SPEAKER_02', 'SPEAKER_03'] as speaker, index}
-          <label><input type="checkbox" bind:group={selectedDiarizationSpeakers} value={speaker} on:change={save} />Speaker {String(index).padStart(2, '0')}</label>
-        {/each}
-      </fieldset>
-    {/if}
-    <label class="toggle pipeline-toggle"><input type="checkbox" bind:checked={useVad} on:change={save} /><span></span>Run voice activity detection</label>
-    {#if useVad}
-      <label>VAD model<select bind:value={vadModel} on:change={save}>{#each vadModels as entry}<option value={entry.selectionId}>{entry.label}</option>{/each}</select></label>
-    {/if}
-    <label class="toggle pipeline-toggle"><input type="checkbox" bind:checked={useStt} on:change={() => { if (!useStt) { useSeparation = false; useDiarization = false; useVad = false; } save(); }} /><span></span>Run speech to text</label>
-    {#if useStt}
-      <label>STT model<select bind:value={sttModel} on:change={save}>{#each sttModels as entry}<option value={entry.selectionId}>{entry.label}</option>{/each}</select></label>
-      <label>STT language<input bind:value={language} placeholder="auto" on:change={save} /></label>
-    {:else}
-      <label>Text input<textarea rows="4" bind:value={textInput} placeholder="Enter the text to send to RAG, LLM, and TTS"></textarea></label>
-    {/if}
+    <fieldset class="pipeline-settings-fields" disabled={running}>
+    <label>Audio & RAG API<input bind:value={audioBaseUrl} on:change={save} /></label>
+    <label>LLM API<input bind:value={llmBaseUrl} on:change={save} /></label>
+    <label>Microphone speech detection<select bind:value={vadModel} on:change={save}>{#each vadModels as entry}<option value={entry.selectionId}>{entry.label}</option>{/each}</select></label>
+    <p class="field-help">Silero VAD detects speech during continuous microphone input. Uploaded audio and examples go directly to ASR.</p>
+    <label>ASR model<select bind:value={sttModel} on:change={save}>{#each sttModels as entry}<option value={entry.selectionId}>{entry.label}</option>{/each}</select></label>
+    <label>Context prompt (optional)<textarea rows="2" bind:value={asrContext} on:change={save} placeholder="Terminology or names to recognize"></textarea></label>
+    <label>ASR language<input bind:value={language} placeholder="auto" on:change={save} /></label>
     <label class="toggle pipeline-toggle"><input type="checkbox" bind:checked={useLlm} on:change={save} /><span></span>Run LLM instruct model</label>
     {#if useLlm}
       <label>LLM instruct model<select bind:value={llmModel} on:change={save}>{#if !llmModels.length && llmModel}<option value={llmModel}>{llmModel}</option>{/if}{#each llmModels as entry}<option value={entry.id}>{entry.id}</option>{/each}</select></label>
@@ -900,30 +944,15 @@
         </div>
       </div>
     {/if}
-  </section>
-
-  <section class="panel page-panel pipeline-input">
-    <div class="section-title"><div><span>INPUT</span><h2>Audio & instructions</h2></div></div>
-    <input class="hidden-file" bind:this={sourceInput} type="file" accept="audio/*" on:change={(event) => chooseFile(event.currentTarget.files?.[0] || null)} />
-    <div class="audio-drop">
-      <strong>{sourceFile?.name || 'No audio selected'}</strong>
-      <span>WAV, MP3, FLAC, or browser recording</span>
-      <div><button on:click={() => sourceInput?.click()}>Choose audio</button><button class:danger={recording} on:click={toggleRecording}>{recording ? 'Stop recording' : 'Record microphone'}</button></div>
-      <div class="pipeline-example-audio">
-        <span>Example audio</span>
-        {#each exampleAudioFiles as example}
-          <button type="button" on:click={() => chooseExampleAudio(example)}>{example.name}</button>
-        {/each}
-      </div>
-      {#if inputUrl}<audio class="pipeline-input-audio" controls src={inputUrl}></audio>{/if}
-    </div>
+    <div class="pipeline-input">
+    <div class="section-title"><div><span>INPUT</span><h2>Instructions</h2></div></div>
     <label>LLM grounding<select bind:value={promptMode} on:change={save}><option value="system">System prompt (prompt.csv)</option><option value="rag">Regular RAG (hybrid retrieval)</option><option value="graphrag">GraphRAG (knowledge graph)</option></select></label>
     <label class="toggle pipeline-toggle"><input type="checkbox" bind:checked={useRag} disabled={promptMode === 'system'} on:change={save} /><span></span>Run RAG retrieval</label>
     {#if promptMode === 'system' || !useRag}
       <label>System prompt (prompt.csv)<textarea bind:value={systemPrompt} rows="6"></textarea></label>
       <div class="prompt-actions"><button on:click={saveSystemPromptCsv}>Save CSV</button></div>
     {:else}
-      <p class="field-help">The STT transcript retrieves related terms and rules from the local knowledge base before the LLM runs.</p>
+      <p class="field-help">Each message retrieves related terms and rules from the local knowledge base before the LLM runs.</p>
       <div class="field-grid compact-fields">
         {#if promptMode === 'graphrag'}
           <label>Graph search<select bind:value={ragSearchMode} on:change={save}><option value="local">Local — related passages</option><option value="global">Global — community overview</option></select></label>
@@ -935,40 +964,70 @@
       <label>Temperature<input type="number" min="0" max="2" step="0.05" bind:value={temperature} /></label>
       <label>Max tokens<input type="number" min="1" max="32768" bind:value={maxTokens} /></label>
     </div>
+
+    </div>
+    </fieldset>
+  </section>
+
+  <section class="panel page-panel pipeline-results conversation-panel">
+    <div class="section-title"><div><span>CHATBOT</span><h2>Conversation</h2></div><button disabled={running || !turns.length} on:click={clearConversation}>New conversation</button></div>
+    <div class="conversation-turns" bind:this={conversationLog} role="log" aria-label="Voice conversation">
+      {#each turns as turn, index (turn.id)}
+        <div class="conversation-turn">
+          <article class="pipeline-message user"><span>YOU · TURN {index + 1}</span><p>{turn.name}</p>
+            {#if turn.inputAudio}<audio controls src={turn.inputAudio}></audio>{/if}
+            {#if turn.transcript}<p>{turn.transcript}</p>{/if}
+          </article>
+          {#if turn.reply || turn.audio}
+            <article class="pipeline-message assistant"><span>ASSISTANT</span><p>{turn.reply}</p>
+              {#if turn.audio}<div class="pipeline-audio"><audio controls autoplay={turn.id === activeTurnId} src={turn.audio} on:play={() => replyPlaying = true} on:pause={() => replyPlaying = false} on:ended={() => replyPlaying = false}></audio><a href={turn.audio} download={`voice-response-${index + 1}.wav`}>Save WAV</a></div>{/if}
+            </article>
+          {/if}
+          <p class="field-help" class:turn-error={turn.state === 'failed'}>{turn.status}</p>
+          <details class="turn-details"><summary>Pipeline details</summary>
+            {#if turn.vad}<article class="pipeline-message diarization"><span>VAD</span><p>{turn.vad}</p></article>{/if}
+            {#if turn.rag}<article class="pipeline-message diarization"><span>RAG</span><p>{turn.rag}</p></article>{/if}
+            {#if turn.sources.length}<div class="rag-citations"><strong>Sources</strong>{#each turn.sources as citation}<code>{citation}</code>{/each}</div>{/if}
+            {#if turn.llmInput}<label class="llm-input-preview">LLM input<textarea readonly rows="8" value={turn.llmInput}></textarea></label>{/if}
+            {#each Object.entries(turn.runtimes) as [name, elapsed]}<p class="field-help">{name.toUpperCase()}: {formatStageRuntime(elapsed)}</p>{/each}
+          </details>
+        </div>
+      {:else}
+        <div class="empty-output"><div class="wave">∿</div><p>Type a message, choose an example, upload audio, or record a message to start a conversation.</p></div>
+      {/each}
+    </div>
+    <div class="conversation-composer">
+    <div class="continuous-microphone">
+      <div><strong>Continuous microphone</strong><button class:danger={microphoneListening || microphoneStarting} disabled={!(microphoneListening || microphoneStarting) && (running || !canGenerateReply || !sttModel || !vadModel)} on:click={toggleMicrophone}>{microphoneListening || microphoneStarting ? 'Stop listening' : 'Start listening'}</button></div>
+      <p role="status">{microphoneStatus}</p>
+      <small>Speak naturally. Silero VAD detects speech and sends each turn after a pause. Listening pauses while the assistant responds.</small>
+    </div>
+    <label>Message<textarea class="chat-text-input" rows="3" bind:value={textInput} disabled={running} placeholder="Type a message… (Enter to send, Shift+Enter for a new line)" on:keydown={(event) => {
+      if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+        event.preventDefault();
+        runPipeline('text');
+      }
+    }}></textarea></label>
+    <div class="page-runbar"><button class="primary send-text" disabled={running || !canSendText} on:click={() => runPipeline('text')}>Send text</button></div>
+    <input class="hidden-file" bind:this={sourceInput} type="file" accept="audio/*" on:change={(event) => chooseFile(event.currentTarget.files?.[0] || null)} />
+    <div class="audio-drop">
+      <strong>{sourceFile?.name || 'No audio selected'}</strong>
+      <span>WAV, MP3, or FLAC</span>
+      <div><button disabled={running} on:click={() => sourceInput?.click()}>Choose audio</button></div>
+      <div class="pipeline-example-audio">
+        <span>Example audio</span>
+        {#each exampleAudioFiles as example}
+          <button disabled={running} type="button" on:click={() => chooseExampleAudio(example)}>{example.name}</button>
+        {/each}
+      </div>
+      {#if inputUrl}<audio class="pipeline-input-audio" controls src={inputUrl}></audio>{/if}
+    </div>
     <div class="page-runbar">
-      <button class="primary" disabled={running || !canRun} on:click={runPipeline}>{running ? 'Running…' : 'Run full pipeline'}</button>
+      <button class="primary" disabled={running || !canSendAudio} on:click={() => runPipeline('audio')}>{running ? 'Running…' : 'Send audio'}</button>
       {#if running}<button on:click={() => aborter?.abort()}>Stop</button>{/if}
       <span class:busy={running}>{status}</span>
     </div>
-  </section>
-
-  <section class="panel page-panel pipeline-results">
-    <div class="section-title"><div><span>RESULTS</span><h2>Stage outputs</h2></div></div>
-    {#if separationStems.length}
-      <div class="pipeline-separation-results">
-        <span>VOCAL SEPARATION</span>
-        {#each separationStems as stem}
-          <MediaPreview file={stem.file} kind="audio" label={stem.label} />
-        {/each}
-      </div>
-    {/if}
-    {#if diarizationText}<article class="pipeline-message diarization"><span>DIARIZATION</span><p>{diarizationText}</p></article>{/if}
-    {#if vadText}<article class="pipeline-message diarization"><span>VAD</span><p>{vadText}</p></article>{/if}
-    {#if sttText}<article class="pipeline-message user"><span>STT</span><p>{sttText}</p></article>{/if}
-    {#if ragText}
-      <article class="pipeline-message diarization"><span>RAG</span><p>{ragText}</p></article>
-      {#if ragSources.length}<div class="rag-citations"><strong>Sources</strong>{#each ragSources as citation}<code>{citation}</code>{/each}</div>{/if}
-    {/if}
-    {#if llmInputPreview}
-      <label class="llm-input-preview">LLM input<textarea readonly rows="14" value={llmInputPreview}></textarea></label>
-    {/if}
-    {#if llmResponse}<article class="pipeline-message assistant"><span>{useLlm ? 'LLM' : 'STT · LLM BYPASSED'}</span><p>{llmResponse}</p></article>{/if}
-    {#if outputUrl}
-      <div class="pipeline-audio-result">
-        <span>TTS</span>
-        <div class="pipeline-audio"><audio controls autoplay src={outputUrl}></audio><a href={outputUrl} download="voice-response.wav">Save WAV</a></div>
-      </div>
-    {/if}
-    {#if !separationStems.length && !diarizationText && !vadText && !sttText && !ragText && !llmResponse && !outputUrl}<div class="empty-output"><div class="wave">∿</div><p>Pipeline results will appear here.</p></div>{/if}
+    </div>
+    {#if useTts && selectedTtsModel?.family === 'zipvoice' && !voice && (!cloneVoiceFile || !cloneReferenceText.trim())}<p class="field-help">Choose reference audio and enter its matching transcript to enable ZipVoice cloning.</p>{/if}
   </section>
 </div>
