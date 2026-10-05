@@ -96,8 +96,49 @@
   let asrContext = defaultAsrContext;
   let useHotwords = true;
   let playbackStatus = '';
-  function autoplaySpeech(node: HTMLAudioElement) {
+  let submittedAudioTurnId = '';
+  const submittedAudioFinished = new Map<string, Promise<void>>();
+  function autoplaySubmittedAudio(node: HTMLAudioElement, turnId: string) {
+    if (turnId !== submittedAudioTurnId) return;
+    submittedAudioTurnId = '';
+    let finish!: () => void;
+    submittedAudioFinished.set(turnId, new Promise<void>((resolve) => { finish = resolve; }));
+    node.addEventListener('ended', finish, { once: true });
+    node.addEventListener('error', finish, { once: true });
     const play = () => {
+      playbackStatus = '';
+      document.querySelectorAll<HTMLAudioElement>('audio').forEach((audio) => {
+        if (audio !== node) audio.pause();
+      });
+      node.currentTime = 0;
+      node.loop = false;
+      void node.play().catch(() => {
+        playbackStatus = 'Press Play on your conversation audio to hear it.';
+        finish();
+      });
+    };
+    node.addEventListener('loadeddata', play, { once: true });
+    if (node.readyState >= 2) {
+      node.removeEventListener('loadeddata', play);
+      play();
+    }
+    return { destroy() {
+      node.removeEventListener('loadeddata', play);
+      node.removeEventListener('ended', finish);
+      node.removeEventListener('error', finish);
+      node.pause();
+      finish();
+      submittedAudioFinished.delete(turnId);
+    } };
+  }
+  function autoplaySpeech(node: HTMLAudioElement, turnId: string) {
+    let destroyed = false;
+    let scheduled = false;
+    const play = async () => {
+      if (scheduled) return;
+      scheduled = true;
+      await submittedAudioFinished.get(turnId);
+      if (destroyed) return;
       playbackStatus = '';
       document.querySelectorAll<HTMLAudioElement>('.conversation-turn .assistant audio').forEach((audio) => {
         if (audio !== node) audio.pause();
@@ -105,8 +146,11 @@
       void node.play().catch(() => { playbackStatus = 'Press Play on the response audio to enable playback.'; });
     };
     node.addEventListener('loadeddata', play, { once: true });
-    if (node.readyState >= 2) play();
-    return { destroy() { node.removeEventListener('loadeddata', play); node.pause(); } };
+    if (node.readyState >= 2) {
+      node.removeEventListener('loadeddata', play);
+      void play();
+    }
+    return { destroy() { destroyed = true; node.removeEventListener('loadeddata', play); node.pause(); } };
   }
   let chatHistory: ChatMessage[] = [];
   interface ConversationTurn {
@@ -964,7 +1008,12 @@
     }
   }
 
-  async function runPipeline(input: 'audio' | 'text') {
+  function sendAudio() {
+    if (running || !canSendAudio) return;
+    void runPipeline('audio', true);
+  }
+
+  async function runPipeline(input: 'audio' | 'text', playSubmittedAudio = false) {
     if (running || (input === 'audio' ? !canSendAudio : !canSendText)) return;
     turnInput = input;
     turnFromMicrophone = input === 'audio' && sourceFromMicrophone;
@@ -982,6 +1031,7 @@
     llmInputPreview = '';
     outputUrl = '';
     activeTurnId = createLocalId();
+    submittedAudioTurnId = input === 'audio' && playSubmittedAudio ? activeTurnId : '';
     turns = [...turns, { id: activeTurnId, name: input === 'audio' ? sourceFile?.name || 'Audio message' : 'Text message',
       inputAudio: input === 'audio' && sourceFile ? URL.createObjectURL(sourceFile) : '', transcript: submittedText, reply: '',
       audio: '', vad: '', rag: '', sources: [], llmInput: '', status: 'Preparing turn…',
@@ -1229,7 +1279,7 @@
     {/if}
     <div class="pipeline-input">
     <div class="section-title"><div><span>INPUT</span><h2>Instructions</h2></div></div>
-    <label>LLM grounding<select bind:value={promptMode} on:change={save}><option value="system">System prompt (prompt.csv)</option><option value="rag">Regular RAG (hybrid retrieval)</option><option value="graphrag">GraphRAG (knowledge graph)</option></select></label>
+    <label>LLM Knowledge Base<select bind:value={promptMode} on:change={save}><option value="system">System prompt (prompt.csv)</option><option value="rag">Regular RAG (hybrid retrieval)</option><option value="graphrag">GraphRAG (knowledge graph)</option></select></label>
     {#if promptMode === 'system'}
       <label>System prompt (prompt.csv)<textarea bind:value={systemPrompt} rows="6"></textarea></label>
       <div class="prompt-actions"><button on:click={saveSystemPromptCsv}>Save CSV</button></div>
@@ -1253,12 +1303,12 @@
       {#each turns as turn, index (turn.id)}
         <div class="conversation-turn">
           <article class="pipeline-message user"><span>YOU · TURN {index + 1}</span><p>{turn.name}</p>
-            {#if turn.inputAudio}<audio controls src={turn.inputAudio}></audio>{/if}
+            {#if turn.inputAudio}<audio controls src={turn.inputAudio} use:autoplaySubmittedAudio={turn.id}></audio>{/if}
             {#if turn.transcript}<p>{turn.transcript}</p>{/if}
           </article>
           {#if turn.reply || turn.audio}
             <article class="pipeline-message assistant"><span>ASSISTANT</span><p>{turn.reply}</p>
-              {#if turn.audio}<div class="pipeline-audio"><audio controls autoplay use:autoplaySpeech src={turn.audio} on:play={() => replyPlaying = true} on:pause={() => replyPlaying = false} on:ended={() => replyPlaying = false}></audio><a href={turn.audio} download={`voice-response-${index + 1}.wav`}>Save WAV</a></div>{/if}
+              {#if turn.audio}<div class="pipeline-audio"><audio controls use:autoplaySpeech={turn.id} src={turn.audio} on:play={() => replyPlaying = true} on:pause={() => replyPlaying = false} on:ended={() => replyPlaying = false}></audio><a href={turn.audio} download={`voice-response-${index + 1}.wav`}>Save WAV</a></div>{/if}
             </article>
           {/if}
           <p class="field-help" class:turn-error={turn.state === 'failed'}>{turn.status}</p>
@@ -1320,7 +1370,7 @@
     <div class="page-runbar pipeline-audio-runbar">
       <span class:busy={running}>{status}</span>
       {#if running}<button on:click={() => aborter?.abort()}>Stop</button>{/if}
-      <button class="primary" disabled={running || !canSendAudio} on:click={() => runPipeline('audio')}>{running ? 'Running…' : 'Send audio'}</button>
+      <button class="primary" disabled={running || !canSendAudio} on:click={sendAudio}>{running ? 'Running…' : 'Send audio'}</button>
     </div>
     </div>
     {#if useTts && selectedTtsModel?.family === 'zipvoice' && !voice && (!cloneVoiceFile || !cloneReferenceText.trim())}<p class="field-help">Choose reference audio and enter its matching transcript to enable ZipVoice cloning.</p>{/if}

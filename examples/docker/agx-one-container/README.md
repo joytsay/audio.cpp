@@ -110,7 +110,7 @@ and stage details, and offers the five bundled Chinese MP3 examples. Enter a Zip
 reference clip and its matching transcript or select a configured voice before sending audio.
 ASR Context prompt loads the compact semiconductor keywords in `hotword.csv`,
 beginning with `Technical terms: X光機 T5`; Save CSV persists `hotword.csv`.
-The default LLM grounding is the 台積電 receptionist in `prompt.csv`.
+The default LLM knowledge base is the 台積電 receptionist in `prompt.csv`.
 Regular RAG and GraphRAG are generated from that same source.
 
 After updating the frontend, rebuild and recreate this stack so the native server includes
