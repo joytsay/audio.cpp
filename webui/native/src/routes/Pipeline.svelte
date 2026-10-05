@@ -2,6 +2,7 @@
   import { onDestroy, onMount, tick } from 'svelte';
   import { browserDecodeToWav, encodePcm16Wav } from '$lib/audio';
   import { traditionalAsrText, traditionalChineseText } from '$lib/asr-text';
+  import { spokenExtensionText } from '$lib/receptionist-text';
   import { catalog } from '$lib/catalog';
   import MediaPreview from '$lib/MediaPreview.svelte';
   import { apiEndpoint, chatText, endpointBlob, endpointJson, endpointModels, endpointRouterModels, formatChatMessages, routerEndpoint, siblingWorkerEndpoint, type ChatMessage, type OpenAIModel } from '$lib/openai';
@@ -1052,7 +1053,7 @@
           body: JSON.stringify({ model: llmModel, messages, temperature, max_tokens: maxTokens, stream: false }),
           signal: aborter.signal
         }, aborter.signal);
-        llmResponse = traditionalChineseText(chatText(llm));
+        llmResponse = spokenExtensionText(traditionalChineseText(chatText(llm)));
 
         // Jetson uses unified memory. Release the LLM worker before the TTS
         // worker creates its CUDA/cuBLAS context for this sequential pipeline.
