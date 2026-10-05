@@ -65,13 +65,15 @@ generation, conversion, separation, VAD, diarization, alignment, and voice desig
   audio windows, collects speech until a silent window, and sends each spoken turn automatically.
   Listening pauses during processing and assistant playback, then resumes. Start and stop
   continuous listening from the microphone control in the chat composer.
-  Send text with Enter (Shift+Enter adds a line) or the Send text button.
+  The message box combines text input, Send text, and a microphone button with a live waveform.
+  Send text with Ctrl+Enter (Command+Enter on macOS) or the Send text button; Enter adds a line.
 
 The all-in-one AGX deployment adds Caddy HTTPS on `https://192.168.5.151:8083/`.
 That address opens the dedicated chatbot page. Caddy forwards audio and RAG requests to the native
 server on 8081 and `/llm/*` requests to llama.cpp on 8082. HTTPS pipeline requests use that same
-origin; the direct HTTP interface derives the LLM worker on port 8082. API URLs remain editable
-on the chatbot page. See the [AGX deployment guide](../examples/docker/agx-one-container/README.md)
+origin; the direct HTTP interface derives the LLM worker on port 8082. The Local pipeline panel
+shows context CSV controls, ASR language, TTS voice, reference voice, and instructions; model/API
+settings stay internal, with LLM and TTS enabled. See the [AGX deployment guide](../examples/docker/agx-one-container/README.md)
 for certificate trust and configuration. ZipVoice needs a reference clip and its exact transcript,
 or a configured voice preset. In Reference voice, choose an audio file or use Record reference voice,
 then Stop recording to preview the captured WAV. Enter the matching transcript and optionally Save

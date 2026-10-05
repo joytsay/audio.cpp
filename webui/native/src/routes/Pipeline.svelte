@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onDestroy, onMount, tick } from 'svelte';
   import { browserDecodeToWav, encodePcm16Wav } from '$lib/audio';
-  import { traditionalAsrText } from '$lib/asr-text';
+  import { traditionalAsrText, traditionalChineseText } from '$lib/asr-text';
   import { catalog } from '$lib/catalog';
   import MediaPreview from '$lib/MediaPreview.svelte';
   import { apiEndpoint, chatText, endpointBlob, endpointJson, endpointModels, endpointRouterModels, formatChatMessages, routerEndpoint, siblingWorkerEndpoint, type ChatMessage, type OpenAIModel } from '$lib/openai';
@@ -139,6 +139,7 @@
   let microphoneAborter: AbortController | null = null;
   let microphoneGeneration = 0;
   let microphoneStatus = 'Microphone off';
+  let microphoneWaveform = Array<number>(48).fill(2);
   let sourceFromMicrophone = false;
   let turnFromMicrophone = false;
   let replyPlaying = false;
@@ -619,6 +620,7 @@
     microphoneSource = null;
     microphoneMute = null;
     resetMicrophoneBuffers();
+    microphoneWaveform = Array<number>(48).fill(2);
     microphoneStatus = 'Microphone off';
   }
 
@@ -678,6 +680,10 @@
         chooseFile(utterance, true);
         await tick();
         if (generation !== microphoneGeneration || !microphoneListening) return;
+        if (!canGenerateReply) {
+          microphoneStatus = 'Speech captured. Complete the LLM/TTS settings, then Send audio.';
+          return;
+        }
         microphoneStatus = 'Processing your turn…';
         await runPipeline('audio');
         if (generation === microphoneGeneration && microphoneListening) {
@@ -701,8 +707,12 @@
   async function toggleMicrophone() {
     if (microphoneListening || microphoneStarting) { stopMicrophone(); return; }
     if (cloneRecordingBusy) return;
-    if (!canGenerateReply || !sttModel || !vadModel) {
-      microphoneStatus = 'Choose ASR, VAD, and response settings before starting the microphone.';
+    if (!sttModel || !vadModel) {
+      microphoneStatus = 'Choose ASR and VAD models before starting the microphone.';
+      return;
+    }
+    if (!navigator.mediaDevices?.getUserMedia) {
+      microphoneStatus = 'Microphone access is unavailable. Open this page over HTTPS and allow microphone access.';
       return;
     }
     const generation = ++microphoneGeneration;
@@ -710,13 +720,16 @@
     microphoneStatus = 'Opening microphone…';
     let stream: MediaStream | null = null;
     try {
+      // Activate audio during the button gesture, before the permission prompt.
+      const context = new AudioContext();
+      microphoneContext = context;
+      const resumeAudio = context.resume();
       stream = await navigator.mediaDevices.getUserMedia({ audio: {
         echoCancellation: true, noiseSuppression: true, autoGainControl: true
       } });
       if (generation !== microphoneGeneration) { stream.getTracks().forEach((track) => track.stop()); return; }
       recordingStream = stream;
-      microphoneContext = new AudioContext();
-      await microphoneContext.resume();
+      await resumeAudio;
       if (generation !== microphoneGeneration) return;
       microphoneSource = microphoneContext.createMediaStreamSource(stream);
       microphoneProcessor = microphoneContext.createScriptProcessor(4096, 1, 1);
@@ -730,12 +743,23 @@
       microphoneStatus = `Listening · ${vadDetectorName} is detecting speech…`;
       microphoneProcessor.onaudioprocess = (event) => {
         if (!microphoneListening || !microphoneContext) return;
+        const chunk = new Float32Array(event.inputBuffer.getChannelData(0));
+        // Draw measured microphone energy, rather than a decorative animation.
+        microphoneWaveform = Array.from({ length: 48 }, (_, index) => {
+          const start = Math.floor(index * chunk.length / 48);
+          const end = Math.floor((index + 1) * chunk.length / 48);
+          let energy = 0;
+          for (let sample = start; sample < end; sample++) energy += chunk[sample] * chunk[sample];
+          return Math.max(2, Math.min(36, Math.sqrt(energy / Math.max(1, end - start)) * 120));
+        });
+        // Check actual playback so a missed media event cannot leave VAD paused.
+        replyPlaying = Array.from(document.querySelectorAll<HTMLAudioElement>('.conversation-turn .assistant audio'))
+          .some((audio) => !audio.paused && !audio.ended && !audio.error);
         if (running || replyPlaying) {
           resetMicrophoneBuffers();
           microphoneStatus = replyPlaying ? 'Speaking · listening resumes after the reply' : 'Processing your turn…';
           return;
         }
-        const chunk = new Float32Array(event.inputBuffer.getChannelData(0));
         microphoneSamples.push(chunk);
         microphoneFrames += chunk.length;
         if (!microphoneDetecting && microphoneFrames >= microphoneContext.sampleRate) {
@@ -917,7 +941,7 @@
         ragText = graphContext(ragResult);
         ragSources = graphCitations(ragResult);
         if (!ragText) throw new Error('RAG returned no relevant knowledge.');
-        llmSystemPrompt = `${systemPrompt.trim()}\n\n# 本次檢索參考資料\n\n以下資料用於查核部門、公開聯絡窗口與轉接規則。根據使用者問題選擇相關事實，並依上方客服角色與對話規則回答。不要朗讀來源、分數或檢索格式；未公開的分機不可推測。\n\n${ragText}`;
+        llmSystemPrompt = `${systemPrompt.trim()}\n\n# 本次檢索參考資料\n\n以下資料用於查核部門、聯絡窗口與轉接規則。先理解來電需求，再依上方接線對照與回覆格式使用相關檢索事實；檢索資料不得覆蓋系統提示中的聯絡對照。已能選定唯一窗口時不要再詢問廠區、承辦人或分機。不要朗讀來源、分數或檢索格式；未提供的分機不可推測。\n\n${ragText}`;
       }
 
       const messages: ChatMessage[] = [];
@@ -932,7 +956,7 @@
           body: JSON.stringify({ model: llmModel, messages, temperature, max_tokens: maxTokens, stream: false }),
           signal: aborter.signal
         }, aborter.signal);
-        llmResponse = chatText(llm);
+        llmResponse = traditionalChineseText(chatText(llm));
 
         // Jetson uses unified memory. Release the LLM worker before the TTS
         // worker creates its CUDA/cuBLAS context for this sequential pipeline.
@@ -1003,8 +1027,6 @@
         : 'system';
       ragResultCount = Math.max(1, Math.min(20, Number(saved.ragResultCount ?? ragResultCount) || ragResultCount));
       ragSearchMode = saved.ragSearchMode === 'global' ? 'global' : 'local';
-      useLlm = saved.useLlm ?? useLlm;
-      useTts = saved.useTts ?? useTts;
       temperature = Number(saved.temperature ?? temperature);
       maxTokens = Number(saved.maxTokens ?? maxTokens);
     } catch { /* use defaults */ }
@@ -1027,9 +1049,9 @@
 </script>
 
 <section class="page-head pipeline-head">
-  <p class="eyebrow">VOICE AGENT PIPELINE</p>
-  <h1>Voice conversation</h1>
-  <p>GeoVision Interactive Voice Response.</p>
+  <p class="eyebrow">VOICE CONVERSATION PIPELINE</p>
+  <h1>Interactive Voice Response</h1>
+  <p>DetectSpeech.VAD → SpeechToText.ASR → KnowledgeBase.RAG → LanguageModel.LLM → TextToSpeech.TTS</p>
 </section>
 
 <section class="pipeline-steps" aria-label="Pipeline progress">
@@ -1047,31 +1069,20 @@
 
 <div class="pipeline-grid conversation-grid">
   <section class="panel page-panel pipeline-config">
-    <div class="section-title"><div><span>WORKERS</span><h2>Local pipeline</h2></div><button disabled={running} on:click={refreshAll}>Refresh</button></div>
+    <div class="section-title"><div><span>WORKERS</span><h2>Local pipeline</h2></div></div>
     <fieldset class="pipeline-settings-fields" disabled={running}>
-    <label>Audio & RAG API<input bind:value={audioBaseUrl} on:change={save} /></label>
-    <label>LLM API<input bind:value={llmBaseUrl} on:change={save} /></label>
-    <label>Microphone speech detection<select bind:value={vadModel} on:change={changeMicrophoneDetector}>{#each vadModels as entry}<option value={entry.selectionId}>{entry.label}</option>{/each}</select></label>
-    <p class="field-help">{vadDetectorName} detects speech during continuous microphone input. Changing the model restarts detection. Uploaded audio and examples go directly to ASR.</p>
-    <label>ASR model<select bind:value={sttModel} on:change={save}>{#each sttModels as entry}<option value={entry.selectionId}>{entry.label}</option>{/each}</select></label>
     <label>Context prompt (optional)<textarea rows="2" bind:value={asrContext} on:change={save} placeholder="Terminology or names to recognize"></textarea></label>
     <div class="prompt-actions"><button on:click={saveAsrContextCsv}>Save CSV</button></div>
     <label>ASR language<input bind:value={language} placeholder="auto" on:change={save} /></label>
-    <label class="toggle pipeline-toggle"><input type="checkbox" bind:checked={useLlm} on:change={save} /><span></span>Run LLM instruct model</label>
-    {#if useLlm}
-      <label>LLM instruct model<select bind:value={llmModel} on:change={save}>{#if !llmModels.length && llmModel}<option value={llmModel}>{llmModel}</option>{/if}{#each llmModels as entry}<option value={entry.id}>{entry.id}</option>{/each}</select></label>
-    {/if}
-    <label class="toggle pipeline-toggle"><input type="checkbox" bind:checked={useTts} disabled={cloneRecordingBusy} on:change={save} /><span></span>Run text to speech</label>
     {#if useTts}
-      <label>TTS model<select bind:value={ttsModel} disabled={cloneRecordingBusy} on:change={() => { refreshVoices(); save(); }}>{#each ttsModels as entry}<option value={entry.selectionId}>{entry.label}</option>{/each}</select></label>
       <div class="field-grid">
-        <label>Voice<select bind:value={voice} disabled={cloneRecordingBusy} on:change={() => { if (voice) clearCloneVoice(); save(); }}><option value="">Model default</option>{#each voices as item}<option value={item}>{item}</option>{/each}</select></label>
+        <label>TTS voice<select bind:value={voice} disabled={cloneRecordingBusy} on:change={() => { if (voice) clearCloneVoice(); save(); }}><option value="">Default voice</option>{#each voices as item}<option value={item}>{item}</option>{/each}</select></label>
       </div>
     {/if}
     {#if useTts && supportsVoiceClone}
       <div class="pipeline-clone-voice">
         <div class="section-title"><div><span>VOICE CLONE</span><h2>Reference voice</h2></div></div>
-        <input class="hidden-file" bind:this={cloneVoiceInput} type="file" accept="audio/*" on:change={(event) => chooseCloneVoice(event.currentTarget.files?.[0] || null)} />
+        <input hidden class="hidden-file" bind:this={cloneVoiceInput} type="file" accept="audio/*" on:change={(event) => chooseCloneVoice(event.currentTarget.files?.[0] || null)} />
         <div class="media-actions">
           <button type="button" disabled={cloneRecordingBusy} on:click={() => cloneVoiceInput?.click()}>Choose reference audio</button>
           {#if cloneRecording}
@@ -1112,10 +1123,6 @@
         <label>Results<input type="number" min="1" max="20" step="1" bind:value={ragResultCount} on:change={save} /></label>
       </div>
     {/if}
-    <div class="field-grid compact-fields">
-      <label>Temperature<input type="number" min="0" max="2" step="0.05" bind:value={temperature} /></label>
-      <label>Max tokens<input type="number" min="1" max="32768" bind:value={maxTokens} /></label>
-    </div>
 
     </div>
     </fieldset>
@@ -1150,18 +1157,33 @@
     </div>
     {#if playbackStatus}<p class="field-help">{playbackStatus}</p>{/if}
     <div class="conversation-composer">
-    <div class="continuous-microphone">
-      <div><strong>Continuous microphone</strong><button class:danger={microphoneListening || microphoneStarting} disabled={!(microphoneListening || microphoneStarting) && (cloneRecordingBusy || running || !canGenerateReply || !sttModel || !vadModel)} on:click={toggleMicrophone}>{microphoneListening || microphoneStarting ? 'Stop listening' : 'Start listening'}</button></div>
-      <p role="status">{microphoneStatus}</p>
-      <small>Speak naturally. {vadDetectorName} detects speech and sends each turn after a pause. Listening pauses while the assistant responds.</small>
+    <label for="pipeline-message">Message</label>
+    <div class="message-box" class:listening={microphoneListening}>
+      <div class="message-box-input">
+        <textarea id="pipeline-message" class="chat-text-input" rows="3" bind:value={textInput} disabled={running || cloneRecordingBusy} placeholder="Type a message… (Ctrl+Enter to send)" on:keydown={(event) => {
+          if (event.key === 'Enter' && (event.ctrlKey || event.metaKey) && !event.isComposing) {
+            event.preventDefault();
+            runPipeline('text');
+          }
+        }}></textarea>
+        <div class="composer-actions">
+          <button class="microphone-toggle" class:danger={microphoneListening || microphoneStarting} aria-label={microphoneListening || microphoneStarting ? 'Stop listening' : 'Start listening'} title={microphoneListening || microphoneStarting ? 'Stop continuous microphone' : 'Start continuous microphone'} aria-pressed={microphoneListening || microphoneStarting} disabled={!(microphoneListening || microphoneStarting) && (cloneRecordingBusy || running || !sttModel || !vadModel)} on:click={toggleMicrophone}>
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="9" y="2" width="6" height="12" rx="3" /><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3M8 22h8" /></svg>
+          </button>
+          <button class="primary send-text" disabled={running || !canSendText} on:click={() => runPipeline('text')}>Send text</button>
+        </div>
+      </div>
+      <div class="composer-feedback">
+        <span role="status">{microphoneStatus}</span>
+        {#if microphoneListening || microphoneStarting}
+          <svg class="microphone-waveform" class:paused={running || replyPlaying} viewBox="0 0 192 40" role="img" aria-label={running || replyPlaying ? 'Microphone listening paused' : 'Live microphone waveform'}>
+            {#each microphoneWaveform as height, index}<rect x={index * 4} y={(40 - height) / 2} width="2" {height} rx="1" />{/each}
+          </svg>
+        {:else}
+          <small>Ctrl+Enter to send · Enter for a new line</small>
+        {/if}
+      </div>
     </div>
-    <label>Message<textarea class="chat-text-input" rows="3" bind:value={textInput} disabled={running} placeholder="Type a message… (Enter to send, Shift+Enter for a new line)" on:keydown={(event) => {
-      if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
-        event.preventDefault();
-        runPipeline('text');
-      }
-    }}></textarea></label>
-    <div class="page-runbar"><button class="primary send-text" disabled={running || !canSendText} on:click={() => runPipeline('text')}>Send text</button></div>
     <input class="hidden-file" bind:this={sourceInput} type="file" accept="audio/*" on:change={(event) => chooseFile(event.currentTarget.files?.[0] || null)} />
     <div class="audio-drop">
       <strong>{sourceFile?.name || 'No audio selected'}</strong>

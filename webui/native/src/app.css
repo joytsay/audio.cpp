@@ -457,8 +457,20 @@ nav .nav-link.active { border-color: var(--cyan); }
 .pipeline-settings-fields { border: 0; padding: 0; margin: 0; min-width: 0; }
 
 @media (min-width: 761px) { .pipeline-steps { grid-template-columns: repeat(5, minmax(0, 1fr)); } }
-.continuous-microphone { padding: 12px; margin-bottom: 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--card-bg); }
-.continuous-microphone > div { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-.continuous-microphone strong { font-size: 12px; }
-.continuous-microphone p { margin: 8px 0; color: var(--cyan); font-size: 12px; }
-.continuous-microphone small { color: var(--muted); line-height: 1.5; }
+.message-box { margin: 6px 0 16px; border: 1px solid var(--control-border); border-radius: 10px; background: var(--control-bg); overflow: hidden; }
+.message-box:focus-within { border-color: var(--blue); box-shadow: 0 0 0 3px rgba(106,168,255,.12); }
+.message-box.listening { border-color: var(--cyan); }
+.message-box-input { display: flex; align-items: flex-end; gap: 8px; padding: 10px; }
+.message-box .chat-text-input { flex: 1; min-width: 0; border: 0; border-radius: 0; padding: 0; background: transparent; box-shadow: none; }
+.composer-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.microphone-toggle { display: inline-flex; align-items: center; justify-content: center; min-width: 36px; min-height: 36px; padding: 7px; }
+.composer-feedback { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 40px; padding: 0 10px 8px; color: var(--muted); font-size: 12px; }
+.message-box.listening .composer-feedback [role=status] { color: var(--cyan); }
+.composer-feedback small { font-size: 11px; text-align: right; }
+.microphone-waveform { width: 192px; max-width: 40%; height: 40px; flex-shrink: 0; fill: var(--cyan); }
+.microphone-waveform.paused { opacity: .35; }
+@media (max-width: 480px) {
+  .message-box-input { flex-wrap: wrap; }
+  .message-box .chat-text-input { flex-basis: 100%; }
+  .composer-actions { margin-left: auto; }
+}

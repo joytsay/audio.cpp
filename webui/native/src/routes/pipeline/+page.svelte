@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import Pipeline from '../Pipeline.svelte';
   import logoCloud from '../../../static/logo_cloud.svg?raw';
+  const logoIcon = `data:image/svg+xml,${encodeURIComponent(logoCloud)}`;
   import '../../app.css';
   import { UI_THEME_STORAGE_KEY, resolvedTheme, resolveUiTheme } from '$lib/theme';
   onMount(() => {
@@ -13,9 +14,11 @@
   });
 </script>
 
-<svelte:head><title>GeoVision IVR · Voice conversation</title></svelte:head>
+<svelte:head>
+  <title>GeoVision IVR · Voice conversation</title>
+  <link rel="icon" type="image/svg+xml" sizes="any" href={logoIcon} />
+</svelte:head>
 <header class="topbar">
   <div class="brand"><div class="brand-logo">{@html logoCloud}</div><div><strong>GeoVision IVR</strong><span>Voice conversation</span></div></div>
-  <nav aria-label="Primary navigation"><a class="nav-link active" href="#/pipeline">Pipeline</a></nav>
 </header>
 <main><Pipeline /></main>

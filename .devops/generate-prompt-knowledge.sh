@@ -11,7 +11,7 @@ awk -v out="$corpus_dir" '
 BEGIN {
     section = 0; contact = 0
     overview = out "/overview.md"
-    print "# 台積電客服櫃台知識導覽\n\n來源：prompt.csv。部門與公開聯絡方式、轉接規則與客服對話方式共用同一份來源。\n" > overview
+    print "# 台積電客服櫃台知識導覽\n\n來源：prompt.csv。部門與使用者設定的聯絡方式、轉接規則與客服對話方式共用同一份來源。\n" > overview
     filename = sprintf("section-%02d.md", section)
     file = out "/" filename
     print "# 台積電客服櫃台角色\n\n來源：prompt.csv。\n" > file
@@ -21,6 +21,7 @@ BEGIN {
     section++
     title = substr($0, 3)
     filename = sprintf("section-%02d.md", section)
+    if (title == "窗口分工") scopes_filename = filename
     file = out "/" filename
     print "# 台積電客服櫃台：" title "\n\n來源：prompt.csv。\n" > file
     print "- [" title "](" filename ")" >> overview
@@ -28,6 +29,10 @@ BEGIN {
 }
 {
     print $0 >> file
+    if ($0 ~ /^- /) {
+        colon = index($0, "：")
+        if (colon > 0) scopes[substr($0, 3, colon - 3)] = substr($0, colon + length("："))
+    }
     if ($0 ~ /^\|/ && $0 !~ /^\| ---/ && $0 !~ /^\| 需求/) {
         count = split($0, fields, "|")
         if (count >= 5) {
@@ -36,9 +41,13 @@ BEGIN {
             contactname = sprintf("contact-%02d.md", contact)
             contactfile = out "/" contactname
             print "# 台積電聯絡窗口：" fields[2] "\n\n來源：prompt.csv。\n" > contactfile
-            print "窗口 / 需求：" fields[2] "\n公開電話：" fields[3] "\n公開分機：" fields[4] >> contactfile
-            print "\n公開電話不等於內部分機。未公開的分機不可編造。電話與分機只適用於這個窗口；中國業務發展處的分機不適用於台灣總機。" >> contactfile
-            print "\n[全部公開聯絡窗口](" filename ") · [客服導覽](overview.md)" >> contactfile
+            print "窗口 / 需求：" fields[2] "\n電話：" fields[3] "\n分機：" fields[4] >> contactfile
+            if (fields[2] in scopes) {
+                print "\n適用需求：" scopes[fields[2]] >> contactfile
+                print "\n[窗口分工](" scopes_filename ")" >> contactfile
+            }
+            print "\n使用者設定的接線對照。電話不等於內部分機。未提供的分機不可編造。電話與分機只適用於這個窗口；中國業務發展處的分機不適用於台灣總機。" >> contactfile
+            print "\n[全部聯絡窗口](" filename ") · [客服導覽](overview.md)" >> contactfile
             print "- [" fields[2] "](" contactname ")" >> overview
         }
     }
