@@ -39,6 +39,47 @@
   let llmBaseUrl = '';
   let models: PipelineAudioModel[] = [];
   let vadModel = 'silero-vad';
+  const sileroVadFields = [
+    { key: 'threshold', label: 'Speech threshold', value: 0.5, min: 0.01, max: 1, step: 0.01, help: 'Lower values detect quieter speech; higher values reject more noise.' },
+    { key: 'min_speech_duration_ms', label: 'Minimum speech (ms)', value: 250, min: 0, max: 10000, step: 1, help: 'Discard speech segments shorter than this.' },
+    { key: 'min_silence_duration_ms', label: 'Minimum silence (ms)', value: 100, min: 0, max: 10000, step: 1, help: 'Silence required to separate speech segments.' },
+    { key: 'speech_pad_ms', label: 'Speech padding (ms)', value: 30, min: 0, max: 5000, step: 1, help: 'Keep extra audio before and after each speech segment.' },
+    { key: 'max_speech_duration_s', label: 'Maximum segment (s)', value: 0, min: 0, max: 3600, step: 0.1, help: 'Split longer segments. Use 0 for unlimited. Microphone turns still stop at 15 seconds.' },
+    { key: 'neg_threshold', label: 'Silence threshold', value: -1, min: -1, max: 1, step: 0.01, help: 'End speech below this probability. Use -1 for automatic: speech threshold minus 0.15, at least 0.01.' },
+    { key: 'min_silence_at_max_speech_ms', label: 'Silence at maximum segment (ms)', value: 98, min: 0, max: 10000, step: 1, help: 'Minimum pause used to split a segment at its maximum duration.' }
+  ];
+  let sileroVadSettings: Record<string, number> = Object.fromEntries(sileroVadFields.map((field) => [field.key, field.value]));
+  let vadUseLongestSilence = true;
+
+  function normalizeVadSettings(settings: Record<string, number>) {
+    return Object.fromEntries(sileroVadFields.map((field) => {
+      const raw = settings[field.key];
+      const value = typeof raw === 'number' && Number.isFinite(raw) ? raw : field.value;
+      const bounded = Math.max(field.min, Math.min(field.max, value));
+      return [field.key, field.step === 1 ? Math.round(bounded) : bounded];
+    }));
+  }
+
+  function vadRequestOptions(): StringMap {
+    if (!selectedVadIsSilero) return {};
+    const settings = normalizeVadSettings(sileroVadSettings);
+    return {
+      ...Object.fromEntries(Object.entries(settings).map(([key, value]) => [key, String(value)])),
+      max_speech_duration_s: String(settings.max_speech_duration_s || 1e9),
+      use_max_poss_sil_at_max_speech: String(vadUseLongestSilence)
+    };
+  }
+
+  function saveVadSettings() {
+    sileroVadSettings = normalizeVadSettings(sileroVadSettings);
+    save();
+  }
+
+  function resetVadSettings() {
+    sileroVadSettings = Object.fromEntries(sileroVadFields.map((field) => [field.key, field.value]));
+    vadUseLongestSilence = true;
+    save();
+  }
   let llmModels: OpenAIModel[] = [];
   let sttModel = 'qwen3-asr';
   let llmModel = '';
@@ -52,6 +93,7 @@
   }
   const defaultAsrContext = asrContextFromCsv(bundledHotwords) || 'Technical terms: X光機 T5';
   let asrContext = defaultAsrContext;
+  let useHotwords = true;
   let playbackStatus = '';
   function autoplaySpeech(node: HTMLAudioElement) {
     const play = () => {
@@ -171,8 +213,9 @@
   let runtimeTick = 0;
   let runtimeTimer: ReturnType<typeof setInterval> | null = null;
 
-  $: vadModels = models.filter((entry) => entry.task === 'vad');
   $: selectedVadModel = models.find((entry) => entry.selectionId === vadModel);
+  $: selectedVadIsSilero = selectedVadModel?.family === 'silero_vad' ||
+    /^silero[-_]vad(?:[-_]|$)/i.test(selectedVadModel?.modelId || vadModel);
   $: vadDetectorName = (catalog.find((entry) => entry.id === selectedVadModel?.modelId)?.display_name ||
     selectedVadModel?.label || 'Selected VAD').replace(/\s*\([^)]*\)$/, '');
   $: sttModels = models.filter((entry) => ['asr', 'stt'].includes(entry.task || ''));
@@ -207,8 +250,8 @@
 
   function save() {
     localStorage.setItem('audiocpp.conversation.settings', JSON.stringify({
-      promptDefaultsVersion: 2, vadModel, sttModel, llmModel, ttsModel,
-      audioBaseUrl, llmBaseUrl, asrContext, voice, language, promptMode,
+      promptDefaultsVersion: 2, vadModel, sileroVadSettings, vadUseLongestSilence, sttModel, llmModel, ttsModel,
+      audioBaseUrl, llmBaseUrl, asrContext, useHotwords, voice, language, promptMode,
       useLlm, useTts, temperature, maxTokens,
       ragResultCount, ragSearchMode
     }));
@@ -235,7 +278,7 @@
         method: 'POST', body: JSON.stringify({ content })
       });
       save();
-      status = 'Context prompt saved to hotword.csv.';
+      status = 'Hotwords saved to hotword.csv.';
     } catch (error) {
       status = error instanceof Error ? error.message : String(error);
     }
@@ -359,15 +402,19 @@
       installed = installedAudioModels(inventory, root.models_root);
     } catch { /* configured-only servers do not expose package management */ }
     const installedPaths = new Set(installed.map((entry) => `${entry.modelId}\n${entry.path || ''}`));
-    models = [
+    const available = [
       ...installed,
       ...configured.map(configuredAudioModel).filter((entry) =>
         !installedPaths.has(`${entry.modelId}\n${entry.path || ''}`))
     ];
+    // Prefer the bundled Silero entry over the same model already loaded by
+    // the server, whose path may be absent or absolute in /v1/models.
+    const silero = available.find((entry) => entry.task === 'vad' && entry.family === 'silero_vad');
+    models = available.filter((entry) => entry.task !== 'vad' || entry === silero);
     const nextVad = models.filter((entry) => entry.task === 'vad');
     const nextStt = models.filter((entry) => ['asr', 'stt'].includes(entry.task || ''));
     const nextTts = models.filter((entry) => ['tts', 'clon'].includes(entry.task || ''));
-    vadModel = keepSelection(nextVad, vadModel);
+    vadModel = nextVad[0]?.selectionId || '';
     sttModel = keepSelection(nextStt, sttModel);
     ttsModel = keepSelection(nextTts, ttsModel);
     await refreshVoices();
@@ -632,17 +679,6 @@
     return new File([encodePcm16Wav(audio)], 'microphone-turn.wav', { type: 'audio/wav' });
   }
 
-  async function changeMicrophoneDetector() {
-    save();
-    const restart = microphoneListening || microphoneStarting;
-    if (restart) {
-      // Discard buffered speech and any response from the previous detector.
-      stopMicrophone();
-      await tick();
-      await toggleMicrophone();
-    }
-  }
-
   async function detectMicrophoneSpeech(samples: Float32Array, generation: number) {
     const context = microphoneContext;
     if (!context || !microphoneListening || microphoneDetecting) return;
@@ -653,7 +689,7 @@
       const vad = await ensureAudioModel(vadModel, controller.signal);
       const audio = await uploadAudio(microphoneWav([samples], context), controller.signal);
       const result = await endpointJson<any>(audioBaseUrl, 'tasks/run', {
-        method: 'POST', body: JSON.stringify({ model: vad.modelId, audio })
+        method: 'POST', body: JSON.stringify({ model: vad.modelId, audio, options: vadRequestOptions() })
       }, controller.signal);
       if (generation !== microphoneGeneration || !microphoneListening) return;
       if (running || replyPlaying) { resetMicrophoneBuffers(); return; }
@@ -844,7 +880,9 @@
     const context = new AudioContext();
     try {
       const input = await context.decodeAudioData(await file.arrayBuffer());
-      const vadRate = Number(vadResult?.sample_rate) || input.sampleRate;
+      // VAD runs on the 16 kHz upload. AudioContext may decode that WAV at
+      // the device rate (often 48 kHz), while /tasks/run can omit sample_rate.
+      const vadRate = Number(vadResult?.sample_rate) || 16000;
       const spans = (segments.map((segment: any) => ({
         start: Math.max(0, Math.floor(Number(segment.start_sample || 0) * input.sampleRate / vadRate)),
         end: Math.min(input.length, Math.ceil(Number(segment.end_sample || 0) * input.sampleRate / vadRate))
@@ -910,7 +948,7 @@
         const vad = await ensureAudioModel(vadModel, aborter.signal);
         const vadResult = await endpointJson<any>(audioBaseUrl, 'tasks/run', {
           method: 'POST',
-          body: JSON.stringify({ model: vad.modelId, audio: audioPath })
+          body: JSON.stringify({ model: vad.modelId, audio: audioPath, options: vadRequestOptions() })
         }, aborter.signal);
         vadText = formatVad(vadResult);
         workingAudioFile = await audioForSpeechSegments(workingAudioFile, vadResult);
@@ -923,14 +961,16 @@
         const speechModel = await ensureAudioModel(sttModel, aborter.signal);
         const stt = await endpointJson<any>(audioBaseUrl, 'audio/transcriptions/details', {
           method: 'POST',
-          body: JSON.stringify({ model: speechModel.modelId, audio: audioPath, language, ...(asrContext.trim() ? { text: asrContext.trim() } : {}) })
+          body: JSON.stringify({ model: speechModel.modelId, audio: audioPath, language, ...(useHotwords && asrContext.trim() ? { text: asrContext.trim() } : {}) })
         }, aborter.signal);
         plainTranscript = typeof stt.text === 'string' ? traditionalAsrText(stt.text) : '';
       }
       sttText = plainTranscript;
       // Typed text is unchanged; ASR uses Traditional Chinese for display, retrieval and history.
       transcript = plainTranscript;
-      if (!transcript) throw new Error('The message is empty.');
+      if (!transcript.trim()) throw new Error(input === 'audio'
+        ? 'Speech recognition returned no text. Try recording again or choose another ASR model.'
+        : 'The message is empty.');
 
       let llmSystemPrompt = systemPrompt.trim();
       if (promptMode !== 'system') {
@@ -1016,7 +1056,10 @@
       audioBaseUrl = saved.audioBaseUrl || audioBaseUrl;
       llmBaseUrl = saved.llmBaseUrl || llmBaseUrl;
       asrContext = saved.asrContext ?? defaultAsrContext;
+      useHotwords = typeof saved.useHotwords === 'boolean' ? saved.useHotwords : true;
       vadModel = saved.vadModel || vadModel;
+      sileroVadSettings = normalizeVadSettings(saved.sileroVadSettings || sileroVadSettings);
+      vadUseLongestSilence = typeof saved.vadUseLongestSilence === 'boolean' ? saved.vadUseLongestSilence : true;
       sttModel = saved.sttModel || sttModel;
       llmModel = saved.llmModel || '';
       ttsModel = saved.ttsModel || ttsModel;
@@ -1069,8 +1112,26 @@
 
 <div class="pipeline-grid conversation-grid">
   <section class="panel page-panel pipeline-config">
-    <div class="section-title"><div><span>WORKERS</span><h2>Local pipeline</h2></div></div>
+    <div class="section-title"><div><span>SETTINGS</span><h2>Pipeline</h2></div></div>
     <fieldset class="pipeline-settings-fields" disabled={running}>
+    <p class="field-help">VAD</p>
+    {#if selectedVadIsSilero}
+      <details>
+        <summary>VAD settings</summary>
+        <p class="field-help">Used for continuous microphone detection and speech cropping before ASR. Microphone detection checks roughly one second of audio at a time; these durations control segments within each check.</p>
+        <div class="field-grid compact-fields">
+          {#each sileroVadFields as field}
+            <label>{field.label}
+              <input type="number" min={field.min} max={field.max} step={field.step} bind:value={sileroVadSettings[field.key]} on:change={saveVadSettings} />
+              <small class="field-help">{field.help}</small>
+            </label>
+          {/each}
+        </div>
+        <label><input type="checkbox" bind:checked={vadUseLongestSilence} on:change={save} />Split at the longest pause when maximum segment duration is reached</label>
+        <button type="button" on:click={resetVadSettings}>Reset VAD defaults</button>
+      </details>
+    {/if}
+    <label class="toggle pipeline-toggle"><input type="checkbox" role="switch" bind:checked={useHotwords} on:change={save} /><span aria-hidden="true"></span>Use hotwords</label>
     <label>Context prompt (optional)<textarea rows="2" bind:value={asrContext} on:change={save} placeholder="Terminology or names to recognize"></textarea></label>
     <div class="prompt-actions"><button on:click={saveAsrContextCsv}>Save CSV</button></div>
     <label>ASR language<input bind:value={language} placeholder="auto" on:change={save} /></label>
@@ -1184,11 +1245,12 @@
         {/if}
       </div>
     </div>
-    <input class="hidden-file" bind:this={sourceInput} type="file" accept="audio/*" on:change={(event) => chooseFile(event.currentTarget.files?.[0] || null)} />
+    <input hidden bind:this={sourceInput} type="file" accept="audio/*" on:change={(event) => chooseFile(event.currentTarget.files?.[0] || null)} />
     <div class="audio-drop">
-      <strong>{sourceFile?.name || 'No audio selected'}</strong>
-      <span>WAV, MP3, or FLAC</span>
-      <div><button disabled={running} on:click={() => sourceInput?.click()}>Choose audio</button></div>
+      <div class="pipeline-audio-choice">
+        <div><strong>{sourceFile?.name || 'No audio selected'}</strong><small>WAV, MP3, or FLAC</small></div>
+        <button disabled={running} on:click={() => sourceInput?.click()}>Choose audio</button>
+      </div>
       <div class="pipeline-example-audio">
         <span>Example audio</span>
         {#each exampleAudioFiles as example}
@@ -1197,10 +1259,10 @@
       </div>
       {#if inputUrl}<audio class="pipeline-input-audio" controls src={inputUrl}></audio>{/if}
     </div>
-    <div class="page-runbar">
-      <button class="primary" disabled={running || !canSendAudio} on:click={() => runPipeline('audio')}>{running ? 'Running…' : 'Send audio'}</button>
-      {#if running}<button on:click={() => aborter?.abort()}>Stop</button>{/if}
+    <div class="page-runbar pipeline-audio-runbar">
       <span class:busy={running}>{status}</span>
+      {#if running}<button on:click={() => aborter?.abort()}>Stop</button>{/if}
+      <button class="primary" disabled={running || !canSendAudio} on:click={() => runPipeline('audio')}>{running ? 'Running…' : 'Send audio'}</button>
     </div>
     </div>
     {#if useTts && selectedTtsModel?.family === 'zipvoice' && !voice && (!cloneVoiceFile || !cloneReferenceText.trim())}<p class="field-help">Choose reference audio and enter its matching transcript to enable ZipVoice cloning.</p>{/if}

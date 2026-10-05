@@ -355,9 +355,9 @@ pre { background: var(--code-bg); border: 1px solid var(--line); border-radius: 
 .diarization-speakers label { display: flex; align-items: center; gap: 5px; margin: 0; font-size: 11px; }
 .pipeline-separation-results { margin-top: 12px; }
 .pipeline-separation-results > span { color: var(--cyan); font-size: 9px; font-weight: 800; letter-spacing: .13em; }
-.pipeline-example-audio { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; }
-.pipeline-example-audio > span { flex-basis: 100%; color: var(--muted); font-size: 10px; }
-.pipeline-example-audio button { padding: 5px 8px; font-size: 10px; }
+.pipeline-example-audio { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.pipeline-example-audio > span { color: var(--muted); font-size: 10px; }
+.pipeline-example-audio button { padding: 3px 6px; font-size: 10px; line-height: 1.2; }
 .pipeline-steps div.active { border-color: var(--active-border); color: var(--cyan); box-shadow: inset 0 0 0 1px rgba(66,232,213,.12); }
 .pipeline-steps div.complete > span { border-color: var(--cyan); background: var(--cyan); color: var(--text-invert); }
 .pipeline-grid { display: grid; grid-template-columns: minmax(280px, .75fr) minmax(340px, 1fr) minmax(340px, 1fr); gap: 12px; align-items: start; }
@@ -367,10 +367,16 @@ pre { background: var(--code-bg); border: 1px solid var(--line); border-radius: 
 .pipeline-clone-voice .section-title { margin-bottom: 7px; }
 .pipeline-voice-library { grid-template-columns: minmax(0, 1fr); }
 .pipeline-voice-library .library-actions { padding-bottom: 0; }
-.audio-drop { display: grid; min-height: 128px; padding: 16px; place-content: center; gap: 5px; border: 1px dashed var(--control-border); border-radius: 10px; background: var(--code-bg); text-align: center; }
-.audio-drop > span { color: var(--muted); font-size: 10px; }
-.audio-drop > div { display: flex; justify-content: center; gap: 7px; margin-top: 9px; }
-.pipeline-input-audio { width: min(100%, 420px); margin-top: 10px; }
+.audio-drop { display: grid; padding: 10px; gap: 8px; border: 1px dashed var(--control-border); border-radius: 10px; background: var(--code-bg); }
+.pipeline-audio-choice { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
+.pipeline-audio-choice > div { min-width: 0; }
+.pipeline-audio-choice strong { display: block; overflow-wrap: anywhere; font-size: 12px; }
+.pipeline-audio-choice small { color: var(--muted); font-size: 10px; }
+.pipeline-audio-choice button { flex-shrink: 0; }
+.pipeline-input-audio { width: min(100%, 420px); height: 32px; }
+.page-runbar.pipeline-audio-runbar { display: flex; align-items: center; gap: 8px; padding-right: 11px; }
+.pipeline-audio-runbar > span { flex: 1; min-width: 0; }
+.pipeline-audio-runbar > button { flex-shrink: 0; }
 .prompt-actions { display: flex; justify-content: flex-end; margin-top: 7px; }
 .pipeline-message.diarization { border-left: 3px solid var(--muted); }
 .pipeline-message.user { border-left: 3px solid var(--blue); }
