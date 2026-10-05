@@ -2,6 +2,7 @@
   import { onDestroy, onMount, tick } from 'svelte';
   import { browserDecodeToWav, encodePcm16Wav } from '$lib/audio';
   import { traditionalAsrText, traditionalChineseText } from '$lib/asr-text';
+  import { verifiedTransferReply } from '$lib/receptionist-routing';
   import { spokenExtensionText } from '$lib/receptionist-text';
   import { catalog } from '$lib/catalog';
   import MediaPreview from '$lib/MediaPreview.svelte';
@@ -716,7 +717,10 @@
     }
   }
 
-  function chooseFile(file: File | null, fromMicrophone = false) {
+  let selectedExampleName = '';
+
+  function chooseFile(file: File | null, fromMicrophone = false, exampleName = '') {
+    selectedExampleName = exampleName;
     sourceFromMicrophone = fromMicrophone;
     if (inputUrl) URL.revokeObjectURL(inputUrl);
     sourceFile = file;
@@ -730,12 +734,12 @@
         const comma = example.url.indexOf(',');
         if (comma < 0) throw new Error(`Could not load ${example.name}.`);
         const bytes = Uint8Array.from(atob(example.url.slice(comma + 1)), (char) => char.charCodeAt(0));
-        chooseFile(new File([bytes], example.name, { type: 'audio/mpeg' }));
+        chooseFile(new File([bytes], example.name, { type: 'audio/mpeg' }), false, example.name);
         return;
       }
       const response = await fetch(example.url);
       if (!response.ok) throw new Error(`Could not load ${example.name}.`);
-      chooseFile(new File([await response.blob()], example.name, { type: 'audio/mpeg' }));
+      chooseFile(new File([await response.blob()], example.name, { type: 'audio/mpeg' }), false, example.name);
     } catch (error) {
       status = error instanceof Error ? error.message : String(error);
     }
@@ -1015,6 +1019,7 @@
 
   async function runPipeline(input: 'audio' | 'text', playSubmittedAudio = false) {
     if (running || (input === 'audio' ? !canSendAudio : !canSendText)) return;
+    const submittedExampleName = input === 'audio' ? selectedExampleName : '';
     turnInput = input;
     turnFromMicrophone = input === 'audio' && sourceFromMicrophone;
     const submittedText = input === 'text' ? textInput.trim() : '';
@@ -1103,7 +1108,7 @@
           body: JSON.stringify({ model: llmModel, messages, temperature, max_tokens: maxTokens, stream: false }),
           signal: aborter.signal
         }, aborter.signal);
-        llmResponse = spokenExtensionText(traditionalChineseText(chatText(llm)));
+        llmResponse = spokenExtensionText(verifiedTransferReply(traditionalChineseText(chatText(llm)), transcript, systemPrompt, submittedExampleName));
 
         // Jetson uses unified memory. Release the LLM worker before the TTS
         // worker creates its CUDA/cuBLAS context for this sequential pipeline.
