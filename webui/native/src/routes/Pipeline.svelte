@@ -153,6 +153,11 @@
   let cloneVoiceInput: HTMLInputElement | null = null;
   let cloneVoiceFile: File | null = null;
   let cloneReferenceText = '';
+  let cloneTranscriptStatus = '';
+  let cloneTranscribing = false;
+  let cloneTranscriptAborter: AbortController | null = null;
+  let cloneTranscriptGeneration = 0;
+  let cloneTranscriptRevision = 0;
   let cloneVoiceName = '';
   let savedCloneVoices: SavedVoice[] = [];
   let savedCloneVoiceId = '';
@@ -242,7 +247,7 @@
     ...(useLlm ? [['llm', 'Language model']] : []),
     ...(useTts ? [['tts', 'Text to speech']] : [])
   ];
-  $: canGenerateReply = Boolean((!useLlm || llmModel) &&
+  $: canGenerateReply = Boolean(!cloneTranscribing && (!useLlm || llmModel) &&
     (!useTts || (ttsModel && (selectedTtsModel?.family !== 'zipvoice' ||
       (cloneVoiceFile && cloneReferenceText.trim()) || voice))));
   $: canSendAudio = Boolean(!cloneRecordingBusy && sourceFile && sttModel && (!sourceFromMicrophone || vadModel) && canGenerateReply);
@@ -463,13 +468,62 @@
   }
 
   function chooseCloneVoice(file: File | null) {
-    const changed = Boolean(file && cloneVoiceFile && cloneVoiceFile.name !== file.name);
+    cancelCloneTranscription();
     cloneVoiceFile = file;
+    cloneReferenceText = '';
     savedCloneVoiceId = '';
     if (file) {
       voice = '';
       cloneVoiceName = file.name.replace(/\.[^.]+$/, '');
-      if (changed) cloneReferenceText = '';
+      void transcribeCloneVoice(file);
+    }
+  }
+
+  function cancelCloneTranscription() {
+    cloneTranscriptGeneration += 1;
+    cloneTranscriptAborter?.abort();
+    cloneTranscriptAborter = null;
+    cloneTranscribing = false;
+    cloneTranscriptStatus = '';
+  }
+
+  async function transcribeCloneVoice(file: File) {
+    if (!sttModel) {
+      cloneTranscriptStatus = 'Choose an ASR model or enter the reference transcript manually.';
+      return;
+    }
+    const generation = cloneTranscriptGeneration;
+    const revision = cloneTranscriptRevision;
+    const controller = new AbortController();
+    cloneTranscriptAborter = controller;
+    cloneTranscribing = true;
+    cloneTranscriptStatus = 'Transcribing reference audio…';
+    try {
+      const speechModel = await ensureAudioModel(sttModel, controller.signal);
+      const audio = await uploadAudio(file, controller.signal);
+      const result = await endpointJson<{ text?: string }>(audioBaseUrl, 'audio/transcriptions/details', {
+        method: 'POST',
+        body: JSON.stringify({ model: speechModel.modelId, audio, language,
+          ...(useHotwords && asrContext.trim() ? { text: asrContext.trim() } : {}) })
+      }, controller.signal);
+      if (generation !== cloneTranscriptGeneration || cloneVoiceFile !== file) return;
+      const text = typeof result.text === 'string' ? traditionalAsrText(result.text).trim() : '';
+      if (!text) throw new Error('ASR returned no text. Enter the reference transcript manually.');
+      if (revision === cloneTranscriptRevision) {
+        cloneReferenceText = text;
+        cloneTranscriptStatus = 'Reference transcribed. Review and edit the text to match the audio.';
+      } else {
+        cloneTranscriptStatus = 'Kept your edited reference transcript.';
+      }
+    } catch (error) {
+      if (generation === cloneTranscriptGeneration) {
+        cloneTranscriptStatus = `Reference transcription failed: ${error instanceof Error ? error.message : String(error)}`;
+      }
+    } finally {
+      if (generation === cloneTranscriptGeneration) {
+        cloneTranscribing = false;
+        cloneTranscriptAborter = null;
+      }
     }
   }
 
@@ -497,6 +551,7 @@
       return;
     }
     stopMicrophone();
+    cancelCloneTranscription();
     document.querySelectorAll<HTMLAudioElement>('audio').forEach((audio) => audio.pause());
     const generation = ++cloneRecordingGeneration;
     cloneRecordingStarting = true;
@@ -532,9 +587,8 @@
           const wav = await browserDecodeToWav(captured, 24000, 1);
           if (generation !== cloneRecordingGeneration) return;
           chooseCloneVoice(new File([wav], `reference-${Date.now()}.wav`, { type: 'audio/wav' }));
-          cloneReferenceText = '';
           if (cloneVoiceInput) cloneVoiceInput.value = '';
-          cloneRecordingStatus = 'Reference recorded. Enter the exact words you spoke below.';
+          cloneRecordingStatus = 'Reference recorded.';
         } catch (error) {
           if (generation === cloneRecordingGeneration) cloneRecordingStatus = error instanceof Error ? error.message : String(error);
         } finally {
@@ -563,6 +617,7 @@
   }
 
   function chooseSavedCloneVoice(id: string) {
+    cancelCloneTranscription();
     savedCloneVoiceId = id;
     const saved = savedCloneVoices.find((entry) => entry.id === id);
     if (!saved) return;
@@ -575,6 +630,7 @@
   }
 
   function clearCloneVoice() {
+    cancelCloneTranscription();
     cloneVoiceFile = null;
     cloneReferenceText = '';
     cloneVoiceName = '';
@@ -583,7 +639,7 @@
   }
 
   async function storeCloneVoice() {
-    if (!cloneVoiceFile || savingCloneVoice) return;
+    if (!cloneVoiceFile || savingCloneVoice || cloneTranscribing) return;
     savingCloneVoice = true;
     try {
       const name = cloneVoiceName.trim() || cloneVoiceFile.name.replace(/\.[^.]+$/, '') || 'Saved voice';
@@ -1082,6 +1138,7 @@
   });
 
   onDestroy(() => {
+    cancelCloneTranscription();
     if (runtimeTimer) clearInterval(runtimeTimer);
     aborter?.abort();
     cancelCloneRecording();
@@ -1131,10 +1188,9 @@
         <button type="button" on:click={resetVadSettings}>Reset VAD defaults</button>
       </details>
     {/if}
-    <label class="toggle pipeline-toggle"><input type="checkbox" role="switch" bind:checked={useHotwords} on:change={save} /><span aria-hidden="true"></span>Use hotwords</label>
-    <label>Context prompt (optional)<textarea rows="2" bind:value={asrContext} on:change={save} placeholder="Terminology or names to recognize"></textarea></label>
+    <label class="toggle pipeline-toggle"><input type="checkbox" role="switch" bind:checked={useHotwords} on:change={save} /><span aria-hidden="true"></span>ASR hotwords</label>
+    <label>Context prompt (hotwords)<textarea rows="2" bind:value={asrContext} on:change={save} placeholder="Terminology or names to recognize"></textarea></label>
     <div class="prompt-actions"><button on:click={saveAsrContextCsv}>Save CSV</button></div>
-    <label>ASR language<input bind:value={language} placeholder="auto" on:change={save} /></label>
     {#if useTts}
       <div class="field-grid">
         <label>TTS voice<select bind:value={voice} disabled={cloneRecordingBusy} on:change={() => { if (voice) clearCloneVoice(); save(); }}><option value="">Default voice</option>{#each voices as item}<option value={item}>{item}</option>{/each}</select></label>
@@ -1156,14 +1212,15 @@
           {#if cloneVoiceFile}<span>{cloneVoiceFile.name}</span>{/if}
         </div>
         {#if cloneRecordingStatus}<p class="field-help" role="status">{cloneRecordingStatus}</p>{/if}
-        <p class="field-help">Record a short, clear sample, then stop and enter the matching transcript. Conversation listening stops while you record.</p>
+        <p class="field-help">Choose or record a short, clear sample. The selected ASR model fills the transcript for you; review it before using the voice. Conversation listening stops while you record.</p>
         <MediaPreview file={cloneVoiceFile} kind="audio" label="Reference preview" />
-        <label>Reference transcript<textarea rows="2" bind:value={cloneReferenceText} placeholder="Exact words spoken in the reference audio"></textarea></label>
+        <label>Reference transcript<textarea rows="2" bind:value={cloneReferenceText} on:input={() => cloneTranscriptRevision += 1} placeholder="ASR fills this automatically; you can edit the exact words spoken"></textarea></label>
+        {#if cloneTranscriptStatus}<p class="field-help" role="status">{cloneTranscriptStatus}</p>{/if}
         <div class="voice-library pipeline-voice-library">
           <label>Saved voices<select value={savedCloneVoiceId} disabled={cloneRecordingBusy} on:change={(event) => chooseSavedCloneVoice(event.currentTarget.value)}><option value="">Choose saved voice…</option>{#each savedCloneVoices as item}<option value={item.id}>{item.name}</option>{/each}</select></label>
           <label>Voice name<input bind:value={cloneVoiceName} placeholder="Reference voice name" /></label>
           <div class="library-actions">
-            <button type="button" disabled={!cloneVoiceFile || savingCloneVoice || cloneRecordingBusy} on:click={storeCloneVoice}>{savingCloneVoice ? 'Saving…' : 'Save voice'}</button>
+            <button type="button" disabled={!cloneVoiceFile || savingCloneVoice || cloneRecordingBusy || cloneTranscribing} on:click={storeCloneVoice}>{savingCloneVoice ? 'Saving…' : 'Save voice'}</button>
             <button class="danger" type="button" disabled={!savedCloneVoiceId || cloneRecordingBusy} on:click={removeCloneVoice}>Delete</button>
           </div>
         </div>
