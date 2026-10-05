@@ -73,7 +73,11 @@ server on 8081 and `/llm/*` requests to llama.cpp on 8082. HTTPS pipeline reques
 origin; the direct HTTP interface derives the LLM worker on port 8082. API URLs remain editable
 on the chatbot page. See the [AGX deployment guide](../examples/docker/agx-one-container/README.md)
 for certificate trust and configuration. ZipVoice needs a reference clip and its exact transcript,
-or a configured voice preset. Conversation history lasts until New conversation or page navigation.
+or a configured voice preset. In Reference voice, choose an audio file or use Record reference voice,
+then Stop recording to preview the captured WAV. Enter the matching transcript and optionally Save
+voice for reuse. Cancel recording preserves the previous reference. Recording a reference stops
+continuous conversation listening; restart listening in the composer when ready.
+Conversation history lasts until New conversation or page navigation.
 
 Uploaded request files use a per-process temporary directory and are deleted when the server exits.
 Saved voices remain in the current browser profile and are only uploaded when selected for a request.

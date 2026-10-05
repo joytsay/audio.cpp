@@ -99,7 +99,6 @@
   }
   let systemPrompt = systemPromt.trim();
   let promptMode: PromptMode = 'system';
-  let useRag = true;
   let useLlm = true;
   let useTts = true;
   let temperature = 0.2;
@@ -116,6 +115,14 @@
   let savedCloneVoices: SavedVoice[] = [];
   let savedCloneVoiceId = '';
   let savingCloneVoice = false;
+  let cloneRecorder: MediaRecorder | null = null;
+  let cloneRecordingStream: MediaStream | null = null;
+  let cloneRecording = false;
+  let cloneRecordingStarting = false;
+  let cloneRecordingSaving = false;
+  let cloneRecordingGeneration = 0;
+  let cloneRecordingStatus = '';
+  $: cloneRecordingBusy = cloneRecording || cloneRecordingStarting || cloneRecordingSaving;
   let recordingStream: MediaStream | null = null;
   let microphoneListening = false;
   let microphoneStarting = false;
@@ -187,21 +194,21 @@
   $: pipelineSteps = [
     ...(turnInput === 'audio' && turnFromMicrophone ? [['vad', 'Voice activity detection']] : []),
     ...(turnInput === 'audio' ? [['stt', 'Speech to text']] : []),
-    ...(promptMode !== 'system' && useRag ? [['rag', 'RAG']] : []),
+    ...(promptMode !== 'system' ? [['rag', 'RAG']] : []),
     ...(useLlm ? [['llm', 'Language model']] : []),
     ...(useTts ? [['tts', 'Text to speech']] : [])
   ];
   $: canGenerateReply = Boolean((!useLlm || llmModel) &&
     (!useTts || (ttsModel && (selectedTtsModel?.family !== 'zipvoice' ||
       (cloneVoiceFile && cloneReferenceText.trim()) || voice))));
-  $: canSendAudio = Boolean(sourceFile && sttModel && (!sourceFromMicrophone || vadModel) && canGenerateReply);
-  $: canSendText = Boolean(textInput.trim() && canGenerateReply);
+  $: canSendAudio = Boolean(!cloneRecordingBusy && sourceFile && sttModel && (!sourceFromMicrophone || vadModel) && canGenerateReply);
+  $: canSendText = Boolean(!cloneRecordingBusy && textInput.trim() && canGenerateReply);
 
   function save() {
     localStorage.setItem('audiocpp.conversation.settings', JSON.stringify({
       promptDefaultsVersion: 2, vadModel, sttModel, llmModel, ttsModel,
       audioBaseUrl, llmBaseUrl, asrContext, voice, language, promptMode,
-      useRag, useLlm, useTts, temperature, maxTokens,
+      useLlm, useTts, temperature, maxTokens,
       ragResultCount, ragSearchMode
     }));
   }
@@ -418,6 +425,95 @@
     }
   }
 
+  function cancelCloneRecording() {
+    cloneRecordingGeneration += 1;
+    if (cloneRecorder) {
+      cloneRecorder.ondataavailable = null;
+      cloneRecorder.onstop = null;
+      cloneRecorder.onerror = null;
+      if (cloneRecorder.state !== 'inactive') cloneRecorder.stop();
+    }
+    cloneRecordingStream?.getTracks().forEach((track) => track.stop());
+    cloneRecorder = null;
+    cloneRecordingStream = null;
+    cloneRecording = false;
+    cloneRecordingStarting = false;
+    cloneRecordingSaving = false;
+    cloneRecordingStatus = '';
+  }
+
+  async function startCloneRecording() {
+    if (cloneRecordingBusy || running) return;
+    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
+      cloneRecordingStatus = 'Microphone recording is unavailable. Open this page over HTTPS.';
+      return;
+    }
+    stopMicrophone();
+    document.querySelectorAll<HTMLAudioElement>('audio').forEach((audio) => audio.pause());
+    const generation = ++cloneRecordingGeneration;
+    cloneRecordingStarting = true;
+    cloneRecordingStatus = 'Opening microphone…';
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: {
+        echoCancellation: true, noiseSuppression: true, autoGainControl: true
+      } });
+      if (generation !== cloneRecordingGeneration) { stream.getTracks().forEach((track) => track.stop()); return; }
+      cloneRecordingStream = stream;
+      const mimeType = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4']
+        .find((type) => MediaRecorder.isTypeSupported(type));
+      const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+      cloneRecorder = recorder;
+      const chunks: Blob[] = [];
+      recorder.ondataavailable = (event) => { if (event.data.size) chunks.push(event.data); };
+      recorder.onerror = () => {
+        if (generation !== cloneRecordingGeneration) return;
+        cancelCloneRecording();
+        cloneRecordingStatus = 'Microphone recording failed. Please try again.';
+      };
+      recorder.onstop = async () => {
+        stream.getTracks().forEach((track) => track.stop());
+        if (generation !== cloneRecordingGeneration) return;
+        cloneRecordingStream = null;
+        cloneRecorder = null;
+        cloneRecording = false;
+        cloneRecordingSaving = true;
+        cloneRecordingStatus = 'Preparing reference audio…';
+        try {
+          if (!chunks.length) throw new Error('No audio recorded. Please try again.');
+          const captured = new File(chunks, 'recorded-reference', { type: recorder.mimeType || chunks[0].type });
+          const wav = await browserDecodeToWav(captured, 24000, 1);
+          if (generation !== cloneRecordingGeneration) return;
+          chooseCloneVoice(new File([wav], `reference-${Date.now()}.wav`, { type: 'audio/wav' }));
+          cloneReferenceText = '';
+          if (cloneVoiceInput) cloneVoiceInput.value = '';
+          cloneRecordingStatus = 'Reference recorded. Enter the exact words you spoke below.';
+        } catch (error) {
+          if (generation === cloneRecordingGeneration) cloneRecordingStatus = error instanceof Error ? error.message : String(error);
+        } finally {
+          if (generation === cloneRecordingGeneration) cloneRecordingSaving = false;
+        }
+      };
+      recorder.start();
+      cloneRecordingStarting = false;
+      cloneRecording = true;
+      cloneRecordingStatus = 'Recording reference voice…';
+    } catch (error) {
+      if (generation === cloneRecordingGeneration) {
+        cancelCloneRecording();
+        cloneRecordingStatus = error instanceof Error ? error.message : String(error);
+      }
+    }
+  }
+
+  function finishCloneRecording() {
+    if (cloneRecorder?.state === 'recording') {
+      cloneRecording = false;
+      cloneRecordingSaving = true;
+      cloneRecordingStatus = 'Preparing reference audio…';
+      cloneRecorder.stop();
+    }
+  }
+
   function chooseSavedCloneVoice(id: string) {
     savedCloneVoiceId = id;
     const saved = savedCloneVoices.find((entry) => entry.id === id);
@@ -604,6 +700,7 @@
 
   async function toggleMicrophone() {
     if (microphoneListening || microphoneStarting) { stopMicrophone(); return; }
+    if (cloneRecordingBusy) return;
     if (!canGenerateReply || !sttModel || !vadModel) {
       microphoneStatus = 'Choose ASR, VAD, and response settings before starting the microphone.';
       return;
@@ -812,7 +909,7 @@
       if (!transcript) throw new Error('The message is empty.');
 
       let llmSystemPrompt = systemPrompt.trim();
-      if (promptMode !== 'system' && useRag) {
+      if (promptMode !== 'system') {
         step('rag', 'Retrieving receptionist knowledge…');
         const ragResult = promptMode === 'rag'
           ? await ragSearch(audioBaseUrl, transcript, ragResultCount, aborter.signal)
@@ -904,7 +1001,6 @@
       promptMode = saved.promptDefaultsVersion === 2 && (saved.promptMode === 'rag' || saved.promptMode === 'graphrag')
         ? saved.promptMode
         : 'system';
-      useRag = saved.useRag ?? useRag;
       ragResultCount = Math.max(1, Math.min(20, Number(saved.ragResultCount ?? ragResultCount) || ragResultCount));
       ragSearchMode = saved.ragSearchMode === 'global' ? 'global' : 'local';
       useLlm = saved.useLlm ?? useLlm;
@@ -923,6 +1019,7 @@
   onDestroy(() => {
     if (runtimeTimer) clearInterval(runtimeTimer);
     aborter?.abort();
+    cancelCloneRecording();
     stopMicrophone();
     if (inputUrl) URL.revokeObjectURL(inputUrl);
     clearConversation();
@@ -932,7 +1029,7 @@
 <section class="page-head pipeline-head">
   <p class="eyebrow">VOICE AGENT PIPELINE</p>
   <h1>Voice conversation</h1>
-  <p>Silero VAD → Qwen3-ASR 0.6B → Qwen Instruct with RAG → ZipVoice voice cloning.</p>
+  <p>GeoVision Interactive Voice Response.</p>
 </section>
 
 <section class="pipeline-steps" aria-label="Pipeline progress">
@@ -964,11 +1061,11 @@
     {#if useLlm}
       <label>LLM instruct model<select bind:value={llmModel} on:change={save}>{#if !llmModels.length && llmModel}<option value={llmModel}>{llmModel}</option>{/if}{#each llmModels as entry}<option value={entry.id}>{entry.id}</option>{/each}</select></label>
     {/if}
-    <label class="toggle pipeline-toggle"><input type="checkbox" bind:checked={useTts} on:change={save} /><span></span>Run text to speech</label>
+    <label class="toggle pipeline-toggle"><input type="checkbox" bind:checked={useTts} disabled={cloneRecordingBusy} on:change={save} /><span></span>Run text to speech</label>
     {#if useTts}
-      <label>TTS model<select bind:value={ttsModel} on:change={() => { refreshVoices(); save(); }}>{#each ttsModels as entry}<option value={entry.selectionId}>{entry.label}</option>{/each}</select></label>
+      <label>TTS model<select bind:value={ttsModel} disabled={cloneRecordingBusy} on:change={() => { refreshVoices(); save(); }}>{#each ttsModels as entry}<option value={entry.selectionId}>{entry.label}</option>{/each}</select></label>
       <div class="field-grid">
-        <label>Voice<select bind:value={voice} on:change={() => { if (voice) clearCloneVoice(); save(); }}><option value="">Model default</option>{#each voices as item}<option value={item}>{item}</option>{/each}</select></label>
+        <label>Voice<select bind:value={voice} disabled={cloneRecordingBusy} on:change={() => { if (voice) clearCloneVoice(); save(); }}><option value="">Model default</option>{#each voices as item}<option value={item}>{item}</option>{/each}</select></label>
       </div>
     {/if}
     {#if useTts && supportsVoiceClone}
@@ -976,18 +1073,26 @@
         <div class="section-title"><div><span>VOICE CLONE</span><h2>Reference voice</h2></div></div>
         <input class="hidden-file" bind:this={cloneVoiceInput} type="file" accept="audio/*" on:change={(event) => chooseCloneVoice(event.currentTarget.files?.[0] || null)} />
         <div class="media-actions">
-          <button type="button" on:click={() => cloneVoiceInput?.click()}>Choose reference audio</button>
-          <button type="button" disabled={!cloneVoiceFile} on:click={clearCloneVoice}>Clear</button>
+          <button type="button" disabled={cloneRecordingBusy} on:click={() => cloneVoiceInput?.click()}>Choose reference audio</button>
+          {#if cloneRecording}
+            <button type="button" class="danger" on:click={finishCloneRecording}>Stop recording</button>
+          {:else}
+            <button type="button" disabled={cloneRecordingBusy} on:click={startCloneRecording}>Record reference voice</button>
+          {/if}
+          {#if cloneRecordingBusy}<button type="button" on:click={cancelCloneRecording}>Cancel recording</button>{/if}
+          <button type="button" disabled={!cloneVoiceFile || cloneRecordingBusy} on:click={clearCloneVoice}>Clear</button>
           {#if cloneVoiceFile}<span>{cloneVoiceFile.name}</span>{/if}
         </div>
+        {#if cloneRecordingStatus}<p class="field-help" role="status">{cloneRecordingStatus}</p>{/if}
+        <p class="field-help">Record a short, clear sample, then stop and enter the matching transcript. Conversation listening stops while you record.</p>
         <MediaPreview file={cloneVoiceFile} kind="audio" label="Reference preview" />
         <label>Reference transcript<textarea rows="2" bind:value={cloneReferenceText} placeholder="Exact words spoken in the reference audio"></textarea></label>
         <div class="voice-library pipeline-voice-library">
-          <label>Saved voices<select value={savedCloneVoiceId} on:change={(event) => chooseSavedCloneVoice(event.currentTarget.value)}><option value="">Choose saved voice…</option>{#each savedCloneVoices as item}<option value={item.id}>{item.name}</option>{/each}</select></label>
+          <label>Saved voices<select value={savedCloneVoiceId} disabled={cloneRecordingBusy} on:change={(event) => chooseSavedCloneVoice(event.currentTarget.value)}><option value="">Choose saved voice…</option>{#each savedCloneVoices as item}<option value={item.id}>{item.name}</option>{/each}</select></label>
           <label>Voice name<input bind:value={cloneVoiceName} placeholder="Reference voice name" /></label>
           <div class="library-actions">
-            <button type="button" disabled={!cloneVoiceFile || savingCloneVoice} on:click={storeCloneVoice}>{savingCloneVoice ? 'Saving…' : 'Save voice'}</button>
-            <button class="danger" type="button" disabled={!savedCloneVoiceId} on:click={removeCloneVoice}>Delete</button>
+            <button type="button" disabled={!cloneVoiceFile || savingCloneVoice || cloneRecordingBusy} on:click={storeCloneVoice}>{savingCloneVoice ? 'Saving…' : 'Save voice'}</button>
+            <button class="danger" type="button" disabled={!savedCloneVoiceId || cloneRecordingBusy} on:click={removeCloneVoice}>Delete</button>
           </div>
         </div>
       </div>
@@ -995,8 +1100,7 @@
     <div class="pipeline-input">
     <div class="section-title"><div><span>INPUT</span><h2>Instructions</h2></div></div>
     <label>LLM grounding<select bind:value={promptMode} on:change={save}><option value="system">System prompt (prompt.csv)</option><option value="rag">Regular RAG (hybrid retrieval)</option><option value="graphrag">GraphRAG (knowledge graph)</option></select></label>
-    <label class="toggle pipeline-toggle"><input type="checkbox" bind:checked={useRag} disabled={promptMode === 'system'} on:change={save} /><span></span>Run RAG retrieval</label>
-    {#if promptMode === 'system' || !useRag}
+    {#if promptMode === 'system'}
       <label>System prompt (prompt.csv)<textarea bind:value={systemPrompt} rows="6"></textarea></label>
       <div class="prompt-actions"><button on:click={saveSystemPromptCsv}>Save CSV</button></div>
     {:else}
@@ -1047,7 +1151,7 @@
     {#if playbackStatus}<p class="field-help">{playbackStatus}</p>{/if}
     <div class="conversation-composer">
     <div class="continuous-microphone">
-      <div><strong>Continuous microphone</strong><button class:danger={microphoneListening || microphoneStarting} disabled={!(microphoneListening || microphoneStarting) && (running || !canGenerateReply || !sttModel || !vadModel)} on:click={toggleMicrophone}>{microphoneListening || microphoneStarting ? 'Stop listening' : 'Start listening'}</button></div>
+      <div><strong>Continuous microphone</strong><button class:danger={microphoneListening || microphoneStarting} disabled={!(microphoneListening || microphoneStarting) && (cloneRecordingBusy || running || !canGenerateReply || !sttModel || !vadModel)} on:click={toggleMicrophone}>{microphoneListening || microphoneStarting ? 'Stop listening' : 'Start listening'}</button></div>
       <p role="status">{microphoneStatus}</p>
       <small>Speak naturally. {vadDetectorName} detects speech and sends each turn after a pause. Listening pauses while the assistant responds.</small>
     </div>
