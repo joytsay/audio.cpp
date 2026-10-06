@@ -83,7 +83,8 @@
     save();
   }
   let llmModels: OpenAIModel[] = [];
-  let sttModel = 'qwen3-asr';
+  const pipelineAsrModelId = 'qwen3-asr';
+  let sttModel = pipelineAsrModelId;
   let llmModel = '';
   let ttsModel = 'zipvoice';
   let voice = '';
@@ -463,7 +464,8 @@
     const silero = available.find((entry) => entry.task === 'vad' && entry.family === 'silero_vad');
     models = available.filter((entry) => entry.task !== 'vad' || entry === silero);
     const nextVad = models.filter((entry) => entry.task === 'vad');
-    const nextStt = models.filter((entry) => ['asr', 'stt'].includes(entry.task || ''));
+    const nextStt = models.filter((entry) => entry.modelId === pipelineAsrModelId &&
+      ['asr', 'stt'].includes(entry.task || ''));
     const nextTts = models.filter((entry) => ['tts', 'clon'].includes(entry.task || ''));
     vadModel = nextVad[0]?.selectionId || '';
     sttModel = keepSelection(nextStt, sttModel);
@@ -1172,7 +1174,6 @@
       vadModel = saved.vadModel || vadModel;
       sileroVadSettings = normalizeVadSettings(saved.sileroVadSettings || sileroVadSettings);
       vadUseLongestSilence = typeof saved.vadUseLongestSilence === 'boolean' ? saved.vadUseLongestSilence : true;
-      sttModel = saved.sttModel || sttModel;
       llmModel = saved.llmModel || '';
       ttsModel = saved.ttsModel || ttsModel;
       voice = saved.voice || '';
@@ -1227,6 +1228,7 @@
   <section class="panel page-panel pipeline-config">
     <div class="section-title"><div><span>SETTINGS</span><h2>Pipeline</h2></div></div>
     <fieldset class="pipeline-settings-fields" disabled={running}>
+    <p class="field-help">ASR: Qwen3-ASR 0.6B{#if !sttModel} · Install or configure this model to enable audio input.{/if}</p>
     <p class="field-help">VAD</p>
     {#if selectedVadIsSilero}
       <details>
