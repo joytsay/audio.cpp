@@ -15,10 +15,10 @@
 </script>
 
 <svelte:head>
-  <title>GeoVision IVR · Voice conversation</title>
+  <title>GeoVision IVR · Interactive Voice Response</title>
   <link rel="icon" type="image/svg+xml" sizes="any" href={logoIcon} />
 </svelte:head>
 <header class="topbar">
-  <div class="brand"><div class="brand-logo">{@html logoCloud}</div><div><strong>GeoVision IVR</strong><span>Voice conversation</span></div></div>
+  <div class="brand"><div class="brand-logo">{@html logoCloud}</div><div><strong>GeoVision IVR</strong><span>Interactive Voice Response</span></div></div>
 </header>
 <main><Pipeline /></main>
