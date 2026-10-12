@@ -1,5 +1,7 @@
 # ivrTTS: install and use
 
+For direct SIP telephone calls with baresip, use [installSIP.md](installSIP.md).
+
 ## 1. Build and run exampleTTS
 
 Install the required packages before you build the example.

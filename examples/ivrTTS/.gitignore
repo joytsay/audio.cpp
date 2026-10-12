@@ -1,4 +1,8 @@
 /build/
+/build-sip/
+/.env.sip
+/.env.sip.*
+!/.env.sip.example
 /*.wav
 __pycache__/
 !/voices/
