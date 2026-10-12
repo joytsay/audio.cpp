@@ -190,7 +190,7 @@ int run_tui(const std::string& url, const std::string& model,
     std::thread worker;
     std::mutex status_mutex;
     std::string status = "Ready", draft, current_model = model;
-    std::vector<std::string> history{"Hello, welcome to our voice service."};
+    std::vector<std::string> history{"你好 歡迎使用奇偶科技TTS系統API服務"};
     size_t history_index = 0, model_index = 0;
     std::vector<ivrTTS::Model> models, fetched_models;
     std::string catalog_error;

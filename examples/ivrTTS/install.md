@@ -1,240 +1,373 @@
-# ivrTTS client installation
+# ivrTTS: install and use
 
-This entire directory builds independently of audio.cpp;
-it does not link model runtimes or require a GPU on the client.
+## 1. Build and run exampleTTS
 
-Requirements: C++17 compiler, CMake 3.16+, libcurl development headers/library,
-pkg-config, json-c, ncursesw, SDL2, and a running audio.cpp server.
-The TUI plays through SDL2 directly; the `play` commands require `ffplay` from FFmpeg.
-For true PCM streaming, use a streaming-capable model configured with
-`"mode": "streaming"` instead of an offline model.
+Install the required packages before you build the example.
+Use the command for your operating system.
 
-Ubuntu/Debian:
+**Ubuntu**
 
 ```sh
+sudo apt update
 sudo apt install build-essential cmake pkg-config libcurl4-openssl-dev libjson-c-dev libncurses-dev libsdl2-dev ffmpeg
 ```
 
-Arch Linux:
+**Arch Linux**
 
 ```sh
 sudo pacman -S --needed base-devel cmake pkgconf curl json-c ncurses sdl2 ffmpeg
 ```
 
-macOS with Homebrew:
+1. Open the client directory.
+
+   ```sh
+   cd /home/joy/Git/audio.cpp/examples/ivrTTS
+   ```
+
+   If you copied the client, use its new directory path.
+
+2. Configure the build.
+
+   ```sh
+   cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+   ```
+
+3. Build the example.
+
+   ```sh
+   cmake --build build --target exampleTTS --parallel
+   ```
+
+4. Run the example from this directory.
+
+   ```sh
+   ./build/exampleTTS
+   ```
+
+The example connects to `http://192.168.5.151:8081`.
+It uses the `zipvoice` model and the `lingCL` voice.
+Change these values in [exampleTTS.cpp](exampleTTS.cpp) if necessary.
+
+The example reads voice files from `voices/` in the current directory.
+It prints `Received … WAV bytes` after the server returns audio.
+The WAV audio remains in memory.
+The example does not save or play the audio.
+
+## 2. Check the server
+
+The client requires a running audio.cpp server.
+The client does not require local model weights or a GPU.
+
+1. Get the registered model list.
+
+   ```sh
+   curl http://192.168.5.151:8081/v1/models
+   ```
+
+2. Find the model ID that you want to use.
+
+3. Use that ID in the client command or C++ code.
+
+The model list includes registered models that are not loaded into memory.
+A downloaded model does not appear until the server registers it.
+Load a missing model in the server web UI, or add it to `server.json`.
+
+Use `127.0.0.1:8080` only if the server runs on your client computer at port 8080.
+See the [server guide](../../app/server/README.md) for server configuration.
+
+## 3. Use the default voices
+
+| Voice name | Reference recording |
+| --- | --- |
+| `lingCL` | `voices/lingCLvocals.wav` |
+| `WangSG` | `voices/wangSG9s.wav` |
+
+`lingCL` is the default voice.
+The client sends the selected recording and its transcript to the server.
+The transcripts are in `voices/prompt_text`.
+Use a model that supports voice cloning.
+
+Keep the complete `voices/` directory with the client.
+CMake copies this directory into `build/`.
+
+To use another voice directory, set this variable:
 
 ```sh
-xcode-select --install
-brew install cmake pkg-config curl json-c ncurses sdl2 ffmpeg
+export IVRTTS_VOICE_DIR=/absolute/path/to/voices
 ```
 
-From this directory:
+In C++, use `set_preset_directory()` to set the directory.
+An explicit directory has priority over the environment variable.
+The supplied C++ example sets its directory to `voices`.
+
+Other voice names refer to voices configured on the server.
+Pass an empty voice argument (`''`) to use the server default.
+Explicit reference audio in `clone()` has priority over the default voice.
+
+## 4. Build and use the terminal client
+
+1. Build the terminal client.
+
+   ```sh
+   cmake --build build --target ivrtts_cli --parallel
+   ```
+
+2. Show the available commands.
+
+   ```sh
+   ./build/ivrtts_cli --help
+   ```
+
+### Open the terminal user interface
+
+Start the TUI and get the server model list:
 
 ```sh
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build --parallel
-./build/ivrtts_cli --help
-# Optional installation, without administrator privileges:
-cmake --install build --prefix "$HOME/.local"
+./build/ivrtts_cli tui http://192.168.5.151:8081
 ```
 
-On macOS, if curl is not discovered, add
-`-DCMAKE_PREFIX_PATH="$(brew --prefix curl)"` to the configure command.
-For Homebrew ncurses, set `PKG_CONFIG_PATH="$(brew --prefix ncurses)/lib/pkgconfig"`
-when configuring if ncursesw is not discovered. To build only the original CLI
-without ncurses/SDL2, configure with `-DIVRTTS_BUILD_TUI=OFF`.
-
-## Default clone voices
-
-`lingCL` is the default when no voice is supplied. `WangSG` is the second preset:
-
-```sh
-./build/ivrtts_cli play http://192.168.5.151:8081 zipvoice 'hello'
-./build/ivrtts_cli play http://192.168.5.151:8081 zipvoice 'hello' WangSG
-```
-
-Both use the bundled WAV and transcript in `voices/`, uploaded as `voice_ref` and
-`reference_text`. They require a model supporting reference-audio cloning and do
-not require server-side voice presets. Other voice names are sent as server voice
-names; pass an empty voice argument (`''`) to use the server's default instead.
-Explicit `clone`/`clone_stream` inputs override the selected preset.
-
-CMake copies `voices/` beside the built executable and installs it into
-`share/ivrTTS/voices`. Keep this directory with the client when handing it off.
-Set `IVRTTS_VOICE_DIR` to override the directory, or call
-`tts.set_preset_directory("/path/to/voices")` in C++. An installed standalone
-library consumer should set that directory explicitly.
-
-## Terminal UI
+To select an initial model, include its ID:
 
 ```sh
 ./build/ivrtts_cli tui http://192.168.5.151:8081 zipvoice
-# Discover server models and choose in the TUI (defaults to the first speech model):
-./build/ivrtts_cli tui http://127.0.0.1:8080
-# Streaming-capable model with 24 kHz mono output:
-./build/ivrtts_cli tui http://127.0.0.1:8080 streaming-model 24000 1
 ```
 
-The retro voice deck has a spectrum display computed from samples sent to the
-audio device, two selectable clone voices, a model picker, chat history, and volume controls.
-The model list comes from the supplied server URL's `/v1/models` endpoint. It
-shows all registered models with task/mode/load metadata; only `tts` and `clon`
-models can be selected for speech. Downloaded but unregistered models must first
-be loaded in the server UI or configured in `server.json`, then refreshed here.
-Switching models changes the next request; it does not cancel current playback
-or unload/load a model through the management API. Lazy server loading still applies.
-
-Use a terminal at least 64 columns by 24 rows. Keys:
+Use a terminal with at least 64 columns and 24 rows.
+The TUI plays audio through SDL2.
+The spectrum display uses samples sent to the audio device.
 
 | Key | Action |
 | --- | --- |
-| Enter | Speak/replay the selected history message |
-| Up / Down (or k / j) | Select a previous/next history message |
-| m | Open model list; Up/Down browse, Enter selects, Esc closes |
-| r | Refresh models from the server |
-| p | Set the selected model's PCM output rate and channels, e.g. `24000 1` |
-| Tab | Switch between lingCL and WangSG for the next request |
-| e | Open a blank new message draft; Enter adds it to history, Esc discards it |
-| Ctrl-U / Ctrl-N (in draft) | Clear draft / insert a newline |
-| Space | Pause/resume playback |
-| s | Stop playback and cancel the client request |
-| + / - | Adjust volume |
-| q / Esc | Quit |
+| `m` | Open the model list |
+| Up / Down | Select a model or a history message |
+| `Enter` in the model list | Use the selected model |
+| `r` | Get the model list again |
+| `e` | Open a blank message draft |
+| `Enter` in a draft | Add the message to the history |
+| `Esc` in a draft | Discard the draft |
+| `Ctrl-U` in a draft | Clear the draft |
+| `Ctrl-N` in a draft | Insert a new line |
+| `Enter` in the history | Speak the selected message |
+| `Tab` | Select `lingCL` or `WangSG` |
+| `Space` | Pause or resume audio |
+| `s` | Stop audio and cancel the client request |
+| `+` / `-` | Adjust the volume |
+| `p` | Set the selected model's PCM rate and channel count |
+| `Esc` in the model list | Close the model list |
+| `q` / `Esc` in the main view | Quit |
 
-UTF-8 text is accepted. Playback and network reception run in a worker thread so
-controls remain responsive. The audio queue is bounded to three seconds; pausing
-eventually applies network backpressure. Cancellation closes the client request;
-the server may still finish its current inference. No audio output file is written.
-History lasts for the current TUI session. Adding text never overwrites previous
-messages; replay synthesizes the selected text using the current model and voice.
-Multiline messages show a condensed preview in the history list.
-The WAV path currently accepts PCM16 WAV (audio.cpp's default output). The raw
-stream path requires the actual model sample rate/channel count. The TUI uses
-each model's reported mode: offline uses WAV; streaming requires its per-model
-PCM settings (press `p`, or pass rate/channels at startup for the initial model).
-The settings stay with that model while switching during the session. ZipVoice still
-finishes synthesis before returning WAV; selecting TUI does not change this.
+Only models with the `tts` or `clon` task can speak text.
+Press `r` after you register a model in the server web UI.
+A model change applies to the next speech request.
 
-## Server setup
+New messages do not overwrite previous messages.
+The history remains available until you close the TUI.
+Replay generates new audio with the current model and voice.
 
-The server must already have model weights and a model ID in its configuration.
-See [audio.cpp server instructions](../../app/server/README.md) in the full repository.
-For example, run `build/bin/audiocpp_server --config server.json` there.
-Confirm available IDs with:
+The audio queue holds up to three seconds of audio.
+A pause can stop further reception when this queue becomes full.
+The server can continue its current inference after you cancel the client request.
+
+### Play audio without a disk file
+
+Play with the default `lingCL` voice:
 
 ```sh
-curl http://127.0.0.1:8080/v1/models
+./build/ivrtts_cli play http://192.168.5.151:8081 zipvoice 'Hello.'
 ```
 
-Replace `pocket-tts` below with an ID returned by your server. The server needs
-network connectivity from the client. This wrapper supports HTTP and HTTPS,
-with libcurl's default certificate verification. It has no authentication option.
-
-## CLI testbed
+Play with `WangSG`:
 
 ```sh
-./build/ivrtts_cli run http://127.0.0.1:8080 pocket-tts out.wav 'Hello from IVR.'
-# Optional configured voice name:
-./build/ivrtts_cli run http://127.0.0.1:8080 pocket-tts out.wav 'Hello.' alba
-# Reference WAV is read from the CLIENT machine and sent inline:
-./build/ivrtts_cli clone http://127.0.0.1:8080 pocket-tts cloned.wav \
-  'Speak this in the reference voice.' reference.wav 'Words spoken in the reference recording.'
-# Prompt for text, output path, and cloning inputs repeatedly:
-./build/ivrtts_cli interactive http://127.0.0.1:8080 pocket-tts
+./build/ivrtts_cli play http://192.168.5.151:8081 zipvoice 'Hello.' WangSG
 ```
 
-Use a model that supports voice cloning for `clone`. Reference WAVs must be
-nonempty and at most 5 MiB (the server's inline-reference limit). Supply an
-accurate transcript when the model requires one. The server validates the audio
-format and model capabilities. Outputs are WAV files; play them with your usual
-audio player. Quote text and file paths containing spaces in shell commands.
+These commands send WAV buffers to `ffplay`.
+They do not write an audio file.
 
-Interactive commands are `run`, `clone`, `create`, `del`, and `quit`.
-`create` initializes a local client context with URL/model/voice; it performs no
-HTTP request and does not load or register a server model. `del` clears that
-context and does not unload models or delete server files. There is no server
-session-create/delete API. Each generation posts to `/v1/audio/speech`.
-
-## Play directly in the terminal
-
-No intermediate output file is needed:
+### Save a WAV file
 
 ```sh
-./build/ivrtts_cli play http://127.0.0.1:8080 pocket-tts 'Hello.' alba
+./build/ivrtts_cli run http://192.168.5.151:8081 zipvoice out.wav 'Hello.'
+```
+
+### Use another reference recording
+
+```sh
+./build/ivrtts_cli clone http://192.168.5.151:8081 zipvoice cloned.wav \
+  'Hello.' reference.wav 'Words spoken in the reference recording.'
+```
+
+Use `play-clone` instead of `clone` to play without a disk file:
+
+```sh
 ./build/ivrtts_cli play-clone http://192.168.5.151:8081 zipvoice \
-  'hello' /path/to/lingCL.wav 'Words spoken in the reference recording.'
+  'Hello.' reference.wav 'Words spoken in the reference recording.'
 ```
 
-These commands pass arriving WAV buffers directly to `ffplay`. ZipVoice generates
-the full result before the server sends it, so playback starts after synthesis.
+The reference file is on the client computer.
+It must contain WAV audio.
+It must not be empty or larger than 5 MiB.
+Supply an accurate transcript if the model requires one.
+Quote text and file paths that contain spaces.
 
-For a streaming-capable model, use `stream` or `stream-clone`. The server's raw
-PCM response carries no sample-rate or channel metadata: you must specify the
-model's actual output rate and channel count. For example, **if** your configured
-model produces 24 kHz mono:
+## 5. Use audio streaming
+
+ZipVoice completes speech generation before it returns WAV audio.
+The TUI cannot change this model behavior.
+
+A streaming model sends audio in parts during generation.
+Configure that server model with `"mode": "streaming"`.
+Use its actual output sample rate and channel count.
+
+If the model produces 24 kHz mono audio, use:
 
 ```sh
-./build/ivrtts_cli stream http://127.0.0.1:8080 streaming-model 24000 1 'Hello.'
-./build/ivrtts_cli stream-clone http://127.0.0.1:8080 streaming-model 24000 1 \
-  'Hello.' reference.wav 'Reference transcript.'
+./build/ivrtts_cli tui http://192.168.5.151:8081 streaming-model 24000 1
 ```
 
-Streaming requests use `response_format=pcm` and `stream_format=audio`.
-Buffers contain signed 16-bit little-endian PCM; a network buffer may split a
-sample or frame. Playback follows buffer arrival, subject to the player's own
-buffering. The CLI waits for playback to finish. Playback errors return a nonzero
-exit code. HTTP errors are reported without forwarding their bodies to the player.
-An interrupted stream may already have played some audio; requests are not retried.
+Replace `streaming-model` with the registered model ID.
+You can also press `p` in the TUI and enter `24000 1`.
+The TUI keeps separate PCM settings for each model during the session.
 
-## Use from C++
+For playback without the TUI, use:
+
+```sh
+./build/ivrtts_cli stream http://192.168.5.151:8081 streaming-model 24000 1 'Hello.'
+```
+
+Use `stream-clone` to supply another reference recording:
+
+```sh
+./build/ivrtts_cli stream-clone http://192.168.5.151:8081 streaming-model 24000 1 \
+  'Hello.' reference.wav 'Words spoken in the reference recording.'
+```
+
+The client requests `response_format=pcm` and `stream_format=audio`.
+The returned samples use signed 16-bit little-endian PCM.
+The response does not contain the sample rate or channel count.
+A received buffer can divide a sample between two buffers.
+
+The TUI accepts PCM16 WAV for offline models.
+It uses raw PCM for streaming models.
+
+## 6. Add ivrTTS to a C++ project
+
+1. Copy this directory into `third_party/ivrTTS` in your project.
+
+2. Add these lines after your application target in `CMakeLists.txt`.
+
+   ```cmake
+   set(IVRTTS_BUILD_TUI OFF CACHE BOOL "" FORCE)
+   add_subdirectory(third_party/ivrTTS)
+   target_link_libraries(my_app PRIVATE ivrTTS)
+   ```
+
+3. Replace `my_app` with your application target.
+
+4. Include `ivrTTS.h` in your source file.
+
+5. Set the actual voice directory path.
+
+6. Call `create()` before you call `run()`.
+
+Use [exampleTTS.cpp](exampleTTS.cpp) as the complete example.
+The important calls are:
 
 ```cpp
-#include "ivrTTS.h"
-#include <fstream>
-
-int main() {
-    ivrTTS tts;
-    tts.create("http://127.0.0.1:8080", "pocket-tts");
-    auto wav = tts.run("Hello from C++.");
-    // Alternatively:
-    // auto wav = tts.clone("Hello.", "reference.wav", "Reference transcript.");
-    std::ofstream output("out.wav", std::ios::binary);
-    output.write(reinterpret_cast<const char*>(wav.data()), wav.size());
-    tts.del();
-    return output ? 0 : 1;
-}
+ivrTTS tts;
+tts.set_preset_directory("/absolute/path/to/ivrTTS/voices");
+tts.create("http://192.168.5.151:8081", "zipvoice", "lingCL");
+std::vector<unsigned char> wav = tts.run("Hello.");
+tts.del();
 ```
 
-Embed with `add_subdirectory(path/to/ivrTTS)` and
-`target_link_libraries(your_app PRIVATE ivrTTS)`. Alternatively, compile
-`ivrTTS.cpp` alongside your application and link libcurl and json-c. Methods throw standard
-C++ exceptions on invalid inputs, transport errors, HTTP failures (including the
-server response body), and unexpected non-WAV responses. Requests have a
-10-second connection timeout and a 300-second total timeout; pass a fourth
-argument to `create` to change the total timeout in seconds. Calls are synchronous
-and `run`/`clone` buffer the response in memory. Do not mutate an instance while another thread
-uses it. No retries are performed automatically.
+`run()` returns the complete WAV audio in memory, including the WAV header.
+The vector owns the audio buffer.
+Its data remains valid until the vector changes or is destroyed.
+Decode the WAV before you send samples to a raw audio device.
 
-To consume audio incrementally in your own application:
+| Function | Result |
+| --- | --- |
+| `create()` | Set the local URL, model ID, voice, and timeout |
+| `run()` | Return WAV audio in a vector |
+| `clone()` | Return WAV audio from an explicit reference recording |
+| `run_stream()` | Send received audio buffers to a callback |
+| `clone_stream()` | Use a callback with an explicit reference recording |
+| `del()` | Clear the local client context |
+| `list_models()` | Get model metadata from `/v1/models` |
+
+`create()` and `del()` do not create or delete a server session.
+Each speech request uses `POST /v1/audio/speech`.
+The client supports HTTP and HTTPS with default certificate verification.
+It does not provide an authentication option.
+
+Methods throw standard C++ exceptions for invalid inputs and request failures.
+Requests have a 10-second connection timeout and a 300-second total timeout.
+Use the fourth `create()` argument to change the total timeout in seconds.
+The client does not retry failed requests automatically.
+Do not change an instance while another thread uses it.
+
+If you compile the sources without CMake, link libcurl and json-c.
+Use a compiler with C++17 support and CMake 3.16 or later.
+
+### Receive audio buffers in a callback
 
 ```cpp
 tts.run_stream("Hello.", [](const unsigned char* bytes, std::size_t size) {
-    // Copy into your audio queue, or write to a player here.
-    // bytes is valid only during this callback; size is a byte count.
-}, ivrTTS::AudioMode::StreamingPcm);
-// For ZipVoice/offline WAV, omit StreamingPcm (the default mode is Wav).
-// clone_stream(text, reference_path, transcript, callback, mode) also works.
+    // Consume these WAV bytes here.
+    // Copy them if you need them after this callback returns.
+});
 ```
 
-Callbacks run synchronously on the calling thread. Throw from the callback to
-cancel; the original exception is propagated after libcurl returns. Streaming
-methods do not retain the full response. WAV mode validates the first 12 bytes
-before delivering the header and subsequent buffers.
-Use `ivrTTS::list_models(url)` to obtain parsed model metadata from C++.
+The default callback format is WAV.
+For a streaming model, pass `ivrTTS::AudioMode::StreamingPcm` as the third argument.
 
-Run the mock integration tests (Python 3, no model weights needed):
+The buffer is valid only during the callback.
+Callbacks run on the calling thread.
+Throw from the callback to cancel the request.
+The client passes that exception back to the caller.
+
+## 7. Optional installation and checks
+
+To install the library, header, CLI, and voices under your home directory, use:
 
 ```sh
-python3 test_streaming.py ./build/ivrtts_cli
-python3 test_tui.py ./build/ivrtts_cli
+cmake --install build --prefix "$HOME/.local"
 ```
+
+The voices are installed in `share/ivrTTS/voices` under this prefix.
+The CLI finds this directory relative to its installed executable.
+Set the voice directory explicitly in applications that use the installed library.
+The `exampleTTS` target remains in the build directory.
+
+To configure the C++ tests, use:
+
+```sh
+cmake -S . -B build -DIVRTTS_BUILD_TESTS=ON
+```
+
+To build the client and tests, use:
+
+```sh
+cmake --build build --parallel
+```
+
+To run the tests, use:
+
+```sh
+ctest --test-dir build --output-on-failure
+```
+
+The tests do not require model weights or a physical audio device.
+They use a local HTTP server and a test audio player written in C++.
+The TUI test uses a simulated terminal and SDL2's dummy audio driver.
+The test environment must permit local sockets and pseudo-terminals.
+
+To build without the TUI dependencies, configure with:
+
+```sh
+cmake -S . -B build -DIVRTTS_BUILD_TUI=OFF
+```
+
+The library, `exampleTTS`, and command-line playback remain available.
