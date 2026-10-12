@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <filesystem>
 #include <cstdlib>
+#include <json-c/json.h>
 
 #ifndef IVRTTS_DEFAULT_VOICE_DIR
 #define IVRTTS_DEFAULT_VOICE_DIR "voices"
@@ -93,6 +94,82 @@ struct CurlRuntime {
     }
     ~CurlRuntime() { curl_global_cleanup(); }
 };
+void initialize_curl() { static CurlRuntime runtime; }
+}
+
+std::vector<ivrTTS::Model> ivrTTS::list_models(const std::string& server_url,
+                                            const CancelCheck& cancel) {
+    if (server_url.rfind("http://", 0) != 0 && server_url.rfind("https://", 0) != 0)
+        throw std::invalid_argument("model list requires an HTTP(S) URL");
+    initialize_curl();
+    std::unique_ptr<CURL, decltype(&curl_easy_cleanup)> curl(curl_easy_init(), curl_easy_cleanup);
+    if (!curl) throw std::runtime_error("cannot allocate curl handle");
+    std::string url = server_url;
+    while (!url.empty() && url.back() == '/') url.pop_back();
+    url += "/v1/models";
+    struct ListState {
+        std::string body;
+        const CancelCheck& cancel;
+        std::exception_ptr failure;
+    } state{{}, cancel, {}};
+    auto write = +[](char* bytes, size_t size, size_t count, void* context) noexcept -> size_t {
+        auto& state = *static_cast<ListState*>(context);
+        try {
+            if (state.body.size() + size * count > 4 * 1024 * 1024)
+                throw std::runtime_error("model list exceeds 4 MiB");
+            state.body.append(bytes, size * count);
+            return size * count;
+        } catch (...) { state.failure = std::current_exception(); return 0; }
+    };
+    auto progress = +[](void* context, curl_off_t, curl_off_t, curl_off_t, curl_off_t) noexcept -> int {
+        auto& state = *static_cast<ListState*>(context);
+        try { return state.cancel && state.cancel() ? 1 : 0; }
+        catch (...) { state.failure = std::current_exception(); return 1; }
+    };
+    auto set = [&](CURLoption option, auto value) {
+        if (curl_easy_setopt(curl.get(), option, value) != CURLE_OK)
+            throw std::runtime_error("cannot set curl option");
+    };
+    set(CURLOPT_URL, url.c_str()); set(CURLOPT_WRITEFUNCTION, write);
+    set(CURLOPT_WRITEDATA, &state); set(CURLOPT_NOPROGRESS, 0L);
+    set(CURLOPT_XFERINFOFUNCTION, progress); set(CURLOPT_XFERINFODATA, &state);
+    set(CURLOPT_TIMEOUT, 10L); set(CURLOPT_CONNECTTIMEOUT, 5L); set(CURLOPT_NOSIGNAL, 1L);
+    auto result = curl_easy_perform(curl.get());
+    if (state.failure) std::rethrow_exception(state.failure);
+    if (result != CURLE_OK) throw std::runtime_error(curl_easy_strerror(result));
+    long code = 0; curl_easy_getinfo(curl.get(), CURLINFO_RESPONSE_CODE, &code);
+    if (code < 200 || code >= 300)
+        throw std::runtime_error("HTTP " + std::to_string(code) + ": " + state.body.substr(0, 8192));
+    std::unique_ptr<json_tokener, decltype(&json_tokener_free)> parser(json_tokener_new(), json_tokener_free);
+    if (!parser) throw std::runtime_error("cannot allocate JSON parser");
+    json_tokener_set_flags(parser.get(), JSON_TOKENER_STRICT);
+    std::unique_ptr<json_object, decltype(&json_object_put)> root(
+        json_tokener_parse_ex(parser.get(), state.body.c_str(), int(state.body.size())), json_object_put);
+    if (!root || json_tokener_get_error(parser.get()) != json_tokener_success)
+        throw std::runtime_error("invalid model-list JSON");
+    json_object* data = nullptr;
+    if (!json_object_object_get_ex(root.get(), "data", &data) || !json_object_is_type(data, json_type_array))
+        throw std::runtime_error("model-list JSON requires a data array");
+    auto field = [](json_object* item, const char* name) -> std::string {
+        json_object* value = nullptr;
+        if (!json_object_object_get_ex(item, name, &value)) return "";
+        if (!json_object_is_type(value, json_type_string)) throw std::runtime_error("invalid model metadata");
+        return {json_object_get_string(value), size_t(json_object_get_string_len(value))};
+    };
+    std::vector<Model> models;
+    for (size_t i = 0; i < json_object_array_length(data); ++i) {
+        auto* item = json_object_array_get_idx(data, i);
+        if (!json_object_is_type(item, json_type_object)) throw std::runtime_error("invalid model entry");
+        Model model{field(item, "id"), field(item, "family"), field(item, "task"), field(item, "mode"), false};
+        if (model.id.empty()) throw std::runtime_error("model entry requires an id");
+        json_object* loaded = nullptr;
+        if (json_object_object_get_ex(item, "loaded", &loaded)) {
+            if (!json_object_is_type(loaded, json_type_boolean)) throw std::runtime_error("invalid loaded flag");
+            model.loaded = json_object_get_boolean(loaded);
+        }
+        models.push_back(std::move(model));
+    }
+    return models;
 }
 
 void ivrTTS::create(const std::string& url, const std::string& model,
@@ -147,7 +224,7 @@ void ivrTTS::speech_stream(const std::string& text, const std::string& reference
     if (!sink) throw std::invalid_argument("audio callback is required");
     if (model_.empty()) throw std::logic_error("call create before run or clone");
     if (text.empty()) throw std::invalid_argument("text must not be empty");
-    static CurlRuntime runtime;
+    initialize_curl();
     std::unique_ptr<CURL, decltype(&curl_easy_cleanup)> curl(curl_easy_init(), curl_easy_cleanup);
     if (!curl) throw std::runtime_error("cannot allocate curl handle");
     std::unique_ptr<curl_slist, decltype(&curl_slist_free_all)> headers(

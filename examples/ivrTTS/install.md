@@ -4,7 +4,7 @@ This entire directory builds independently of audio.cpp;
 it does not link model runtimes or require a GPU on the client.
 
 Requirements: C++17 compiler, CMake 3.16+, libcurl development headers/library,
-pkg-config, ncursesw, SDL2, and a running audio.cpp server.
+pkg-config, json-c, ncursesw, SDL2, and a running audio.cpp server.
 The TUI plays through SDL2 directly; the `play` commands require `ffplay` from FFmpeg.
 For true PCM streaming, use a streaming-capable model configured with
 `"mode": "streaming"` instead of an offline model.
@@ -12,20 +12,20 @@ For true PCM streaming, use a streaming-capable model configured with
 Ubuntu/Debian:
 
 ```sh
-sudo apt install build-essential cmake pkg-config libcurl4-openssl-dev libncurses-dev libsdl2-dev ffmpeg
+sudo apt install build-essential cmake pkg-config libcurl4-openssl-dev libjson-c-dev libncurses-dev libsdl2-dev ffmpeg
 ```
 
 Arch Linux:
 
 ```sh
-sudo pacman -S --needed base-devel cmake pkgconf curl ncurses sdl2 ffmpeg
+sudo pacman -S --needed base-devel cmake pkgconf curl json-c ncurses sdl2 ffmpeg
 ```
 
 macOS with Homebrew:
 
 ```sh
 xcode-select --install
-brew install cmake pkg-config curl ncurses sdl2 ffmpeg
+brew install cmake pkg-config curl json-c ncurses sdl2 ffmpeg
 ```
 
 From this directory:
@@ -69,19 +69,33 @@ library consumer should set that directory explicitly.
 
 ```sh
 ./build/ivrtts_cli tui http://192.168.5.151:8081 zipvoice
+# Discover server models and choose in the TUI (defaults to the first speech model):
+./build/ivrtts_cli tui http://127.0.0.1:8080
 # Streaming-capable model with 24 kHz mono output:
 ./build/ivrtts_cli tui http://127.0.0.1:8080 streaming-model 24000 1
 ```
 
 The retro voice deck has a spectrum display computed from samples sent to the
-audio device, two selectable clone voices, a text editor, and volume controls.
-Use a terminal at least 64 columns by 20 rows. Keys:
+audio device, two selectable clone voices, a model picker, chat history, and volume controls.
+The model list comes from the supplied server URL's `/v1/models` endpoint. It
+shows all registered models with task/mode/load metadata; only `tts` and `clon`
+models can be selected for speech. Downloaded but unregistered models must first
+be loaded in the server UI or configured in `server.json`, then refreshed here.
+Switching models changes the next request; it does not cancel current playback
+or unload/load a model through the management API. Lazy server loading still applies.
+
+Use a terminal at least 64 columns by 24 rows. Keys:
 
 | Key | Action |
 | --- | --- |
-| Enter | Speak/replay the current text |
+| Enter | Speak/replay the selected history message |
+| Up / Down (or k / j) | Select a previous/next history message |
+| m | Open model list; Up/Down browse, Enter selects, Esc closes |
+| r | Refresh models from the server |
+| p | Set the selected model's PCM output rate and channels, e.g. `24000 1` |
 | Tab | Switch between lingCL and WangSG for the next request |
-| e | Edit text; Ctrl-U clears it; Enter/Esc finishes editing |
+| e | Open a blank new message draft; Enter adds it to history, Esc discards it |
+| Ctrl-U / Ctrl-N (in draft) | Clear draft / insert a newline |
 | Space | Pause/resume playback |
 | s | Stop playback and cancel the client request |
 | + / - | Adjust volume |
@@ -91,8 +105,14 @@ UTF-8 text is accepted. Playback and network reception run in a worker thread so
 controls remain responsive. The audio queue is bounded to three seconds; pausing
 eventually applies network backpressure. Cancellation closes the client request;
 the server may still finish its current inference. No audio output file is written.
+History lasts for the current TUI session. Adding text never overwrites previous
+messages; replay synthesizes the selected text using the current model and voice.
+Multiline messages show a condensed preview in the history list.
 The WAV path currently accepts PCM16 WAV (audio.cpp's default output). The raw
-stream path requires the actual model sample rate/channel count. ZipVoice still
+stream path requires the actual model sample rate/channel count. The TUI uses
+each model's reported mode: offline uses WAV; streaming requires its per-model
+PCM settings (press `p`, or pass rate/channels at startup for the initial model).
+The settings stay with that model while switching during the session. ZipVoice still
 finishes synthesis before returning WAV; selecting TUI does not change this.
 
 ## Server setup
@@ -187,7 +207,7 @@ int main() {
 
 Embed with `add_subdirectory(path/to/ivrTTS)` and
 `target_link_libraries(your_app PRIVATE ivrTTS)`. Alternatively, compile
-`ivrTTS.cpp` alongside your application and link libcurl. Methods throw standard
+`ivrTTS.cpp` alongside your application and link libcurl and json-c. Methods throw standard
 C++ exceptions on invalid inputs, transport errors, HTTP failures (including the
 server response body), and unexpected non-WAV responses. Requests have a
 10-second connection timeout and a 300-second total timeout; pass a fourth
@@ -210,6 +230,7 @@ Callbacks run synchronously on the calling thread. Throw from the callback to
 cancel; the original exception is propagated after libcurl returns. Streaming
 methods do not retain the full response. WAV mode validates the first 12 bytes
 before delivering the header and subsequent buffers.
+Use `ivrTTS::list_models(url)` to obtain parsed model metadata from C++.
 
 Run the mock integration tests (Python 3, no model weights needed):
 

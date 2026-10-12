@@ -67,7 +67,7 @@ int main(int argc, char** argv) {
             "  ivrtts_cli stream-clone URL MODEL RATE CHANNELS TEXT REFERENCE.wav TRANSCRIPT\n"
             "  ivrtts_cli interactive URL MODEL [VOICE]\n";
 #ifdef IVRTTS_HAS_TUI
-        std::cout << "  ivrtts_cli tui URL MODEL [RATE CHANNELS]\n";
+        std::cout << "  ivrtts_cli tui URL [MODEL [RATE CHANNELS]]\n";
 #endif
         std::cout << "Default clone voice: lingCL; alternate: WangSG.\n";
         return argc < 2 ? 1 : 0;
@@ -88,8 +88,8 @@ int main(int argc, char** argv) {
             std::cout << "Saved " << bytes.size() << " bytes to " << path << '\n';
         };
 #ifdef IVRTTS_HAS_TUI
-        if (command == "tui" && (argc == 4 || argc == 6)) {
-            return run_tui(argv[2], argv[3], voices,
+        if (command == "tui" && (argc == 3 || argc == 4 || argc == 6)) {
+            return run_tui(argv[2], argc >= 4 ? argv[3] : "", voices,
                            argc == 6 ? number(argv[4], 1000, 384000) : 0,
                            argc == 6 ? number(argv[5], 1, 8) : 1);
         }

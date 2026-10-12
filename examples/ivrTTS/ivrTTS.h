@@ -19,6 +19,13 @@ public:
     // Buffer is valid only during the callback. Throw to cancel the request.
     using AudioSink = std::function<void(const unsigned char*, std::size_t)>;
     using CancelCheck = std::function<bool()>;
+    struct Model {
+        std::string id, family, task, mode;
+        bool loaded = false;
+        bool can_speak() const { return task == "tts" || task == "clon"; }
+    };
+    static std::vector<Model> list_models(const std::string& server_url,
+                                          const CancelCheck& cancel = {});
     enum class AudioMode { Wav, StreamingPcm }; // PCM: signed 16-bit little endian
     void run_stream(const std::string& text, const AudioSink& sink,
                     AudioMode mode = AudioMode::Wav, const CancelCheck& cancel = {}) const;

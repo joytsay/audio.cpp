@@ -16,6 +16,8 @@
 #include <stdexcept>
 #include <thread>
 #include <vector>
+#include <unordered_map>
+#include <sstream>
 #include <unistd.h>
 
 namespace {
@@ -187,31 +189,64 @@ int run_tui(const std::string& url, const std::string& model,
     Terminal terminal;
     std::thread worker;
     std::mutex status_mutex;
-    std::string status = "Ready", text = "Hello, welcome to our voice service.";
+    std::string status = "Ready", draft, current_model = model;
+    std::vector<std::string> history{"Hello, welcome to our voice service."};
+    size_t history_index = 0, model_index = 0;
+    std::vector<ivrTTS::Model> models, fetched_models;
+    std::string catalog_error;
+    std::thread catalog_worker;
+    std::atomic<bool> catalog_cancel{false}, catalog_ready{false};
+    bool catalog_fetching = false, picking_model = false;
+    std::unordered_map<std::string, std::pair<int, int>> pcm_formats;
+    if (rate && !model.empty()) pcm_formats[model] = {rate, channels};
     int selected = 0;
-    bool editing = false;
+    enum class Editor { None, Message, Format };
+    Editor editor = Editor::None;
     const std::array<std::string, 2> presets{"lingCL", "WangSG"};
     auto update = [&](std::string value) { std::lock_guard<std::mutex> lock(status_mutex); status = std::move(value); };
     auto stop = [&] { cancel = true; audio.paused = false; if (worker.joinable()) worker.join(); audio.reset(); done = true; };
+    auto refresh_models = [&] {
+        if (catalog_fetching) return;
+        catalog_fetching = true; catalog_ready = false; catalog_cancel = false;
+        update("Fetching /v1/models...");
+        catalog_worker = std::thread([&] {
+            try {
+                fetched_models = ivrTTS::list_models(url, [&] { return catalog_cancel.load(); });
+                catalog_error.clear();
+            } catch (const std::exception& e) { catalog_error = e.what(); }
+            catalog_ready = true;
+        });
+    };
+    auto close_catalog = [&] { catalog_cancel = true; if (catalog_worker.joinable()) catalog_worker.join(); };
     auto start = [&] {
-        if (!done || text.empty()) return;
+        if (!done || history.empty()) return;
+        auto found = std::find_if(models.begin(), models.end(), [&](const auto& item) { return item.id == current_model; });
+        if (found == models.end() || !found->can_speak()) {
+            update("Choose a TTS/clon model with m; r refreshes the server list."); return;
+        }
+        int request_rate = 0, request_channels = 1;
+        if (found->mode == "streaming") {
+            auto format = pcm_formats.find(current_model);
+            if (format == pcm_formats.end()) { update("Streaming model: press p to set output RATE CHANNELS."); return; }
+            request_rate = format->second.first; request_channels = format->second.second;
+        }
         if (worker.joinable()) worker.join();
         audio.reset(); cancel = false; done = false;
-        auto input = text, voice = presets[selected];
+        auto input = history[history_index], voice = presets[selected], request_model = current_model;
         update("Generating with " + voice + "...");
-        worker = std::thread([&, input, voice] {
+        worker = std::thread([&, input, voice, request_model, request_rate, request_channels] {
             try {
-                ivrTTS client; client.set_preset_directory(voices); client.create(url, model, voice);
+                ivrTTS client; client.set_preset_directory(voices); client.create(url, request_model, voice);
                 WavInput wav(audio);
                 size_t pcm_bytes = 0;
-                if (rate) audio.open(rate, channels);
+                if (request_rate) audio.open(request_rate, request_channels);
                 client.run_stream(input, [&](const unsigned char* bytes, size_t size) {
                     update("Playing / receiving " + voice);
-                    if (rate) { pcm_bytes += size; audio.push(bytes, size); } else wav.write(bytes, size);
-                }, rate ? ivrTTS::AudioMode::StreamingPcm : ivrTTS::AudioMode::Wav,
+                    if (request_rate) { pcm_bytes += size; audio.push(bytes, size); } else wav.write(bytes, size);
+                }, request_rate ? ivrTTS::AudioMode::StreamingPcm : ivrTTS::AudioMode::Wav,
                 [&] { return cancel.load(); });
-                if (!rate) wav.finish();
-                else if (pcm_bytes % (channels * 2)) throw std::runtime_error("incomplete streamed PCM frame");
+                if (!request_rate) wav.finish();
+                else if (pcm_bytes % (request_channels * 2)) throw std::runtime_error("incomplete streamed PCM frame");
                 update("Playing remaining audio...");
                 while (!cancel && !audio.empty()) std::this_thread::sleep_for(20ms);
                 // Allow the final device buffer to play before marking completion.
@@ -225,21 +260,41 @@ int run_tui(const std::string& url, const std::string& model,
         });
     };
     try {
+        refresh_models();
         bool quit = false;
         while (!quit && !interrupted) {
+            if (catalog_fetching && catalog_ready) {
+                catalog_worker.join(); catalog_fetching = false;
+                if (!catalog_error.empty()) update("Model list error: " + catalog_error);
+                else {
+                    models = std::move(fetched_models);
+                    auto found = std::find_if(models.begin(), models.end(), [&](const auto& item) { return item.id == current_model; });
+                    if (found == models.end() || !found->can_speak()) {
+                        found = std::find_if(models.begin(), models.end(), [](const auto& item) { return item.can_speak(); });
+                        current_model = found == models.end() ? "" : found->id;
+                    }
+                    model_index = found == models.end() ? 0 : size_t(found - models.begin());
+                    update(models.empty() ? "No registered models. Load one in the server UI, then press r." :
+                           "Models refreshed - m: choose model, e: add message");
+                }
+            }
             erase();
-            if (LINES < 20 || COLS < 64) {
-                line(0, "Resize terminal to at least 64 x 20. Press q to quit.");
+            if (LINES < 24 || COLS < 64) {
+                line(0, "Resize terminal to at least 64 x 24. Press q to quit.");
             } else {
                 box(stdscr, 0, 0);
                 line(1, "IVR TTS  //  VOICE DECK", 4);
-                line(2, model + "  @  " + url);
+                line(2, (current_model.empty() ? "No speech model selected" : current_model) + "  @  " + url);
                 line(4, std::string(selected == 0 ? "[ lingCL ]" : "  lingCL  ") + "    " +
                         (selected == 1 ? "[ WangSG ]" : "  WangSG  "), 2);
-                line(5, rate ? "PCM STREAM  " + std::to_string(rate) + " Hz / " + std::to_string(channels) + " ch" :
-                     "WAV  //  playback after server synthesis");
+                auto current = std::find_if(models.begin(), models.end(), [&](const auto& item) { return item.id == current_model; });
+                const bool streaming = current != models.end() && current->mode == "streaming";
+                auto format = pcm_formats.find(current_model);
+                line(5, streaming ? (format == pcm_formats.end() ? "PCM STREAM // p: configure output rate/channels" :
+                    "PCM STREAM " + std::to_string(format->second.first) + " Hz / " + std::to_string(format->second.second) + " ch") :
+                    "WAV // playback after server synthesis");
                 auto samples = audio.samples();
-                const int bars = std::min(32, (COLS - 6) / 2), height = 6;
+                const int bars = std::min(32, (COLS - 6) / 2), height = 4;
                 for (int b = 0; b < bars; ++b) {
                     // Log-spaced frequency bins, Hann-windowed DFT of actually played samples.
                     double bin = std::pow(128.0, double(b) / std::max(1, bars - 1));
@@ -252,36 +307,94 @@ int run_tui(const std::string& url, const std::string& model,
                     double db = 20 * std::log10(std::hypot(re, im) / 128 + 1e-6);
                     int level = std::clamp(int((db + 60) / 60 * height), 0, height);
                     for (int h = 0; h < level; ++h) {
-                        attron(COLOR_PAIR(h >= 4 ? 3 : 2) | A_REVERSE);
-                        mvaddstr(12 - h, 3 + b * 2, " ");
-                        attroff(COLOR_PAIR(h >= 4 ? 3 : 2) | A_REVERSE);
+                        attron(COLOR_PAIR(h >= 3 ? 3 : 2) | A_REVERSE);
+                        mvaddstr(10 - h, 3 + b * 2, " ");
+                        attroff(COLOR_PAIR(h >= 3 ? 3 : 2) | A_REVERSE);
                     }
                 }
                 std::string state; { std::lock_guard<std::mutex> lock(status_mutex); state = status; }
-                line(14, audio.paused ? "PAUSED  //  Space to resume" : state, 3);
-                line(15, "Volume " + std::to_string(audio.volume.load()) + "%  //  played frames " + std::to_string(audio.played.load()));
-                line(17, std::string(editing ? "EDIT > " : "Text > ") + text);
-                line(LINES - 2, editing ? "Type text | Enter: finish editing | Esc: finish editing" :
-                     "Enter: speak  Tab: voice  e: edit  Space: pause  s: stop  +/-: volume  q: quit");
+                line(12, audio.paused ? "PAUSED  //  Space to resume" : state, 3);
+                line(13, "Volume " + std::to_string(audio.volume.load()) + "%  //  played frames " + std::to_string(audio.played.load()));
+                if (picking_model) {
+                    line(15, "SERVER MODELS // Up/Down: browse Enter: select Esc: close r: refresh", 4);
+                    int rows = LINES - 20;
+                    size_t first = model_index >= size_t(rows) ? model_index - rows + 1 : 0;
+                    for (int row = 0; row < rows && first + row < models.size(); ++row) {
+                        auto& item = models[first + row];
+                        line(16 + row, std::string(first + row == model_index ? "> " : "  ") + item.id +
+                             " [" + item.task + "/" + item.mode + "] " + (item.loaded ? "loaded" : "lazy/unloaded") +
+                             (item.can_speak() ? "" : " (not TTS)"), item.can_speak() ? 2 : 1);
+                    }
+                } else {
+                    line(15, "CHAT HISTORY // Up/Down: select Enter: speak selection e: new message", 4);
+                    int rows = LINES - 20;
+                    size_t first = history_index >= size_t(rows) ? history_index - rows + 1 : 0;
+                    for (int row = 0; row < rows && first + row < history.size(); ++row) {
+                        size_t index = first + row;
+                        line(16 + row, std::string(index == history_index ? "> " : "  ") +
+                             std::to_string(index + 1) + ". " + history[index], index == history_index ? 2 : 1);
+                    }
+                }
+                if (editor != Editor::None) {
+                    std::string visible = clean(draft);
+                    size_t width = size_t(std::max(1, COLS - 14));
+                    if (visible.size() > width) {
+                        size_t start = visible.size() - width;
+                        while (start < visible.size() && (static_cast<unsigned char>(visible[start]) & 0xc0) == 0x80) ++start;
+                        visible = "..." + visible.substr(start);
+                    }
+                    line(LINES - 3, (editor == Editor::Format ? "PCM > " : "NEW > ") + visible, 2);
+                } else line(LINES - 3, std::to_string(history.size()) + " messages // m: models r: refresh p: PCM format");
+                line(LINES - 2, editor != Editor::None ? "Enter: add/save Esc: cancel Ctrl-U: clear Ctrl-N: newline" :
+                     "Enter: speak Tab: voice e: new m: models Space: pause s: stop +/-: vol q: quit");
             }
             refresh();
             int key = getch();
             if (key == ERR || key == KEY_RESIZE) continue;
-            if (editing) {
-                if (key == '\n' || key == '\r' || key == 27) editing = false;
-                else if (key == KEY_BACKSPACE || key == 127 || key == 8) {
-                    if (!text.empty()) {
-                        size_t last = text.size() - 1;
-                        while (last && (static_cast<unsigned char>(text[last]) & 0xc0) == 0x80) --last;
-                        text.erase(last);
+            if (editor != Editor::None) {
+                if (key == 27) { editor = Editor::None; draft.clear(); }
+                else if (key == '\n' || key == '\r') {
+                    if (editor == Editor::Message) {
+                        if (!draft.empty()) { history.push_back(draft); history_index = history.size() - 1; update("Message added - Enter to speak"); }
+                        editor = Editor::None; draft.clear();
+                    } else {
+                        std::istringstream input(draft); int r = 0, c = 0; std::string extra;
+                        if (!(input >> r >> c) || (input >> extra) || r < 1000 || r > 384000 || c < 1 || c > 8)
+                            update("Enter output RATE CHANNELS, for example: 24000 1");
+                        else { pcm_formats[current_model] = {r, c}; editor = Editor::None; draft.clear(); update("PCM format saved for " + current_model); }
                     }
-                } else if (key == 21) text.clear(); // Ctrl-U
-                else if (key >= 32 && key <= 255 && text.size() < 8192) text += char(key);
+                } else if (key == KEY_BACKSPACE || key == 127 || key == 8) {
+                    if (!draft.empty()) {
+                        size_t last = draft.size() - 1;
+                        while (last && (static_cast<unsigned char>(draft[last]) & 0xc0) == 0x80) --last;
+                        draft.erase(last);
+                    }
+                } else if (key == 21) draft.clear();
+                else if (key == 14 && editor == Editor::Message && draft.size() < 8192) draft += '\n';
+                else if (key >= 32 && key <= 255 && draft.size() < 8192) draft += char(key);
+            } else if (picking_model) {
+                if (key == 27 || key == 'm') picking_model = false;
+                else if ((key == KEY_UP || key == 'k') && model_index) --model_index;
+                else if ((key == KEY_DOWN || key == 'j') && model_index + 1 < models.size()) ++model_index;
+                else if (key == 'r') refresh_models();
+                else if (key == 'q') quit = true;
+                else if ((key == '\n' || key == '\r') && !models.empty()) {
+                    if (!models[model_index].can_speak()) update("This model is not a text-to-speech model.");
+                    else { current_model = models[model_index].id; picking_model = false; update("Selected " + current_model); }
+                }
             } else {
                 switch (key) {
                     case 'q': case 27: quit = true; break;
                     case '\t': selected = 1 - selected; break;
-                    case 'e': editing = true; break;
+                    case 'e': editor = Editor::Message; draft.clear(); break;
+                    case 'p':
+                        if (current_model.empty()) update("Select a speech model first.");
+                        else { editor = Editor::Format; draft.clear(); }
+                        break;
+                    case 'm': picking_model = true; break;
+                    case 'r': refresh_models(); break;
+                    case KEY_UP: case 'k': if (history_index) --history_index; break;
+                    case KEY_DOWN: case 'j': if (history_index + 1 < history.size()) ++history_index; break;
                     case '\n': case '\r': start(); break;
                     case ' ': if (!done) audio.paused = !audio.paused.load(); break;
                     case 's': stop(); update("Stopped"); break;
@@ -290,7 +403,8 @@ int run_tui(const std::string& url, const std::string& model,
                 }
             }
         }
-    } catch (...) { stop(); throw; }
+    } catch (...) { close_catalog(); stop(); throw; }
+    close_catalog();
     stop();
     return 0;
 }
