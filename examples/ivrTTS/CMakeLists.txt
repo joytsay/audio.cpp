@@ -7,11 +7,24 @@ target_include_directories(ivrTTS PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
     $<INSTALL_INTERFACE:include>)
 target_link_libraries(ivrTTS PUBLIC CURL::libcurl)
+target_compile_definitions(ivrTTS PRIVATE IVRTTS_DEFAULT_VOICE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/voices")
 add_executable(ivrtts_cli main.cpp)
 target_link_libraries(ivrtts_cli PRIVATE ivrTTS)
+option(IVRTTS_BUILD_TUI "Build terminal player with ncurses and SDL2" ON)
+if(IVRTTS_BUILD_TUI)
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(TUI_CURSES REQUIRED IMPORTED_TARGET ncursesw)
+    pkg_check_modules(TUI_SDL REQUIRED IMPORTED_TARGET sdl2)
+    find_package(Threads REQUIRED)
+    target_sources(ivrtts_cli PRIVATE tui.cpp)
+    target_compile_definitions(ivrtts_cli PRIVATE IVRTTS_HAS_TUI=1)
+    target_link_libraries(ivrtts_cli PRIVATE PkgConfig::TUI_CURSES PkgConfig::TUI_SDL Threads::Threads)
+endif()
+file(COPY voices DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
 include(GNUInstallDirs)
 install(TARGETS ivrTTS ivrtts_cli
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(FILES ivrTTS.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+install(DIRECTORY voices/ DESTINATION ${CMAKE_INSTALL_DATADIR}/ivrTTS/voices)

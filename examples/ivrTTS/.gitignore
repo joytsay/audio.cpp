@@ -1,0 +1,7 @@
+/build/
+/*.wav
+__pycache__/
+!/voices/
+!/voices/prompt_text
+!/voices/lingCLvocals.wav
+!/voices/wangSG9s.wav
