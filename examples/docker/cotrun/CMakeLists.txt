@@ -1,0 +1,6 @@
+cmake_minimum_required(VERSION 3.16)
+project(coturn_setup LANGUAGES CXX)
+find_package(CURL REQUIRED)
+add_executable(coturn_setup setupEnv.cpp)
+target_compile_features(coturn_setup PRIVATE cxx_std_17)
+target_link_libraries(coturn_setup PRIVATE CURL::libcurl)

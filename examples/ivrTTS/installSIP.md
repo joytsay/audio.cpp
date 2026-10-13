@@ -1,5 +1,9 @@
 # Connect ivrTTS directly to SIP with baresip
 
+For Jetson AGX, use the [integrated Docker Compose setup](../docker/agx-one-container/README.md#sip-telephone-pipeline-and-coturn).
+Docker builds the SIP dependencies and starts the pipeline and coturn. The
+instructions below are for building a standalone SIP client.
+
 `exampleSIP` embeds [baresip](https://github.com/baresip/baresip) and connects
 directly to your SIP registrar/proxy. It uses SIP for call control and RTP for
 telephone audio. No browser or separate media gateway is required.
@@ -33,7 +37,7 @@ provide a registrar. Your existing PBX can stay on your LAN.
 Use the actual account, proxy, transport and destination supplied by your PBX.
 SIP URI transport parameters such as `;transport=tcp` are supported. The default
 is UDP. `sips:` URIs use TLS. The example sends ordinary RTP audio; encrypted
-media and NAT traversal modules are not loaded by this integration.
+media is not enabled. Optional coturn TURN relaying is configured below.
 
 The client must reach the SIP server and the RTP address advertised by the peer.
 For a LAN PBX, run the client on the LAN or over a routed VPN. Allow SIP signaling
@@ -83,7 +87,7 @@ cmake --install re/build
 cmake -S baresip -B baresip/build -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_PREFIX_PATH="$HOME/.local/ivrtts-sip" \
   -DCMAKE_INSTALL_PREFIX="$HOME/.local/ivrtts-sip" \
-  -DMODULES="g711;opus"
+  -DMODULES="g711;opus;turn"
 cmake --build baresip/build --parallel
 cmake --install baresip/build
 ```
@@ -91,6 +95,38 @@ cmake --install baresip/build
 See the [upstream build instructions](https://github.com/baresip/baresip#building).
 A distribution package can also be used if it includes development headers,
 `libbaresip.pc`, `libre.pc`, shared libraries and the codec modules at these versions.
+
+### Optional: coturn TURN relay
+
+Baresip's `turn` module allocates relay addresses with
+[coturn](https://github.com/coturn/coturn). It works with ordinary SIP/RTP peers;
+the peer does not need ICE. Setting `COTURN_URL` forces media through the relay.
+An empty URL disables TURN. TURN does not carry SIP registration, INVITE or ACK,
+so SIP signaling/NAT problems must be addressed separately.
+
+Run coturn using [the Docker Compose setup](../docker/cotrun/README.md).
+The server variables are in
+[examples/docker/agx-one-container/.env.example](../docker/agx-one-container/.env.example).
+Copy that file to `.env`, set the server addresses and a real password, then run
+from the repository root:
+
+```sh
+docker compose --env-file examples/docker/agx-one-container/.env \
+  -f examples/docker/cotrun/compose.yml up -d
+```
+
+The container uses Linux host networking, so its listening and relay addresses
+must belong to the machine running Docker. Use a public relay address for callers
+outside the LAN, or configure a public/private mapping and port forwarding.
+Allow UDP/TCP on `COTURN_PORT` and UDP on `COTURN_MIN_PORT`–`COTURN_MAX_PORT`.
+These are separate from the client's `SIP_RTP_PORTS`.
+
+Copy `COTURN_URL`, `COTURN_USERNAME` and `COTURN_PASSWORD` into the SIP client's
+`.env.sip`, then start `exampleSIP` normally. It prints
+`TURN media relay enabled.`. The realm is supplied by the server's authentication
+challenge. This setup supports `turn:` URLs using UDP or TCP; TLS/DTLS listeners
+are disabled. No native coturn build or client-side server config generator is
+needed.
 
 ## 3. Build the example
 
@@ -277,6 +313,8 @@ Audible tones carried only inside audio are not detected by this example.
 | `SIP_INTERFACE` | Network interface name or local IP address used by baresip |
 | `SIP_RTP_PORTS` | UDP media port range, such as `10000-20000` |
 | `BARESIP_MODULE_PATH` | Directory containing `g711.so` and/or `opus.so` |
+| `COTURN_URL` | TURN URI; empty disables the relay |
+| `COTURN_USERNAME`, `COTURN_PASSWORD` | Coturn long-term credentials |
 | `SIP_CODEC` | `PCMU` (default) or `OPUS` |
 | `SIP_DTMF_MODE` | `rtp` (default) or `info` |
 | `STT_HOTWORDS_FILE` | Local UTF-8 hotwords file; takes priority over inline hotwords |

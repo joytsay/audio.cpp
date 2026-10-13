@@ -176,6 +176,52 @@ RUN if [ "${CUDA_DOCKER_ARCH}" != "default" ]; then \
     cp build/bin/llama-server /out/ && \
     find build -name "*.so*" -exec cp -P {} /out/ \;
 
+# ── SIP: Build native SIP/RTP support without host-side dependencies ────────
+FROM ubuntu:${UBUNTU_VERSION} AS sip-build
+ARG BUILD_JOBS=2
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential cmake pkg-config git ca-certificates libssl-dev \
+        zlib1g-dev libopus-dev libcurl4-openssl-dev libjson-c-dev && \
+    rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+RUN git clone --depth 1 --branch v4.12.0 https://github.com/baresip/re.git && \
+    git clone --depth 1 --branch v4.12.0 https://github.com/baresip/baresip.git
+RUN cmake -S re -B re/build -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/opt/sip -DCMAKE_INSTALL_LIBDIR=lib \
+        -DCMAKE_INSTALL_RPATH=/opt/sip/lib && \
+    cmake --build re/build --parallel "${BUILD_JOBS}" && cmake --install re/build && \
+    cmake -S baresip -B baresip/build -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_PREFIX_PATH=/opt/sip -DCMAKE_INSTALL_PREFIX=/opt/sip \
+        -DCMAKE_INSTALL_LIBDIR=lib -DCMAKE_INSTALL_RPATH=/opt/sip/lib \
+        -DMODULES="g711;opus;turn" && \
+    cmake --build baresip/build --parallel "${BUILD_JOBS}" && cmake --install baresip/build
+COPY examples/ivrTTS/ /src/ivrTTS/
+COPY examples/docker/cotrun/CMakeLists.txt examples/docker/cotrun/setupEnv.cpp /src/coturn-setup/
+RUN PKG_CONFIG_PATH=/opt/sip/lib/pkgconfig cmake -S ivrTTS -B ivrTTS/build \
+        -DCMAKE_BUILD_TYPE=Release -DIVRTTS_BUILD_SIP=ON -DIVRTTS_BUILD_TUI=OFF \
+        -DCMAKE_BUILD_RPATH=/opt/sip/lib && \
+    cmake --build ivrTTS/build --target exampleSIP --parallel "${BUILD_JOBS}" && \
+    cmake -S coturn-setup -B coturn-setup/build -DCMAKE_BUILD_TYPE=Release && \
+    cmake --build coturn-setup/build --parallel "${BUILD_JOBS}" && \
+    mkdir -p /opt/sip/bin /opt/sip/share/voices && \
+    cp ivrTTS/build/exampleSIP coturn-setup/build/coturn_setup /opt/sip/bin/ && \
+    cp -a ivrTTS/voices/. /opt/sip/share/voices/ && \
+    /opt/sip/bin/exampleSIP --self-test
+
+# Small CPU-only image for SIP and the environment setup command. It calls the
+# inference services over HTTP and does not need the NVIDIA runtime.
+FROM ubuntu:${UBUNTU_VERSION} AS sip-runtime
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl libstdc++6 libjson-c5 libopus0 && \
+    rm -rf /var/lib/apt/lists/*
+COPY --from=sip-build /opt/sip/ /opt/sip/
+COPY .devops/sip-entrypoint.sh /app/sip-entrypoint.sh
+RUN if ! id -u ubuntu >/dev/null 2>&1; then useradd --create-home --shell /bin/bash ubuntu; fi && \
+    chmod +x /app/sip-entrypoint.sh
+WORKDIR /app
+USER ubuntu
+ENTRYPOINT ["/app/sip-entrypoint.sh"]
+
 # ── BASE: Shared runtime (NVIDIA CUDA + common libs) ──────────────────────────
 FROM ${BASE_CUDA_RUN_CONTAINER} AS base
 
@@ -237,6 +283,10 @@ USER root
 # Keep llama.cpp's ggml libraries separate from audio.cpp's ggml libraries.
 COPY --from=llama-build /out/ /opt/llama.cpp/
 COPY --from=rag-build /src/ragcpp /app/ragcpp
+# Include SIP tools in the all-in-one image too, for docker compose exec use.
+COPY --from=sip-build /opt/sip/ /opt/sip/
+RUN apt-get update && apt-get install -y --no-install-recommends libjson-c5 libopus0 && \
+    rm -rf /var/lib/apt/lists/*
 COPY .devops/all-in-one-entrypoint.sh /app/all-in-one-entrypoint.sh
 COPY .devops/generate-prompt-knowledge.sh /app/generate-prompt-knowledge.sh
 COPY .devops/all-in-one-server.json /app/all-in-one-server.json

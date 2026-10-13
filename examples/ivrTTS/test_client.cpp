@@ -1,6 +1,7 @@
 // Local HTTP, process and pseudo-terminal integration tests. No Python or model weights.
 #include "ivrTTS.h"
 #include "sipEnv.h"
+#include "sipTurn.h"
 #ifdef IVRTTS_TEST_PIPELINE
 #include "sipPipeline.h"
 #endif
@@ -520,6 +521,12 @@ private:
 };
 void test_sip(const std::string& executable) {
     setenv("SIP_SECRET", "test-password", 1); unsetenv("SIP_CODEC");
+    bool turn_test = getenv("IVRTTS_TEST_TURN_URL");
+    if (turn_test) {
+        setenv("COTURN_URL", getenv("IVRTTS_TEST_TURN_URL"), 1);
+        setenv("COTURN_USERNAME", "ivrtts-test", 1);
+        setenv("COTURN_PASSWORD", "local-turn-test-password", 1);
+    } else unsetenv("COTURN_URL");
     setenv("SIP_LISTEN", "127.0.0.1:0", 1);
     setenv("SIP_INTERFACE", "127.0.0.1", 1);
     for (unsigned scenario = 0; scenario < 5; ++scenario) {
@@ -617,6 +624,14 @@ void test_env(const std::filesystem::path& root) {
     bool missing = false;
     try { load_sip_env((root / "missing").string(), true); } catch (const std::exception&) { missing = true; }
     check(missing, "explicit missing file accepted");
+    setenv("COTURN_USERNAME", "ivrtts-test", 1);
+    setenv("COTURN_PASSWORD", "secret\nno-auth", 1);
+    bool rejected = false;
+    try { coturn_credentials(); } catch (const std::exception& e) {
+        rejected = true; check(std::string(e.what()).find("secret") == std::string::npos, "TURN password printed");
+    }
+    check(rejected, "invalid TURN credentials accepted");
+    unsetenv("COTURN_PASSWORD");
     std::cout << "PASS: SIP settings quotes, secrets, paths, precedence, invalid files and no shell execution\n";
 }
 #ifdef IVRTTS_TEST_PIPELINE

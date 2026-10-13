@@ -26,3 +26,25 @@ webui/native/dist/
 !knowledge/**/*.md
 !knowledge/*.md
 *.wav
+
+# SIP builds need only these source files and bundled voice references.
+!examples/
+examples/**
+!examples/ivrTTS/
+examples/ivrTTS/**
+!examples/ivrTTS/CMakeLists.txt
+!examples/ivrTTS/*.cpp
+!examples/ivrTTS/*.h
+!examples/ivrTTS/voices/
+!examples/ivrTTS/voices/*.wav
+!examples/ivrTTS/voices/prompt_text
+!examples/docker/
+examples/docker/**
+!examples/docker/cotrun/
+examples/docker/cotrun/**
+!examples/docker/cotrun/CMakeLists.txt
+!examples/docker/cotrun/setupEnv.cpp
+
+# Private runtime settings must never enter an image build context.
+**/.env
+**/.env.*

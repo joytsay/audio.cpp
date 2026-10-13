@@ -1,4 +1,4 @@
-# Jetson AGX: one-container WebUI
+# Jetson AGX: WebUI and SIP pipeline
 
 This Compose project builds one container containing the embedded Svelte WebUI,
 the native audio.cpp worker (diarization, STT, and TTS), llama.cpp, and a
@@ -122,3 +122,106 @@ docker compose -f examples/docker/agx-one-container/compose.yml up -d --build
 
 Override `AUDIOCPP_BOOTSTRAP_PACKAGES`, `LLAMA_BOOTSTRAP_MODEL`, or
 `RAG_EMBEDDING_MODEL` in `compose.yml` to change the initial downloads.
+
+## SIP telephone pipeline and coturn
+
+The same Compose project can now start `sip` and `coturn`. Docker builds libre,
+baresip, the `g711`, `opus` and `turn` modules, and `exampleSIP` automatically.
+No host-side SIP libraries, CMake configuration or `PKG_CONFIG_PATH` are needed.
+The SIP executable and setup tool are also included in the all-in-one image.
+The separate SIP image runs without NVIDIA; it calls the inference workers over
+HTTP. Linux host networking exposes its SIP and RTP addresses directly.
+
+### Prepare the settings
+
+From this directory, create `.env` from `.env.example` if it does not already
+exist. Keep an existing `.env` to preserve your model and network settings.
+
+Run the environment setup tool inside Docker:
+
+```bash
+LOCAL_UID=$(id -u) LOCAL_GID=$(id -g) \
+  docker compose --profile setup run --build --rm --no-deps sip-setup
+```
+
+The tool detects the AGX's local IPv4 address, fills missing settings from the
+current template, and generates a TURN password if needed. It preserves existing
+credentials. It writes `.env` with permissions `0600` as your user.
+
+For a specific network interface, append the tool's arguments:
+
+```bash
+LOCAL_UID=$(id -u) LOCAL_GID=$(id -g) \
+  docker compose --profile setup run --build --rm --no-deps sip-setup \
+  --env /settings/.env --template /settings/.env.example --interface eth0
+```
+
+For Internet callers, use `--public` instead of `--interface eth0`, or combine
+both. This detects the outbound public IPv4 address and sets the TURN mapping.
+Router port forwarding is still required. See the
+[coturn network guide](../cotrun/README.md) for the server ports.
+
+Edit `.env` and set the SIP account:
+
+```dotenv
+COMPOSE_PROFILES=sip
+SIP_ACCOUNT=sip:521@YOUR_SIP_SERVER
+SIP_PROXY=sip:YOUR_SIP_SERVER:9900
+SIP_SECRET='YOUR_SIP_PASSWORD'
+SIP_TARGET=listen
+```
+
+Replace the server address, port, account and password with your actual values.
+The TURN URL and password are read directly from this `.env`; a separate
+`examples/ivrTTS/.env.sip` is not required. `SIP_LLM_MODEL` defaults to the model
+that this stack downloads. If you use another LLM, set its registered model ID.
+The audio model IDs default to `silero-vad`, `qwen3-asr` and `zipvoice`.
+
+### Start and test
+
+If the standalone coturn container is running, stop it before starting this
+stack so both servers do not bind the same TURN ports:
+
+```bash
+docker compose --env-file .env -f ../cotrun/compose.yml down
+```
+
+Start the integrated services:
+
+```bash
+docker compose up --build -d
+docker compose logs -f sip coturn
+```
+
+Wait for the initial model downloads to finish in Studio before making a call.
+The SIP service waits for the audio and LLM HTTP health endpoints. This health
+check does not confirm that all model files have finished downloading.
+
+Wait for `SIP registered.` and `Waiting for one incoming call...`. Call the SIP
+account from another telephone. After `SIP call established.`, speak a sentence
+and wait for the reply. The SIP service registers again after each completed incoming call. It handles one call at a time.
+
+To place one outgoing call, set `SIP_TARGET` to a destination SIP URI. The
+service exits after that call. Set `SIP_TARGET=listen` and recreate the service
+to return to incoming calls. To stop the SIP service:
+
+```bash
+docker compose stop sip
+```
+
+For diagnosis, run the audio self-test inside the container:
+
+```bash
+docker compose exec sip /opt/sip/bin/exampleSIP --self-test
+```
+
+If settings change, recreate the affected services:
+
+```bash
+docker compose up -d --force-recreate sip coturn
+```
+
+Leave `COMPOSE_PROFILES` empty to start only the web/inference services. The
+standalone [coturn Compose file](../cotrun/compose.yml) remains available, but do
+not start both coturn services on the same host ports. TURN carries audio;
+SIP registration and ACKs still go directly through your SIP proxy.

@@ -22,6 +22,7 @@ inline bool load_sip_env(const std::string& filename, bool required = false) {
     }
     const std::set<std::string> keys{
         "SIP_ACCOUNT", "SIP_PROXY", "SIP_TARGET", "SIP_SECRET", "SIP_AUTHUSER", "SIP_CODEC",
+        "COTURN_URL", "COTURN_USERNAME", "COTURN_PASSWORD",
         "BARESIP_MODULE_PATH", "SIP_LISTEN", "SIP_INTERFACE", "SIP_RTP_PORTS", "SIP_DTMF_MODE",
         "AUDIOCPP_URL", "VAD_MODEL", "STT_MODEL", "STT_HOTWORDS", "STT_HOTWORDS_FILE", "STT_LANGUAGE",
         "LLM_URL", "LLM_MODEL", "LLM_API_KEY", "RAG_URL", "SYSTEM_PROMPT_FILE", "TTS_MODEL", "TTS_VOICE", "IVRTTS_VOICE_DIR"};

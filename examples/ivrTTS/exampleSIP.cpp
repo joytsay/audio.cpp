@@ -2,6 +2,7 @@
 #include "ivrTTS.h"
 #include "sipPipeline.h"
 #include "sipEnv.h"
+#include "sipTurn.h"
 #include <curl/curl.h>
 #include <re.h>
 #include <rem.h>
@@ -232,6 +233,12 @@ public:
         std::string path = env("BARESIP_MODULE_PATH");
         if (path.empty()) path = IVRTTS_BARESIP_MODULE_PATH;
         require(module_load(path.c_str(), codec == "PCMU" ? "g711" : "opus"), "load baresip codec (check BARESIP_MODULE_PATH)");
+        if (!env("COTURN_URL").empty()) {
+            coturn_credentials();
+            if (env("COTURN_URL").rfind("turn:", 0) != 0 || env("COTURN_URL").find_first_of("@\r\n") != std::string::npos)
+                throw std::runtime_error("COTURN_URL must be turn:HOST:PORT?transport=udp|tcp without embedded credentials");
+            require(module_load(path.c_str(), "turn"), "load baresip TURN module (rebuild with MODULES=g711;opus;turn)");
+        }
         require(bevent_register(event_handler, this), "register SIP events"); events_ = true;
         require(ua_alloc(&ua_, ("<" + account_ + ">;regint=300").c_str()), "create SIP account");
         auto* account = ua_account(ua_);
@@ -240,6 +247,13 @@ public:
         require(account_set_outbound(account, proxy_.c_str(), 0), "set SIP proxy");
         require(account_set_audio_codecs(account, codec == "PCMU" ? "PCMU/8000/1" : "opus/48000/2"), "select SIP codec");
         require(account_set_dtmfmode(account, env("SIP_DTMF_MODE") == "info" ? DTMFMODE_SIP_INFO : DTMFMODE_RTP_EVENT), "set DTMF mode");
+        if (!env("COTURN_URL").empty()) {
+            require(account_set_stun_uri(account, env("COTURN_URL").c_str()), "set TURN server URI");
+            require(account_set_stun_user(account, env("COTURN_USERNAME").c_str()), "set TURN username");
+            require(account_set_stun_pass(account, env("COTURN_PASSWORD").c_str()), "set TURN password");
+            require(account_set_medianat(account, "turn"), "enable TURN media relay");
+            std::cout << "TURN media relay enabled.\n";
+        }
         deadline_ = Clock::now() + std::chrono::seconds(30);
         tmr_start(&timer_, 20, tick_handler, this);
         require(ua_register(ua_), "register SIP account");
@@ -378,6 +392,7 @@ int main(int argc, char** argv) {
         if (args == std::vector<std::string>{"--help"}) {
             std::cout << "Usage: exampleSIP SIP_ACCOUNT SIP_PROXY TARGET_OR_listen TTS_URL MODEL TEXT [VOICE]\n"
                          "Full pipeline: exampleSIP --pipeline SIP_ACCOUNT SIP_PROXY TARGET_OR_listen\n"
+                         "TURN client: COTURN_URL, COTURN_USERNAME, COTURN_PASSWORD\n"
                          "Settings file: exampleSIP [--env PATH] (defaults to .env.sip, full pipeline)\n"
                          "Required: SIP_SECRET, LLM_MODEL (pipeline). Optional: SIP_AUTHUSER, SIP_CODEC=PCMU|OPUS,\n"
                          "  SIP_LISTEN, SIP_INTERFACE, SIP_RTP_PORTS, SIP_DTMF_MODE=rtp|info, BARESIP_MODULE_PATH\n"
