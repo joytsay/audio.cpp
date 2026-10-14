@@ -13,6 +13,7 @@
 #include <chrono>
 #include <cmath>
 #include <csignal>
+#include <cstdio>
 #include <cstring>
 #include <iostream>
 #include <memory>
@@ -289,7 +290,10 @@ private:
         case BEVENT_CALL_ESTABLISHED:
             established_ = true; audio_.activate(true);
             std::cout << "SIP call established.\n";
-            if (pipeline_) pipeline_->resume(); else audio_.play(announcement_);
+            if (!announcement_.empty()) {
+                if (pipeline_) std::cout << "Playing welcome greeting.\n";
+                audio_.play(announcement_);
+            } else if (pipeline_) pipeline_->resume();
             break;
         case BEVENT_CALL_DTMF_START:
             if (call == call_) std::cout << "DTMF: " << bevent_get_text(data) << '\n';
@@ -380,6 +384,10 @@ bool sip_uri(const std::string& value) {
 }
 
 int main(int argc, char** argv) {
+    // Docker captures stdout through a pipe. Flush both baresip's C logging and
+    // C++ status messages while the process is waiting for an incoming call.
+    std::setvbuf(stdout, nullptr, _IOLBF, 0);
+    std::cout << std::unitbuf;
     try {
         std::vector<std::string> args;
         std::string settings = ".env.sip"; bool explicit_file = false;
@@ -393,6 +401,7 @@ int main(int argc, char** argv) {
             std::cout << "Usage: exampleSIP SIP_ACCOUNT SIP_PROXY TARGET_OR_listen TTS_URL MODEL TEXT [VOICE]\n"
                          "Full pipeline: exampleSIP --pipeline SIP_ACCOUNT SIP_PROXY TARGET_OR_listen\n"
                          "TURN client: COTURN_URL, COTURN_USERNAME, COTURN_PASSWORD\n"
+                         "SIP_GREETING: opening message; an empty value disables it\n"
                          "Settings file: exampleSIP [--env PATH] (defaults to .env.sip, full pipeline)\n"
                          "Required: SIP_SECRET, LLM_MODEL (pipeline). Optional: SIP_AUTHUSER, SIP_CODEC=PCMU|OPUS,\n"
                          "  SIP_LISTEN, SIP_INTERFACE, SIP_RTP_PORTS, SIP_DTMF_MODE=rtp|info, BARESIP_MODULE_PATH\n"
@@ -422,8 +431,17 @@ int main(int argc, char** argv) {
         require(curl_global_init(CURL_GLOBAL_DEFAULT), "initialize HTTP library");
         struct Cleanup { ~Cleanup() { curl_global_cleanup(); } } cleanup;
         if (pipeline) {
-            auto conversation = std::make_unique<SipPipeline>(SipPipelineConfig::from_environment());
-            SipCall call(args[1], args[2], args[3], {}, std::move(conversation));
+            auto config = SipPipelineConfig::from_environment();
+            const char* configured_greeting = std::getenv("SIP_GREETING");
+            std::string greeting = configured_greeting ? configured_greeting : "歡迎來電期偶科技 請問我可以怎麼服務您";
+            std::vector<unsigned char> welcome;
+            if (!greeting.empty()) {
+                ivrTTS tts; tts.create(config.audio_url, config.tts_model, config.voice);
+                std::cout << "Generating welcome greeting...\n";
+                welcome = tts.run(greeting); decode_wav(welcome);
+            }
+            auto conversation = std::make_unique<SipPipeline>(std::move(config));
+            SipCall call(args[1], args[2], args[3], std::move(welcome), std::move(conversation));
             return call.run();
         }
         if (args[3].rfind("http://", 0) != 0 && args[3].rfind("https://", 0) != 0)

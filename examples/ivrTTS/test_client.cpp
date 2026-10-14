@@ -408,7 +408,7 @@ public:
                         packet[8] = 0; packet[9] = 0; packet[10] = 0; packet[11] = 42;
                         sendto(rtp_, packet.data(), packet.size(), 0, reinterpret_cast<sockaddr*>(&media_peer_), sizeof(media_peer_));
                         ++audio_frames_; next_audio_ = Clock::now() + 20ms;
-                        if (voiced_packets > 20 && !sent_bye_) {
+                        if (voiced_packets > 70 && !sent_bye_) {
                             sent_bye_ = true;
                             send("BYE " + uri + " SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:" + std::to_string(port_) +
                                  ";branch=z9hG4bKbye\r\nFrom: " + dialog_from_ + "\r\nTo: " + dialog_to_ +
@@ -499,7 +499,7 @@ private:
             response(request, peer, "200 OK", "Contact: <" + uri + ">\r\nContent-Type: application/sdp\r\n", sdp());
         } else if (request.rfind("ACK ", 0) == 0 && !busy_) {
             info(dialog_from_, dialog_to_, dialog_id_, peer);
-            connected_ = true; next_audio_ = Clock::now();
+            connected_ = true; next_audio_ = Clock::now() + (conversation_ ? 2s : 0s);
         } else if (request.rfind("SIP/2.0 200", 0) == 0 && header(request, "CSeq") == "1 INVITE") {
             auto to = header(request, "To"); auto from = header(request, "From");
             auto destination = header(request, "Contact"); destination = destination.substr(destination.find('<') + 1); destination = destination.substr(0, destination.find('>'));
@@ -521,6 +521,7 @@ private:
 };
 void test_sip(const std::string& executable) {
     setenv("SIP_SECRET", "test-password", 1); unsetenv("SIP_CODEC");
+    setenv("SIP_GREETING", "", 1);
     bool turn_test = getenv("IVRTTS_TEST_TURN_URL");
     if (turn_test) {
         setenv("COTURN_URL", getenv("IVRTTS_TEST_TURN_URL"), 1);
@@ -568,6 +569,7 @@ void test_sip(const std::string& executable) {
         setenv("LLM_URL", (audio.url + "/v1").c_str(), 1);
         setenv("RAG_URL", (audio.url + "/v1/rag").c_str(), 1);
         setenv("LLM_MODEL", "test-llm", 1);
+        unsetenv("SIP_GREETING");
         Process client(executable, {"--pipeline", "sip:1001@127.0.0.1", sip.uri, "sip:1002@127.0.0.1"});
         int status;
         try { status = client.finish(12); } catch (const std::exception& e) {
@@ -590,6 +592,10 @@ void test_sip(const std::string& executable) {
         sip.verify();
         check(sip.voiced_packets > 20 && sip.unregistered, "conversation reply RTP missing");
         auto requests = audio.pipeline_requests();
+        check(!requests.empty() && requests.front().first == "/v1/audio/speech", "greeting was not generated before registration");
+        auto greeting = parse(requests.front().second);
+        check(field(greeting.get(), "input") == "歡迎來電期偶科技 請問我可以怎麼服務您", "welcome greeting text changed");
+        check(client.output.find("Playing welcome greeting.") != std::string::npos, "greeting did not start on call establishment");
         for (const char* route : {"/v1/tasks/run", "/v1/audio/transcriptions/details", "/v1/rag/retrieve", "/v1/chat/completions", "/v1/audio/speech"})
             check(std::any_of(requests.begin(), requests.end(), [&](const auto& request) { return request.first == route; }),
                   std::string("RTP conversation skipped ") + route);

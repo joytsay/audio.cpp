@@ -25,10 +25,11 @@ for url in "${AUDIOCPP_URL%/}/health" "${LLM_URL%/v1}/health"; do
         sleep 2
     done
 done
+echo "[sip] HTTP workers ready; starting SIP client"
 # Outgoing calls run once. Incoming calls reopen registration after normal
 # hangup. Docker retries failures, and forwards SIGTERM for a clean SIP BYE.
 if [[ "$SIP_TARGET" != listen ]]; then
-    exec /opt/sip/bin/exampleSIP --pipeline "$SIP_ACCOUNT" "$SIP_PROXY" "$SIP_TARGET"
+    exec stdbuf -oL -eL /opt/sip/bin/exampleSIP --pipeline "$SIP_ACCOUNT" "$SIP_PROXY" "$SIP_TARGET"
 fi
 sip_pid=""
 stopping=0
@@ -38,7 +39,7 @@ stop_sip() {
 }
 trap stop_sip INT TERM
 while (( ! stopping )); do
-    /opt/sip/bin/exampleSIP --pipeline "$SIP_ACCOUNT" "$SIP_PROXY" "$SIP_TARGET" &
+    stdbuf -oL -eL /opt/sip/bin/exampleSIP --pipeline "$SIP_ACCOUNT" "$SIP_PROXY" "$SIP_TARGET" &
     sip_pid=$!
     set +e
     wait "$sip_pid"

@@ -120,6 +120,7 @@ services:
       SIP_SECRET: ${SIP_SECRET:-}
       SIP_AUTHUSER: ${SIP_AUTHUSER:-}
       SIP_TARGET: ${SIP_TARGET:-listen}
+      SIP_GREETING: ${SIP_GREETING-歡迎來電期偶科技 請問我可以怎麼服務您}
       SIP_CODEC: ${SIP_CODEC:-PCMU}
       SIP_DTMF_MODE: ${SIP_DTMF_MODE:-rtp}
       SIP_INTERFACE: ${SIP_INTERFACE:-}

@@ -270,6 +270,11 @@ You can override the account arguments explicitly:
   sip:1002@192.168.5.20
 ```
 
+The pipeline plays “歡迎來電期偶科技 請問我可以怎麼服務您” when a call connects.
+It starts listening after the greeting finishes. Set `SIP_GREETING` to change the
+message; an empty value disables it. The greeting uses the same TTS voice as
+conversation replies and is generated before registration.
+
 During a conversation, baresip decodes caller audio and the custom audio player
 converts it to 16 kHz mono PCM16 for `SipPipeline`. The existing pipeline runs
 VAD, STT, RAG retrieval, LLM completion and TTS. The custom audio source feeds the

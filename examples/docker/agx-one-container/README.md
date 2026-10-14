@@ -198,8 +198,11 @@ The SIP service waits for the audio and LLM HTTP health endpoints. This health
 check does not confirm that all model files have finished downloading.
 
 Wait for `SIP registered.` and `Waiting for one incoming call...`. Call the SIP
-account from another telephone. After `SIP call established.`, speak a sentence
-and wait for the reply. The SIP service registers again after each completed incoming call. It handles one call at a time.
+account from another telephone. After `SIP call established.`, the pipeline plays
+“歡迎來電期偶科技 請問我可以怎麼服務您”. Wait for the greeting to finish, then
+speak a sentence and wait for the reply. Set `SIP_GREETING` in `.env` to change
+the opening message, or set it to an empty value to disable it. The greeting uses
+the configured TTS model and voice, and is generated before SIP registration. The SIP service registers again after each completed incoming call. It handles one call at a time.
 
 To place one outgoing call, set `SIP_TARGET` to a destination SIP URI. The
 service exits after that call. Set `SIP_TARGET=listen` and recreate the service
