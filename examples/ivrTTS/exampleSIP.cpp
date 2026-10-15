@@ -211,6 +211,10 @@ public:
         bridge = nullptr;
     }
     int run() {
+        const auto wait_for_media = env("SIP_WAIT_FOR_MEDIA");
+        if (!wait_for_media.empty() && wait_for_media != "0" && wait_for_media != "1")
+            throw std::runtime_error("SIP_WAIT_FOR_MEDIA must be 0 or 1");
+        wait_for_media_ = wait_for_media != "0";
         require(libre_init(), "initialize libre"); libre_ = true;
         std::string config = "sip_transports udp,tcp,tls\naudio_source ivrtts,memory\naudio_player ivrtts,memory\n"
                              "audio_alert ivrtts,memory\nrtp_rxmode main\n";
@@ -291,11 +295,22 @@ private:
             established_ = true; audio_.activate(true);
             std::cout << "SIP call established.\n";
             if (!announcement_.empty()) {
-                if (pipeline_) std::cout << "Playing welcome greeting.\n";
-                audio_.play(announcement_);
+                if (wait_for_media_ && !media_ready_) {
+                    waiting_for_media_ = true;
+                    std::cout << "Waiting for caller to press # to start greeting.\n";
+                } else start_announcement();
             } else if (pipeline_) pipeline_->resume();
             break;
         case BEVENT_CALL_DTMF_START:
+            if (call == call_ && wait_for_media_ && !announcement_.empty() &&
+                std::string(bevent_get_text(data)) == "#" && !announcement_started_) {
+                media_ready_ = true;
+                if (established_ && waiting_for_media_) {
+                    std::cout << "Caller pressed #; starting greeting.\n";
+                    start_announcement();
+                }
+                break;
+            }
             if (call == call_) std::cout << "DTMF: " << bevent_get_text(data) << '\n';
             break;
         case BEVENT_CALL_CLOSED:
@@ -311,6 +326,13 @@ private:
     static void tick_handler(void* context) noexcept {
         auto& self = *static_cast<SipCall*>(context);
         try { self.tick(); } catch (const std::exception& e) { self.fail(e.what()); }
+    }
+    void start_announcement() {
+        if (announcement_started_) return;
+        waiting_for_media_ = false;
+        announcement_started_ = true;
+        if (pipeline_) std::cout << "Playing welcome greeting.\n";
+        audio_.play(announcement_);
     }
     void tick() {
         if (closing_) {
@@ -354,6 +376,7 @@ private:
     struct tmr timer_{};
     bool libre_ = false, configured_ = false, initialized_ = false, ua_initialized_ = false, events_ = false;
     bool registered_ = false, established_ = false, waiting_ = false, closing_ = false, draining_ = false;
+    bool wait_for_media_ = false, waiting_for_media_ = false, media_ready_ = false, announcement_started_ = false;
     Clock::time_point deadline_, playback_end_;
 };
 
@@ -402,6 +425,7 @@ int main(int argc, char** argv) {
                          "Full pipeline: exampleSIP --pipeline SIP_ACCOUNT SIP_PROXY TARGET_OR_listen\n"
                          "TURN client: COTURN_URL, COTURN_USERNAME, COTURN_PASSWORD\n"
                          "SIP_GREETING: opening message; an empty value disables it\n"
+                         "SIP_WAIT_FOR_MEDIA=1: wait for caller to press # before greeting (default 1; 0 starts automatically)\n"
                          "Settings file: exampleSIP [--env PATH] (defaults to .env.sip, full pipeline)\n"
                          "Required: SIP_SECRET, LLM_MODEL (pipeline). Optional: SIP_AUTHUSER, SIP_CODEC=PCMU|OPUS,\n"
                          "  SIP_LISTEN, SIP_INTERFACE, SIP_RTP_PORTS, SIP_DTMF_MODE=rtp|info, BARESIP_MODULE_PATH\n"

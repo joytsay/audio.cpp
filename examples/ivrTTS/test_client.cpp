@@ -381,9 +381,10 @@ class SipServer {
 public:
     std::string uri;
     std::atomic<bool> authenticated{false}, invited{false}, unregistered{false}, bye{false};
-    std::atomic<unsigned> packets{0}, voiced_packets{0};
-    SipServer(bool reject, bool busy, bool incoming, bool opus = false, bool conversation = false)
-        : reject_(reject), busy_(busy), incoming_(incoming), opus_(opus), conversation_(conversation) {
+    std::atomic<unsigned> packets{0}, voiced_packets{0}, voiced_before_ready{0};
+    std::atomic<bool> ready_sent{false};
+    SipServer(bool reject, bool busy, bool incoming, bool opus = false, bool conversation = false, bool wait_for_ready = false)
+        : reject_(reject), busy_(busy), incoming_(incoming), opus_(opus), conversation_(conversation), wait_for_ready_(wait_for_ready) {
         auto bind_udp = [](int& fd) {
             fd = socket(AF_INET, SOCK_DGRAM, 0); check(fd >= 0, "cannot open SIP test socket");
             fcntl(fd, F_SETFD, FD_CLOEXEC);
@@ -399,6 +400,11 @@ public:
                 while (!stopped_) {
                     pollfd ready[2]{{sip_, POLLIN, 0}, {rtp_, POLLIN, 0}};
                     poll(ready, 2, 20);
+                    if (wait_for_ready_ && connected_ && !ready_sent && Clock::now() >= ready_at_) {
+                        voiced_before_ready = voiced_packets.load();
+                        info(dialog_from_, dialog_to_, dialog_id_, signal_peer_, '#');
+                        ready_sent = true;
+                    }
                     if (conversation_ && connected_ && Clock::now() >= next_audio_) {
                         std::string packet(172, char(audio_frames_ < 25 ? 0x80 : 0xff));
                         packet[0] = char(0x80); packet[1] = 0;
@@ -456,12 +462,12 @@ private:
              "\r\nTo: " + to + "\r\nCall-ID: " + header(request, "Call-ID") + "\r\nCSeq: " + header(request, "CSeq") +
              "\r\n" + extra + "Content-Length: " + std::to_string(body.size()) + "\r\n\r\n" + body, peer);
     }
-    void info(const std::string& from, const std::string& to, const std::string& id, const sockaddr_in& peer) {
+    void info(const std::string& from, const std::string& to, const std::string& id, const sockaddr_in& peer, char digit = '5') {
         auto destination = to.substr(to.find('<') + 1); destination = destination.substr(0, destination.find('>'));
-        const std::string body = "Signal=5\r\nDuration=160\r\n";
+        const std::string body = "Signal=" + std::string(1, digit) + "\r\nDuration=160\r\n";
         send("INFO " + destination + " SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:" + std::to_string(port_) +
              ";branch=z9hG4bKinfo\r\nFrom: " + from + "\r\nTo: " + to + "\r\nCall-ID: " + id +
-             "\r\nCSeq: 2 INFO\r\nContent-Type: application/dtmf-relay\r\nContent-Length: " +
+             "\r\nCSeq: " + std::string(digit == '#' ? "3" : "2") + " INFO\r\nContent-Type: application/dtmf-relay\r\nContent-Length: " +
              std::to_string(body.size()) + "\r\n\r\n" + body, peer);
     }
     void handle(const std::string& request, const sockaddr_in& peer) {
@@ -500,6 +506,7 @@ private:
         } else if (request.rfind("ACK ", 0) == 0 && !busy_) {
             info(dialog_from_, dialog_to_, dialog_id_, peer);
             connected_ = true; next_audio_ = Clock::now() + (conversation_ ? 2s : 0s);
+            ready_at_ = Clock::now() + 700ms;
         } else if (request.rfind("SIP/2.0 200", 0) == 0 && header(request, "CSeq") == "1 INVITE") {
             auto to = header(request, "To"); auto from = header(request, "From");
             auto destination = header(request, "Contact"); destination = destination.substr(destination.find('<') + 1); destination = destination.substr(0, destination.find('>'));
@@ -510,16 +517,17 @@ private:
     }
     int sip_ = -1, rtp_ = -1;
     unsigned port_, media_port_;
-    bool reject_, busy_, incoming_, opus_, conversation_;
+    bool reject_, busy_, incoming_, opus_, conversation_, wait_for_ready_;
     bool connected_ = false, sent_bye_ = false;
     unsigned audio_frames_ = 0;
     sockaddr_in media_peer_{}, signal_peer_{};
-    Clock::time_point next_audio_;
+    Clock::time_point next_audio_, ready_at_;
     std::atomic<bool> stopped_{false};
     std::thread worker_;
     std::string error_, dialog_from_, dialog_to_, dialog_id_;
 };
 void test_sip(const std::string& executable) {
+    setenv("SIP_WAIT_FOR_MEDIA", "0", 1);
     setenv("SIP_SECRET", "test-password", 1); unsetenv("SIP_CODEC");
     setenv("SIP_GREETING", "", 1);
     bool turn_test = getenv("IVRTTS_TEST_TURN_URL");
@@ -561,6 +569,24 @@ void test_sip(const std::string& executable) {
         sip.verify();
     }
 #ifdef IVRTTS_TEST_PIPELINE
+    {
+        Server audio;
+        SipServer sip(false, false, false, false, false, true);
+        setenv("SIP_WAIT_FOR_MEDIA", "1", 1);
+        setenv("SIP_CODEC", "PCMU", 1);
+        Process client(executable, {"sip:1001@127.0.0.1", sip.uri, "sip:1002@127.0.0.1",
+                                   audio.url, "test", "Greeting waits for ready audio.", "lingCL"});
+        check(client.finish(12) == 0, "media-ready greeting call failed: " + client.output);
+        sip.verify();
+        check(sip.ready_sent && sip.voiced_before_ready == 0 && sip.voiced_packets > 10,
+              "greeting must remain silent until caller presses #, then play: " + client.output);
+        check(client.output.find("Waiting for caller to press #") != std::string::npos &&
+              client.output.find("Caller pressed #; starting greeting.") != std::string::npos,
+              "manual greeting trigger missing: " + client.output);
+        check(client.output.find("DTMF: 5") != std::string::npos,
+              "ordinary DTMF should not start greeting or be consumed");
+        setenv("SIP_WAIT_FOR_MEDIA", "0", 1);
+    }
     {
         Server audio; audio.pipeline_mode = true;
         SipServer sip(false, false, false, false, true);

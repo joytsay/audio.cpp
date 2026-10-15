@@ -274,10 +274,18 @@ You can override the account arguments explicitly:
   sip:1002@192.168.5.20
 ```
 
-The pipeline plays “歡迎來電期偶科技 請問我可以怎麼服務您” when a call connects.
+The default greeting is “歡迎來電期偶科技 請問我可以怎麼服務您”.
 It starts listening after the greeting finishes. Set `SIP_GREETING` to change the
 message; an empty value disables it. The greeting uses the same TTS voice as
 conversation replies and is generated before registration.
+
+By default, `SIP_WAIT_FOR_MEDIA=1` waits for the caller to press DTMF `#`
+before playing the greeting. The browser never sends this automatically: wait
+for its audio connection, then press **#** on the keypad. The caller receives
+silence until that press or hangup; there is no greeting wait timeout. The first
+`#` starts the greeting once, and later digits are logged normally. Set
+`SIP_WAIT_FOR_MEDIA=0` explicitly for automatic playback on answer. An empty
+`SIP_GREETING` disables greeting playback and its wait.
 
 During a conversation, baresip decodes caller audio and the custom audio player
 converts it to 16 kHz mono PCM16 for `SipPipeline`. The existing pipeline runs
