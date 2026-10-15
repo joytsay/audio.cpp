@@ -8,6 +8,12 @@
 https://{$AUDIOCPP_HTTPS_HOST:192.168.5.151}:443 {
 	tls internal
 
+	# Browser SIP signaling to the local, host-networked Asterisk test PBX.
+	handle /sip-ws {
+		rewrite * /ws
+		reverse_proxy host.docker.internal:8088
+	}
+
 	# Keep llama.cpp requests on the same HTTPS origin, including router APIs.
 	handle_path /llm/* {
 		reverse_proxy voice-ai:8082

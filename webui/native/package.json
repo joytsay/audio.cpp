@@ -19,6 +19,7 @@
   },
   "dependencies": {
     "abcjs": "^6.7.0",
-    "opencc-js": "1.4.2"
+    "opencc-js": "1.4.2",
+    "sip.js": "0.21.2"
   }
 }

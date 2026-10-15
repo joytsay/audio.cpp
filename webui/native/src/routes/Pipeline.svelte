@@ -6,6 +6,7 @@
   import { spokenExtensionText } from '$lib/receptionist-text';
   import { catalog } from '$lib/catalog';
   import MediaPreview from '$lib/MediaPreview.svelte';
+  import Sip from './Sip.svelte';
   import { apiEndpoint, chatText, endpointBlob, endpointJson, endpointModels, endpointRouterModels, formatChatMessages, routerEndpoint, siblingWorkerEndpoint, type ChatMessage, type OpenAIModel } from '$lib/openai';
   import { graphCitations, graphContext, graphSearch, ragSearch } from '$lib/rag';
   import type { CatalogEntry, InstallPackageChoice, StringMap } from '$lib/types';
@@ -20,6 +21,13 @@
 
   type Stage = 'idle' | 'upload' | 'vad' | 'stt' | 'rag' | 'llm' | 'tts' | 'done';
   type PromptMode = 'system' | 'rag' | 'graphrag';
+  let pipelineView: 'conversation' | 'sip' = 'conversation';
+
+  function openSipTest() {
+    stopMicrophone();
+    cancelCloneRecording();
+    pipelineView = 'sip';
+  }
 
   interface PipelineAudioModel extends OpenAIModel {
     selectionId: string;
@@ -1211,6 +1219,14 @@
   <p>DetectSpeech.VAD → SpeechToText.ASR → KnowledgeBase.RAG → LanguageModel.LLM → TextToSpeech.TTS</p>
 </section>
 
+<nav class="pipeline-view-tabs" aria-label="Pipeline testing mode">
+  <button class:active={pipelineView === 'conversation'} on:click={() => pipelineView = 'conversation'}>Conversation</button>
+  <button class:active={pipelineView === 'sip'} disabled={running || cloneRecordingBusy} on:click={openSipTest}>SIP call test</button>
+</nav>
+
+{#if pipelineView === 'sip'}
+  <Sip />
+{:else}
 <section class="pipeline-steps" aria-label="Pipeline progress">
   {#each pipelineSteps as item, index}
     {@const elapsed = stageRuntime(item[0], runtimeTick)}
@@ -1383,3 +1399,9 @@
     {#if useTts && selectedTtsModel?.family === 'zipvoice' && !voice && (!cloneVoiceFile || !cloneReferenceText.trim())}<p class="field-help">Choose reference audio and enter its matching transcript to enable ZipVoice cloning.</p>{/if}
   </section>
 </div>
+{/if}
+
+<style>
+  .pipeline-view-tabs { height: auto; gap: 8px; margin: 16px 0 24px; }
+  .pipeline-view-tabs button { min-height: 42px; padding: 10px 20px; }
+</style>

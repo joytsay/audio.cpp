@@ -70,9 +70,10 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
     apt-get update && \
     apt-get install -y --no-install-recommends \
-        gcc-${GCC_VERSION} g++-${GCC_VERSION} cmake ca-certificates
+        gcc-${GCC_VERSION} g++-${GCC_VERSION} cmake ca-certificates ccache
 
 ENV CC=gcc-${GCC_VERSION} CXX=g++-${GCC_VERSION} CUDAHOSTCXX=g++-${GCC_VERSION}
+ENV CCACHE_DIR=/root/.cache/ccache CCACHE_MAXSIZE=10G CCACHE_COMPILERCHECK=content
 
 ARG AUDIOCPP_VERSION=dev
 ARG AUDIOCPP_MODEL_SET=full
@@ -85,10 +86,24 @@ ARG BUILD_JOBS=0
 ARG CUDA_DOCKER_ARCH=default
 
 WORKDIR /app
-COPY . .
+# Keep dependency sources in a stable layer when application/UI files change.
+# Copy only native build inputs here; SIP and WebUI sources have their own stages.
+COPY external/ ./external/
+COPY include/ ./include/
+COPY src/ ./src/
+COPY app/ ./app/
+COPY tools/ ./tools/
+COPY model_specs/ ./model_specs/
+COPY assets/ ./assets/
+# model_perf is an unconditional release target, despite living under tests/.
+COPY tests/perf/ ./tests/perf/
+COPY CMakeLists.txt ./
+COPY .devops/entrypoint.sh ./.devops/entrypoint.sh
+COPY webui/native/demo_voices/ ./webui/native/demo_voices/
 COPY --from=webui-build /src/webui/native/dist/index.html ./webui/native/dist/index.html
 
 RUN --mount=type=cache,target=/app/build,sharing=locked \
+    --mount=type=cache,id=audiocpp-cuda-ccache,target=/root/.cache/ccache \
     if [ "${CUDA_DOCKER_ARCH}" != "default" ]; then \
         ADDITIONAL_CMAKE_ARGS="-DCMAKE_CUDA_ARCHITECTURES=${CUDA_DOCKER_ARCH}"; \
     fi && \
@@ -96,6 +111,9 @@ RUN --mount=type=cache,target=/app/build,sharing=locked \
     cp ./webui/native/dist/index.html build/webui/native/dist/index.html && \
     cmake -S . -B build \
         -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+        -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+        -DCMAKE_CUDA_COMPILER_LAUNCHER=ccache \
         -DAUDIOCPP_MODEL_SET="${AUDIOCPP_MODEL_SET}" \
         -DAUDIOCPP_MODELS="${AUDIOCPP_MODELS}" \
         -DENGINE_ENABLE_CPU_ALL_VARIANTS="${AUDIOCPP_CPU_ALL_VARIANTS}" \
@@ -135,10 +153,11 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
     apt-get update && \
     apt-get install -y --no-install-recommends \
-        gcc-${GCC_VERSION} g++-${GCC_VERSION} build-essential cmake git \
+        gcc-${GCC_VERSION} g++-${GCC_VERSION} build-essential cmake git ccache \
         ca-certificates libcurl4-openssl-dev libssl-dev
 
 ENV CC=gcc-${GCC_VERSION} CXX=g++-${GCC_VERSION} CUDAHOSTCXX=g++-${GCC_VERSION}
+ENV CCACHE_DIR=/root/.cache/ccache CCACHE_MAXSIZE=10G CCACHE_COMPILERCHECK=content
 
 ARG CUDA_DOCKER_ARCH=default
 ARG BUILD_JOBS=0
@@ -153,11 +172,16 @@ RUN mkdir llama.cpp && \
     git checkout --detach FETCH_HEAD
 
 WORKDIR /src/llama.cpp
-RUN if [ "${CUDA_DOCKER_ARCH}" != "default" ]; then \
+RUN --mount=type=cache,target=/src/llama.cpp/build,sharing=locked \
+    --mount=type=cache,id=audiocpp-cuda-ccache,target=/root/.cache/ccache \
+    if [ "${CUDA_DOCKER_ARCH}" != "default" ]; then \
         ADDITIONAL_CMAKE_ARGS="-DCMAKE_CUDA_ARCHITECTURES=${CUDA_DOCKER_ARCH}"; \
     fi && \
     cmake -S . -B build \
         -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+        -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+        -DCMAKE_CUDA_COMPILER_LAUNCHER=ccache \
         -DGGML_NATIVE=OFF \
         -DGGML_CUDA=ON \
         -DGGML_CUDA_NCCL=OFF \

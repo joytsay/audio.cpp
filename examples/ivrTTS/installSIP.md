@@ -22,6 +22,10 @@ Audio stays in memory; it does not use the machine's microphone or speakers.
 
 ## 1. Prepare your SIP account
 
+For a local Jetson test without an existing PBX, use the
+[minimal Asterisk Docker Compose setup](../docker/asterisk/README.md).
+It provides two extensions and an echo test without company router forwarding.
+
 You need an existing SIP registrar/PBX or SIP provider, an account and password,
 and another telephone or softphone to call. Baresip is the client; it does not
 provide a registrar. Your existing PBX can stay on your LAN.

@@ -1,0 +1,15 @@
+services:
+  asterisk:
+    image: andrius/asterisk:22.11.0_debian-trixie
+    platform: linux/arm64
+    network_mode: host
+    restart: unless-stopped
+    init: true
+    entrypoint: ["asterisk"]
+    command: ["-f", "-vvv"]
+    volumes:
+      - ./pjsip.conf:/etc/asterisk/pjsip.conf:ro
+      - ./extensions.conf:/etc/asterisk/extensions.conf:ro
+      - ./rtp.conf:/etc/asterisk/rtp.conf:ro
+      - ./modules.conf:/etc/asterisk/modules.conf:ro
+      - ./http.conf:/etc/asterisk/http.conf:ro

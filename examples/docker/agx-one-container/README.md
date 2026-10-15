@@ -90,7 +90,8 @@ all downloaded audio and LLM weights.
   `/v1/rag/graph`. Its Qwen embedding vectors are stored in the existing `.ragdb`.
 - Caddy publishes HTTPS on host port `8083`, using the same internal-CA and IP/SNI setup
   as Realtime-Venus. This host port is separate from rag-cpp's container-local port 8083.
-  `/llm/*` proxies to llama.cpp; all other requests proxy to audio.cpp, including RAG.
+  `/llm/*` proxies to llama.cpp, `/sip-ws` proxies to the local Asterisk test PBX,
+  and all other requests proxy to audio.cpp, including RAG.
   Open `https://192.168.5.151:8083/#/pipeline` directly, or use the root address, which
   opens the chatbot automatically on port 8083. Studio remains available from its navigation link.
 - Set `AUDIOCPP_HTTPS_HOST` and `AUDIOCPP_HTTPS_PORT` to change the published address.
@@ -123,7 +124,36 @@ docker compose -f examples/docker/agx-one-container/compose.yml up -d --build
 Override `AUDIOCPP_BOOTSTRAP_PACKAGES`, `LLAMA_BOOTSTRAP_MODEL`, or
 `RAG_EMBEDDING_MODEL` in `compose.yml` to change the initial downloads.
 
+### Native build cache
+
+The CUDA Dockerfile retains the audio.cpp and llama.cpp build directories in
+BuildKit cache mounts and uses a shared, persistent 10 GiB ccache for C, C++, and
+CUDA compilation. Native dependency sources are copied separately from the
+WebUI, so a UI-only change keeps the dependency source layer unchanged. The
+embedded UI still requires recompiling its server wrapper and relinking.
+
+The first build with this compiler-cache configuration can still take a long
+time: it populates the cache. Later builds on the same Docker builder can reuse
+it. Changes to compiler/toolkit, architecture, source, or flags can require new
+compilation. Cache mounts are local to the builder and can be removed by cache
+pruning or storage-pressure garbage collection. Keep the same builder and avoid
+`docker builder prune` / `docker system prune` between ordinary rebuilds.
+
+For SIP account/password or proxy configuration changes, recreate only the
+affected runtime services; a CUDA image rebuild is unnecessary. For example,
+after editing this deployment's `.env`:
+
+```sh
+docker compose --profile sip up -d --no-build --force-recreate sip
+```
+
+Restart Asterisk separately after edits to its mounted configuration files.
+
 ## SIP telephone pipeline and coturn
+
+For browser calls, use the [local Asterisk test PBX](../asterisk/README.md#test-from-the-ivr-webui)
+and open `https://192.168.5.151:8083/#/sip`. The Pipeline page also includes a
+**SIP call test** view. Trust the Caddy CA and allow microphone access first.
 
 The same Compose project can now start `sip` and `coturn`. Docker builds libre,
 baresip, the `g711`, `opus` and `turn` modules, and `exampleSIP` automatically.

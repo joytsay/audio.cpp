@@ -2194,6 +2194,7 @@
       <button class:active={tab === 'models'} on:click={openModelsPage}>{tr('nav.models')}</button>
     {/if}
     <button class:active={tab === 'logs'} on:click={() => tab = 'logs'}>{tr('nav.runtime')}</button>
+    <a class="nav-link" href="#/sip">SIP</a>
   </nav>
   <label class="language-picker">
     <span>{tr('language.label')}</span>

@@ -65,6 +65,8 @@ services:
 
   https:
     image: caddy:2.11.4-alpine
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       - voice-ai
     ports:
