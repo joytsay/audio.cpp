@@ -107,7 +107,7 @@ public:
         if (position_ >= pcm_.size()) { playing_ = false; finished_ = true; }
     }
     void receive(const int16_t* input, size_t frames, unsigned channels, unsigned rate) {
-        if (!active_ || !pipeline_) return;
+        if (!active_ || !listening_ || !pipeline_) return;
         auto pcm = mono(input, frames, channels, rate, 16000);
         std::vector<unsigned char> bytes(pcm.size() * 2);
         for (size_t i = 0; i < pcm.size(); ++i) {
@@ -117,6 +117,7 @@ public:
     }
     bool finished() { std::lock_guard<std::mutex> lock(mutex_); bool value = finished_; finished_ = false; return value; }
     void activate(bool value) { active_ = value; }
+    void listen(bool value) { listening_ = value; }
     void fail() noexcept { failed_ = true; }
     bool failed() const { return failed_; }
 private:
@@ -125,7 +126,7 @@ private:
     std::vector<int16_t> pcm_;
     double position_ = 0;
     bool playing_ = false, finished_ = false;
-    std::atomic<bool> active_{false}, failed_{false};
+    std::atomic<bool> active_{false}, failed_{false}, listening_{true};
 };
 AudioBridge* bridge = nullptr; // libbaresip is a process-wide singleton.
 
@@ -193,9 +194,11 @@ int player_alloc(struct auplay_st** state, const struct auplay*, struct auplay_p
 class SipCall {
 public:
     SipCall(std::string account, std::string proxy, std::string target,
-            std::vector<unsigned char> announcement, std::unique_ptr<SipPipeline> pipeline = {})
+            std::vector<unsigned char> announcement, std::unique_ptr<SipPipeline> pipeline = {},
+            std::vector<unsigned char> alternate = {})
         : account_(std::move(account)), proxy_(std::move(proxy)), target_(std::move(target)),
-          announcement_(std::move(announcement)), pipeline_(std::move(pipeline)), audio_(pipeline_.get()) {
+          announcement_(std::move(announcement)), alternate_(std::move(alternate)),
+          pipeline_(std::move(pipeline)), audio_(pipeline_.get()) {
         tmr_init(&timer_);
     }
     ~SipCall() {
@@ -297,19 +300,24 @@ private:
             if (!announcement_.empty()) {
                 if (wait_for_media_ && !media_ready_) {
                     waiting_for_media_ = true;
-                    std::cout << "Waiting for caller to press # to start greeting.\n";
+                    std::cout << "Waiting for greeting selection: #1 lingCL, #2 WangSG.\n";
                 } else start_announcement();
             } else if (pipeline_) pipeline_->resume();
             break;
         case BEVENT_CALL_DTMF_START:
-            if (call == call_ && wait_for_media_ && !announcement_.empty() &&
-                std::string(bevent_get_text(data)) == "#" && !announcement_started_) {
-                media_ready_ = true;
-                if (established_ && waiting_for_media_) {
-                    std::cout << "Caller pressed #; starting greeting.\n";
-                    start_announcement();
+            if (call == call_ && !announcement_.empty()) {
+                const std::string digit = bevent_get_text(data);
+                if (digit == "#") { greeting_prefix_ = true; break; }
+                if (greeting_prefix_) {
+                    greeting_prefix_ = false;
+                    if ((digit == "1" || digit == "2") && established_) {
+                        media_ready_ = true;
+                        std::cout << "Caller pressed #" << digit << "; starting greeting ("
+                                  << (digit == "1" ? "lingCL" : "WangSG") << ").\n";
+                        start_announcement(digit == "2");
+                        break;
+                    }
                 }
-                break;
             }
             if (call == call_) std::cout << "DTMF: " << bevent_get_text(data) << '\n';
             break;
@@ -327,12 +335,13 @@ private:
         auto& self = *static_cast<SipCall*>(context);
         try { self.tick(); } catch (const std::exception& e) { self.fail(e.what()); }
     }
-    void start_announcement() {
-        if (announcement_started_) return;
+    void start_announcement(bool alternate = false) {
         waiting_for_media_ = false;
-        announcement_started_ = true;
+        announcement_playing_ = true;
+        draining_ = false;
+        audio_.listen(false);
         if (pipeline_) std::cout << "Playing welcome greeting.\n";
-        audio_.play(announcement_);
+        audio_.play(alternate && !alternate_.empty() ? alternate_ : announcement_);
     }
     void tick() {
         if (closing_) {
@@ -344,12 +353,17 @@ private:
             if (pipeline_) {
                 auto error = pipeline_->error(); if (!error.empty()) throw std::runtime_error(error);
                 std::vector<unsigned char> reply;
-                if (pipeline_->take_reply(reply)) { audio_.play(reply); draining_ = false; }
+                if (!announcement_playing_ && pipeline_->take_reply(reply)) { audio_.listen(false); audio_.play(reply); draining_ = false; }
             }
             if (audio_.finished()) { draining_ = true; playback_end_ = Clock::now() + std::chrono::milliseconds(300); }
             if (draining_ && Clock::now() >= playback_end_) {
                 draining_ = false;
-                if (pipeline_) pipeline_->resume(); else close();
+                announcement_playing_ = false;
+                if (pipeline_) {
+                    std::vector<unsigned char> reply;
+                    if (pipeline_->take_reply(reply)) audio_.play(reply);
+                    else { pipeline_->resume(); audio_.listen(true); }
+                } else close();
             }
         }
         tmr_start(&timer_, 20, tick_handler, this);
@@ -366,7 +380,7 @@ private:
         deadline_ = Clock::now() + std::chrono::milliseconds(500);
     }
     std::string account_, proxy_, target_, error_;
-    std::vector<unsigned char> announcement_;
+    std::vector<unsigned char> announcement_, alternate_;
     std::unique_ptr<SipPipeline> pipeline_;
     AudioBridge audio_;
     struct ua* ua_ = nullptr;
@@ -376,7 +390,8 @@ private:
     struct tmr timer_{};
     bool libre_ = false, configured_ = false, initialized_ = false, ua_initialized_ = false, events_ = false;
     bool registered_ = false, established_ = false, waiting_ = false, closing_ = false, draining_ = false;
-    bool wait_for_media_ = false, waiting_for_media_ = false, media_ready_ = false, announcement_started_ = false;
+    bool wait_for_media_ = false, waiting_for_media_ = false, media_ready_ = false, announcement_playing_ = false;
+    bool greeting_prefix_ = false;
     Clock::time_point deadline_, playback_end_;
 };
 
@@ -425,7 +440,8 @@ int main(int argc, char** argv) {
                          "Full pipeline: exampleSIP --pipeline SIP_ACCOUNT SIP_PROXY TARGET_OR_listen\n"
                          "TURN client: COTURN_URL, COTURN_USERNAME, COTURN_PASSWORD\n"
                          "SIP_GREETING: opening message; an empty value disables it\n"
-                         "SIP_WAIT_FOR_MEDIA=1: wait for caller to press # before greeting (default 1; 0 starts automatically)\n"
+                         "Greetings: #1 lingCL, #2 WangSG; repeat either sequence to replay\n"
+                         "SIP_WAIT_FOR_MEDIA=1: wait for greeting selection (default 1; 0 starts automatically)\n"
                          "Settings file: exampleSIP [--env PATH] (defaults to .env.sip, full pipeline)\n"
                          "Required: SIP_SECRET, LLM_MODEL (pipeline). Optional: SIP_AUTHUSER, SIP_CODEC=PCMU|OPUS,\n"
                          "  SIP_LISTEN, SIP_INTERFACE, SIP_RTP_PORTS, SIP_DTMF_MODE=rtp|info, BARESIP_MODULE_PATH\n"
@@ -458,14 +474,17 @@ int main(int argc, char** argv) {
             auto config = SipPipelineConfig::from_environment();
             const char* configured_greeting = std::getenv("SIP_GREETING");
             std::string greeting = configured_greeting ? configured_greeting : "歡迎來電期偶科技 請問我可以怎麼服務您";
-            std::vector<unsigned char> welcome;
+            std::vector<unsigned char> welcome, alternate;
             if (!greeting.empty()) {
-                ivrTTS tts; tts.create(config.audio_url, config.tts_model, config.voice);
-                std::cout << "Generating welcome greeting...\n";
+                ivrTTS tts; tts.create(config.audio_url, config.tts_model, "lingCL");
+                std::cout << "Generating welcome greeting (lingCL)...\n";
                 welcome = tts.run(greeting); decode_wav(welcome);
+                tts.create(config.audio_url, config.tts_model, "WangSG");
+                std::cout << "Generating welcome greeting (WangSG)...\n";
+                alternate = tts.run(greeting); decode_wav(alternate);
             }
             auto conversation = std::make_unique<SipPipeline>(std::move(config));
-            SipCall call(args[1], args[2], args[3], std::move(welcome), std::move(conversation));
+            SipCall call(args[1], args[2], args[3], std::move(welcome), std::move(conversation), std::move(alternate));
             return call.run();
         }
         if (args[3].rfind("http://", 0) != 0 && args[3].rfind("https://", 0) != 0)
@@ -473,7 +492,9 @@ int main(int argc, char** argv) {
         ivrTTS tts; tts.create(args[3], args[4], args.size() == 7 ? args[6] : "lingCL");
         std::cout << "Generating TTS audio in memory...\n";
         auto wav = tts.run(args[5]); decode_wav(wav);
-        SipCall call(args[0], args[1], args[2], std::move(wav));
+        tts.create(args[3], args[4], "WangSG");
+        auto alternate = tts.run(args[5]); decode_wav(alternate);
+        SipCall call(args[0], args[1], args[2], std::move(wav), {}, std::move(alternate));
         return call.run();
     } catch (const std::exception& error) { std::cerr << "Error: " << error.what() << '\n'; return 1; }
 }

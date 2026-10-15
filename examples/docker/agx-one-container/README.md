@@ -155,7 +155,7 @@ For browser calls, use the [local Asterisk test PBX](../asterisk/README.md#test-
 and open `https://192.168.5.151:8083/#/sip`. The Pipeline page also includes a
 **SIP call test** view. Trust the Caddy CA and allow microphone access first.
 Keep `SIP_WAIT_FOR_MEDIA=1` in this deployment's `.env` (the default). The
-greeting waits for the caller to press **#** on the keypad; the browser never
+greeting waits for **#1** (`lingCL`) or **#2** (`WangSG`) on the keypad; the browser never
 sends it automatically. Set it to `0` only for automatic playback on answer.
 Rebuild the `sip` image after changes to the native SIP client;
 this does not require rebuilding CUDA inference binaries.

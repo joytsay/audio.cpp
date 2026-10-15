@@ -381,7 +381,7 @@ class SipServer {
 public:
     std::string uri;
     std::atomic<bool> authenticated{false}, invited{false}, unregistered{false}, bye{false};
-    std::atomic<unsigned> packets{0}, voiced_packets{0}, voiced_before_ready{0};
+    std::atomic<unsigned> packets{0}, voiced_packets{0}, voiced_before_ready{0}, voiced_before_selection{0};
     std::atomic<bool> ready_sent{false};
     SipServer(bool reject, bool busy, bool incoming, bool opus = false, bool conversation = false, bool wait_for_ready = false)
         : reject_(reject), busy_(busy), incoming_(incoming), opus_(opus), conversation_(conversation), wait_for_ready_(wait_for_ready) {
@@ -400,9 +400,12 @@ public:
                 while (!stopped_) {
                     pollfd ready[2]{{sip_, POLLIN, 0}, {rtp_, POLLIN, 0}};
                     poll(ready, 2, 20);
-                    if (wait_for_ready_ && connected_ && !ready_sent && Clock::now() >= ready_at_) {
-                        voiced_before_ready = voiced_packets.load();
-                        info(dialog_from_, dialog_to_, dialog_id_, signal_peer_, '#');
+                    if (wait_for_ready_ && connected_ && greeting_step_ < 6 &&
+                        Clock::now() >= ready_at_ + std::chrono::milliseconds(100 * greeting_step_)) {
+                        const char digits[] = {'#', '1', '#', '2', '#', '1'};
+                        if (greeting_step_ == 0) voiced_before_ready = voiced_packets.load();
+                        if (greeting_step_ == 1) voiced_before_selection = voiced_packets.load();
+                        info(dialog_from_, dialog_to_, dialog_id_, signal_peer_, digits[greeting_step_++]);
                         ready_sent = true;
                     }
                     if (conversation_ && connected_ && Clock::now() >= next_audio_) {
@@ -463,11 +466,12 @@ private:
              "\r\n" + extra + "Content-Length: " + std::to_string(body.size()) + "\r\n\r\n" + body, peer);
     }
     void info(const std::string& from, const std::string& to, const std::string& id, const sockaddr_in& peer, char digit = '5') {
+        const unsigned cseq = info_cseq_++;
         auto destination = to.substr(to.find('<') + 1); destination = destination.substr(0, destination.find('>'));
         const std::string body = "Signal=" + std::string(1, digit) + "\r\nDuration=160\r\n";
         send("INFO " + destination + " SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:" + std::to_string(port_) +
-             ";branch=z9hG4bKinfo\r\nFrom: " + from + "\r\nTo: " + to + "\r\nCall-ID: " + id +
-             "\r\nCSeq: " + std::string(digit == '#' ? "3" : "2") + " INFO\r\nContent-Type: application/dtmf-relay\r\nContent-Length: " +
+             ";branch=z9hG4bKinfo" + std::to_string(cseq) + "\r\nFrom: " + from + "\r\nTo: " + to + "\r\nCall-ID: " + id +
+             "\r\nCSeq: " + std::to_string(cseq) + " INFO\r\nContent-Type: application/dtmf-relay\r\nContent-Length: " +
              std::to_string(body.size()) + "\r\n\r\n" + body, peer);
     }
     void handle(const std::string& request, const sockaddr_in& peer) {
@@ -519,6 +523,7 @@ private:
     unsigned port_, media_port_;
     bool reject_, busy_, incoming_, opus_, conversation_, wait_for_ready_;
     bool connected_ = false, sent_bye_ = false;
+    unsigned info_cseq_ = 2, greeting_step_ = 0;
     unsigned audio_frames_ = 0;
     sockaddr_in media_peer_{}, signal_peer_{};
     Clock::time_point next_audio_, ready_at_;
@@ -578,13 +583,19 @@ void test_sip(const std::string& executable) {
                                    audio.url, "test", "Greeting waits for ready audio.", "lingCL"});
         check(client.finish(12) == 0, "media-ready greeting call failed: " + client.output);
         sip.verify();
-        check(sip.ready_sent && sip.voiced_before_ready == 0 && sip.voiced_packets > 10,
-              "greeting must remain silent until caller presses #, then play: " + client.output);
-        check(client.output.find("Waiting for caller to press #") != std::string::npos &&
-              client.output.find("Caller pressed #; starting greeting.") != std::string::npos,
+        check(sip.ready_sent && sip.voiced_before_ready == 0 && sip.voiced_before_selection == 0 && sip.voiced_packets > 10,
+              "greeting must remain silent until caller selects #1 or #2, then play: " + client.output);
+        check(client.output.find("Waiting for greeting selection: #1 lingCL, #2 WangSG.") != std::string::npos &&
+              client.output.find("Caller pressed #1; starting greeting (lingCL).") != std::string::npos,
               "manual greeting trigger missing: " + client.output);
         check(client.output.find("DTMF: 5") != std::string::npos,
               "ordinary DTMF should not start greeting or be consumed");
+        const std::string trigger = "Caller pressed #1; starting greeting (lingCL).";
+        auto first = client.output.find(trigger);
+        check(first != std::string::npos && client.output.find(trigger, first + trigger.size()) != std::string::npos,
+              "repeated #1 must restart the greeting: " + client.output);
+        check(client.output.find("Caller pressed #2; starting greeting (WangSG).") != std::string::npos,
+              "#2 must select WangSG: " + client.output);
         setenv("SIP_WAIT_FOR_MEDIA", "0", 1);
     }
     {
@@ -621,6 +632,10 @@ void test_sip(const std::string& executable) {
         check(!requests.empty() && requests.front().first == "/v1/audio/speech", "greeting was not generated before registration");
         auto greeting = parse(requests.front().second);
         check(field(greeting.get(), "input") == "歡迎來電期偶科技 請問我可以怎麼服務您", "welcome greeting text changed");
+        check(requests.size() > 1 && requests[1].first == "/v1/audio/speech", "second greeting not pre-generated");
+        auto alternate_greeting = parse(requests[1].second);
+        check(reference(greeting.get()) == b64(read_file(std::filesystem::path(TEST_VOICES) / "lingCLvocals.wav")), "#1 greeting reference is not lingCL");
+        check(reference(alternate_greeting.get()) == b64(read_file(std::filesystem::path(TEST_VOICES) / "wangSG9s.wav")), "#2 greeting reference is not WangSG");
         check(client.output.find("Playing welcome greeting.") != std::string::npos, "greeting did not start on call establishment");
         for (const char* route : {"/v1/tasks/run", "/v1/audio/transcriptions/details", "/v1/rag/retrieve", "/v1/chat/completions", "/v1/audio/speech"})
             check(std::any_of(requests.begin(), requests.end(), [&](const auto& request) { return request.first == route; }),

@@ -24,13 +24,14 @@
   let peerConnection: RTCPeerConnection | undefined;
   let isIvrCall = false;
   let greetingRequested = false;
+  let greetingPrefix = false;
   let audioReady = false;
   const createMediaHandler = defaultSessionDescriptionHandlerFactory();
 
   function mediaStateChanged() {
     audioReady = callState === 'active' && peerConnection?.connectionState === 'connected' &&
       Boolean(remoteAudio && !remoteAudio.paused && remoteAudio.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA);
-    if (audioReady) status = isIvrCall && !greetingRequested ? 'Press # to start greeting' : 'In call';
+    if (audioReady) status = isIvrCall && !greetingRequested ? 'Press #1 or #2 to choose greeting' : 'In call';
   }
 
   function log(message: string) {
@@ -47,6 +48,7 @@
     peerConnection = undefined;
     isIvrCall = false;
     greetingRequested = false;
+    greetingPrefix = false;
     audioReady = false;
     client?.localMediaStream?.getTracks().forEach((track) => track.stop());
     if (remoteAudio) { remoteAudio.pause(); remoteAudio.srcObject = null; }
@@ -172,6 +174,7 @@
     callState = 'dialing'; status = `Calling ${target}…`; actionPending = true;
     isIvrCall = target.trim() === '521';
     greetingRequested = false;
+    greetingPrefix = false;
     log(`Calling ${target}.`);
     try {
       await client.call(`sip:${encodeURIComponent(target.trim())}@${domain.trim()}`, {}, { requestDelegate: {
@@ -197,10 +200,18 @@
       if (tone) {
         await user.sendDTMF(tone);
         log(`Keypad: ${tone}`);
-        if (tone === '#' && isIvrCall && !greetingRequested) {
-          greetingRequested = true;
-          status = 'In call';
-          log('Greeting requested by keypad #.');
+        if (isIvrCall) {
+          if (tone === '#') {
+            greetingPrefix = true;
+            status = 'Press 1 for lingCL or 2 for WangSG';
+          } else {
+            if (greetingPrefix && (tone === '1' || tone === '2')) {
+              greetingRequested = true;
+              status = 'In call';
+              log(`Greeting requested: #${tone} · ${tone === '1' ? 'lingCL' : 'WangSG'}.`);
+            } else if (!greetingRequested) status = 'Press #1 or #2 to choose greeting';
+            greetingPrefix = false;
+          }
         }
       }
       else await user[action]();
@@ -265,7 +276,7 @@
       {/if}
       <button disabled={callState !== 'active'} aria-pressed={muted} on:click={toggleMute}>{muted ? 'Unmute microphone' : 'Mute microphone'}</button>
     </div>
-    {#if isIvrCall && callState === 'active' && !greetingRequested}<p role="status">{audioReady ? 'Press # on the keypad to play the greeting.' : 'Connecting audio. Then press # to play the greeting.'}</p>{/if}
+    {#if isIvrCall && callState === 'active' && !greetingRequested}<p role="status">{audioReady ? 'Press # then 1 for lingCL, or # then 2 for WangSG.' : 'Connecting audio. Then select #1 (lingCL) or #2 (WangSG).'}</p>{/if}
     <div class="keypad" aria-label="DTMF keypad">
       {#each ['1','2','3','4','5','6','7','8','9','*','0','#'] as tone}
         <button aria-label={`Send DTMF ${tone}`} disabled={callState !== 'active' || !audioReady || actionPending} on:click={() => callAction('hangup', tone)}>{tone}</button>
@@ -274,7 +285,7 @@
     <label for="sip-audio">Call audio</label>
     <audio id="sip-audio" bind:this={remoteAudio} autoplay controls on:playing={mediaStateChanged}></audio>
     {#if audioBlocked}<button on:click={playAudio}>Enable call audio</button>{/if}
-    <p class="muted">600 echoes your voice. 521 needs a running, registered exampleSIP process. Press # to start the IVR greeting. The page never sends it automatically. Keypad digits are logged by the pipeline.</p>
+    <p class="muted">600 echoes your voice. 521 needs a running, registered exampleSIP process. Press #1 for lingCL or #2 for WangSG to play or replay the IVR greeting. The page never sends it automatically. Keypad digits are logged by the pipeline.</p>
   </section>
 </div>
 

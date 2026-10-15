@@ -279,13 +279,18 @@ It starts listening after the greeting finishes. Set `SIP_GREETING` to change th
 message; an empty value disables it. The greeting uses the same TTS voice as
 conversation replies and is generated before registration.
 
-By default, `SIP_WAIT_FOR_MEDIA=1` waits for the caller to press DTMF `#`
-before playing the greeting. The browser never sends this automatically: wait
-for its audio connection, then press **#** on the keypad. The caller receives
-silence until that press or hangup; there is no greeting wait timeout. The first
-`#` starts the greeting once, and later digits are logged normally. Set
-`SIP_WAIT_FOR_MEDIA=0` explicitly for automatic playback on answer. An empty
-`SIP_GREETING` disables greeting playback and its wait.
+By default, `SIP_WAIT_FOR_MEDIA=1` waits for manual voice selection: press
+**#**, then **1** for `lingCL`, or **#**, then **2** for `WangSG`. Both greeting
+versions are generated before registration using `SIP_GREETING`. A bare `#`
+only arms selection. Repeat either sequence to replay that voice from the
+beginning, even during playback. Other digits cancel a pending selection and
+are logged normally. There is no greeting wait timeout. The browser never
+sends these sequences automatically.
+
+`TTS_VOICE` still controls conversation replies. Set `SIP_WAIT_FOR_MEDIA=0`
+explicitly for automatic greeting playback on answer, or empty `SIP_GREETING`
+to disable greetings. In fixed-announcement mode, the optional VOICE argument
+still selects the first greeting voice; the second voice is `WangSG`.
 
 During a conversation, baresip decodes caller audio and the custom audio player
 converts it to 16 kHz mono PCM16 for `SipPipeline`. The existing pipeline runs

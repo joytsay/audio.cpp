@@ -67,17 +67,19 @@ The browser gets its own WebRTC account 520 to avoid replacing either contact.
 Browser media is DTLS-SRTP; Asterisk bridges it to the pipeline's ordinary RTP.
 The browser and Asterisk use LAN ICE candidates without public STUN/TURN.
 
-The greeting waits for you to press **#** on the browser keypad. After clicking
-**Call IVR · 521**, wait for **Press # to start greeting**, then press **#**.
-The page never sends this digit automatically. The pipeline sends silence until
-that first `#`, then plays its pre-generated greeting once from the beginning.
-There is no greeting wait timeout; you can hang up without playing it. Later
-`#` presses are ordinary keypad input and do not replay the greeting.
+After **Call IVR · 521** connects, press **#**, then **1** for the `lingCL`
+greeting, or **#**, then **2** for `WangSG`. Both versions use the configured
+`SIP_GREETING` text and are generated before registration. The page never sends
+these digits automatically. A bare `#` only starts voice selection; it does not
+play audio. Repeat either sequence to replay that voice from the beginning,
+including during playback. Other digits cancel a pending selection and are
+logged normally.
 
-Keep `SIP_WAIT_FOR_MEDIA=1` in the pipeline settings (the default). Set it to
-`0` only if you explicitly want automatic greeting playback on answer instead.
-If autoplay is blocked, click **Enable call audio** before pressing **#**.
-Echo test 600 does not require a greeting trigger.
+Keep `SIP_WAIT_FOR_MEDIA=1` (the default) to wait for manual selection without a
+timeout. `0` starts the lingCL greeting automatically on answer; manual voice
+selection remains available. If autoplay is blocked, click **Enable call audio**
+first. Echo test 600 does not require a greeting trigger. Conversation replies
+continue to use `TTS_VOICE`; greeting voice selection does not change it.
 
 After updating this checkout, recreate Asterisk to mount the new `http.conf`:
 
