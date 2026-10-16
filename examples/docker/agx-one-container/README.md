@@ -1,5 +1,12 @@
 # Jetson AGX: WebUI and SIP pipeline
 
+Saved reference voices in the Pipeline and Studio pages are shared by all web
+clients of this server. Recordings, names, and transcripts persist under
+`voices/saved/` on the host through the existing `/app/voices` bind mount. Existing
+browser voices are imported when that browser next opens either page; its local
+recordings remain as backups. Reload or return to the page to refresh the list.
+Deleting a saved voice removes it from the shared library for every client.
+
 This Compose project builds one container containing the embedded Svelte WebUI,
 the native audio.cpp worker (diarization, STT, and TTS), llama.cpp, and a
 rag-cpp GraphRAG worker over the repository's `knowledge/` corpus. There is no
@@ -152,8 +159,8 @@ Restart Asterisk separately after edits to its mounted configuration files.
 ## SIP telephone pipeline and coturn
 
 For browser calls, use the [local Asterisk test PBX](../asterisk/README.md#test-from-the-ivr-webui)
-and open `https://192.168.5.151:8083/#/sip`. The Pipeline page also includes a
-**SIP call test** view. Trust the Caddy CA and allow microphone access first.
+and open `https://192.168.5.151:8083/#/sip`. Trust the Caddy CA and allow
+microphone access first.
 Keep `SIP_WAIT_FOR_MEDIA=1` in this deployment's `.env` (the default). The
 greeting waits for **#1** (`lingCL`) or **#2** (`WangSG`) on the keypad; the browser never
 sends it automatically. Set it to `0` only for automatic playback on answer.

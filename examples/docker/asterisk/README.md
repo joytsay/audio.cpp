@@ -43,8 +43,7 @@ Use the Jetson LAN address rather than `127.0.0.1` for clients on other computer
 
 ## Test from the IVR WebUI
 
-Open `https://192.168.5.151:8083/#/sip`, or select **SIP call test** on
-`/#/pipeline`. Use your Jetson's actual address if different.
+Open `https://192.168.5.151:8083/#/sip`. Use your Jetson's actual address if different.
 The browser uses SIP.js directly with Asterisk; no Janus service is needed.
 
 | Setting | Value |

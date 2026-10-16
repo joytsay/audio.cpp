@@ -4,6 +4,7 @@
 #include "config.h"
 #include "frontend.h"
 #include "http.h"
+#include "voice_library.h"
 #if defined(AUDIOCPP_HAS_NATIVE_MODEL_MANAGER)
 #include "model_installer.h"
 #endif
@@ -112,6 +113,7 @@ private:
     HttpResponse handle_model_unload(const std::string & body_text);
     HttpResponse handle_path_status(const std::string & body_text) const;
     HttpResponse handle_ui_upload(const HttpRequest & request);
+    HttpResponse handle_ui_voices(const HttpRequest & request);
     HttpResponse handle_knowledge_list() const;
     HttpResponse handle_knowledge_save(const std::string & body_text);
     HttpResponse handle_prompt_get(const char * filename) const;
@@ -233,6 +235,7 @@ private:
     // unrelated first loads stay concurrent there.
     std::mutex model_load_mutex_;
     std::filesystem::path upload_root_;
+    std::unique_ptr<VoiceLibrary> voice_library_;
     std::mutex upload_root_mutex_;
     std::filesystem::path repository_root_;
     mutable std::mutex prompt_files_mutex_;

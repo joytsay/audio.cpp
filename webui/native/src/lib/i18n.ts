@@ -187,7 +187,7 @@ const english: Record<string, string> = {
   'voice.recommendedClone': 'recommended for cloning',
   'voice.transcriptPlaceholder': 'Type the exact words spoken in the reference audio, or load a matching .txt file above.',
   'voice.saved': 'Saved voices',
-  'voice.browserOnly': 'stored only in this browser',
+  'voice.serverShared': 'shared with all web clients',
   'voice.chooseSaved': 'Choose a saved voice...',
   'voice.libraryName': 'Library name',
   'voice.namePlaceholder': 'My reference voice',

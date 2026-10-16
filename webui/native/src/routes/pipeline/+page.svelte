@@ -15,15 +15,10 @@
 </script>
 
 <svelte:head>
-  <title>GeoVision IVR · Interactive Voice Response</title>
+  <title>Voice Assistant · GeoVision IVR</title>
   <link rel="icon" type="image/svg+xml" sizes="any" href={logoIcon} />
 </svelte:head>
 <header class="topbar">
   <div class="brand"><div class="brand-logo">{@html logoCloud}</div><div><strong>GeoVision IVR</strong><span>Interactive Voice Response</span></div></div>
-  <nav aria-label="Primary navigation">
-    <a class="nav-link" href="#/">Studio</a>
-    <a class="nav-link active" href="#/pipeline" aria-current="page">Pipeline</a>
-    <a class="nav-link" href="#/sip">SIP</a>
-  </nav>
 </header>
 <main><Pipeline /></main>

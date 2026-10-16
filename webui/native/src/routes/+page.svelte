@@ -1560,7 +1560,7 @@
       await refreshVoices();
       savedVoiceId = id;
       voiceName = name;
-      status = `Saved voice “${name}” in this browser.`;
+      status = `Saved voice “${name}” on the server for all web clients.`;
       log(status);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -1583,7 +1583,6 @@
     if (referenceTextInput) referenceTextInput.value = '';
     referenceText = voice.transcript;
     voiceName = voice.name;
-    status = `Selected saved voice “${voice.name}”.`;
   }
 
   async function removeCurrentVoice() {
@@ -2174,7 +2173,7 @@
 </script>
 
 <svelte:head><title>GeoVision IVR · Interactive Voice Response</title></svelte:head>
-<svelte:window on:keydown={handleShortcut} />
+<svelte:window on:keydown={handleShortcut} on:focus={refreshVoices} />
 
 <header class="topbar">
   <div class="brand">
@@ -2525,15 +2524,10 @@
             <textarea id="reference" rows="2" bind:value={referenceText}
               placeholder={tr('voice.transcriptPlaceholder')}></textarea>
           {/if}
-          <!--
-            Saved voices keep a named reference recording and transcript for reuse. They are persisted only
-            in this browser's IndexedDB, are never uploaded until the user runs a request, do not sync to
-            another browser/device, and are removed if this site's browser data is cleared.
-          -->
           {#if !usesBuiltInVoiceSelector || !quickStartVoice}
           <div class="voice-library">
             <div>
-              <label for="saved-voice">{tr('voice.saved')} <span>{tr('voice.browserOnly')}</span></label>
+              <label for="saved-voice">{tr('voice.saved')} <span>{tr('voice.serverShared')}</span></label>
               <select id="saved-voice" value={savedVoiceId}
                 on:change={(event) => chooseSavedVoice(event.currentTarget.value)}>
                 <option value="">{tr('voice.chooseSaved')}</option>

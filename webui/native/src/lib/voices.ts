@@ -1,3 +1,5 @@
+import { jsonRequest } from './api';
+
 export interface SavedVoice {
   id: string;
   name: string;
@@ -53,15 +55,59 @@ function transaction<T>(
   }));
 }
 
-export async function listVoices(): Promise<SavedVoice[]> {
-  const voices = await transaction<SavedVoice[]>('readonly', (store) => store.getAll());
-  return voices.sort((left, right) => right.createdAt - left.createdAt);
+type StoredVoice = Omit<SavedVoice, 'audio'> & { audio: string };
+
+function encodedAudio(audio: Blob): Promise<string> {
+  if (audio.size > 16 * 1024 * 1024) throw new Error('Reference voice exceeds the 16 MiB limit.');
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result).split(',')[1]);
+    reader.onerror = () => reject(reader.error || new Error('Could not read reference audio.'));
+    reader.readAsDataURL(audio);
+  });
 }
 
-export function saveVoice(voice: SavedVoice): Promise<IDBValidKey> {
-  return transaction<IDBValidKey>('readwrite', (store) => store.put(voice));
+async function serverVoices(): Promise<StoredVoice[]> {
+  return (await jsonRequest<{ voices: StoredVoice[] }>('/v1/ui/voices', { cache: 'no-store' })).voices;
 }
 
-export function deleteVoice(id: string): Promise<undefined> {
-  return transaction<undefined>('readwrite', (store) => store.delete(id));
+let listing: Promise<SavedVoice[]> | undefined;
+export function listVoices(): Promise<SavedVoice[]> {
+  // Coalesce startup/focus refreshes so legacy recordings import only once.
+  if (!listing) listing = loadVoices().finally(() => { listing = undefined; });
+  return listing;
+}
+
+async function loadVoices(): Promise<SavedVoice[]> {
+  let voices = await serverVoices();
+  let local: SavedVoice[] = [];
+  // IndexedDB may be unavailable in private browsing. The shared library still works.
+  try { local = await transaction<SavedVoice[]>('readonly', (store) => store.getAll()); } catch { /* no legacy voices */ }
+  let imported = false;
+  for (const voice of local) {
+    const marker = `audiocpp.shared-voice-imported.${voice.id}`;
+    if (localStorage.getItem(marker)) continue;
+    if (!voices.some((saved) => saved.id === voice.id)) {
+      await saveVoice(voice);
+      imported = true;
+    }
+    // Keep the original as a local backup, but never resurrect a shared deletion.
+    localStorage.setItem(marker, '1');
+  }
+  if (imported) voices = await serverVoices();
+  return voices.map((voice) => ({
+    ...voice,
+    audio: new Blob([Uint8Array.from(atob(voice.audio), (character) => character.charCodeAt(0))], { type: 'audio/wav' })
+  })).sort((left, right) => right.createdAt - left.createdAt);
+}
+
+export async function saveVoice(voice: SavedVoice): Promise<void> {
+  await jsonRequest('/v1/ui/voices', {
+    method: 'POST',
+    body: JSON.stringify({ ...voice, audio: await encodedAudio(voice.audio) })
+  });
+}
+
+export async function deleteVoice(id: string): Promise<void> {
+  await jsonRequest(`/v1/ui/voices?id=${encodeURIComponent(id)}`, { method: 'DELETE' });
 }

@@ -6,7 +6,6 @@
   import { spokenExtensionText } from '$lib/receptionist-text';
   import { catalog } from '$lib/catalog';
   import MediaPreview from '$lib/MediaPreview.svelte';
-  import Sip from './Sip.svelte';
   import { apiEndpoint, chatText, endpointBlob, endpointJson, endpointModels, endpointRouterModels, formatChatMessages, routerEndpoint, siblingWorkerEndpoint, type ChatMessage, type OpenAIModel } from '$lib/openai';
   import { graphCitations, graphContext, graphSearch, ragSearch } from '$lib/rag';
   import type { CatalogEntry, InstallPackageChoice, StringMap } from '$lib/types';
@@ -21,13 +20,6 @@
 
   type Stage = 'idle' | 'upload' | 'vad' | 'stt' | 'rag' | 'llm' | 'tts' | 'done';
   type PromptMode = 'system' | 'rag' | 'graphrag';
-  let pipelineView: 'conversation' | 'sip' = 'conversation';
-
-  function openSipTest() {
-    stopMicrophone();
-    cancelCloneRecording();
-    pipelineView = 'sip';
-  }
 
   interface PipelineAudioModel extends OpenAIModel {
     selectionId: string;
@@ -195,6 +187,7 @@
     status = 'Type a message, choose an example, or record audio to start a new conversation.';
   }
   let systemPrompt = systemPromt.trim();
+  $: referenceTranscriptPlaceholder = systemPrompt.split(/\r?\n/)[0]?.trim() || systemPromt.split(/\r?\n/)[0].trim();
   let promptMode: PromptMode = 'system';
   let useLlm = true;
   let useTts = true;
@@ -208,6 +201,13 @@
   let cloneVoiceInput: HTMLInputElement | null = null;
   let cloneVoiceFile: File | null = null;
   let cloneReferenceText = '';
+  let cloneTtsText = '請問您是希望人工總機協助?轉接中請稍後';
+  let cloneTtsPreviewUrl = '';
+  let cloneTtsPreviewStatus = '';
+  let cloneTtsPreviewBusy = false;
+  let cloneTtsPreviewPlayer: HTMLAudioElement | null = null;
+  let cloneTtsPreviewAborter: AbortController | null = null;
+  let cloneTtsPreviewGeneration = 0;
   let cloneTranscriptStatus = '';
   let cloneTranscribing = false;
   let cloneTranscriptAborter: AbortController | null = null;
@@ -302,11 +302,67 @@
     ...(useLlm ? [['llm', 'Language model']] : []),
     ...(useTts ? [['tts', 'Text to speech']] : [])
   ];
-  $: canGenerateReply = Boolean(!cloneTranscribing && (!useLlm || llmModel) &&
+  $: canGenerateReply = Boolean(!cloneTranscribing && !cloneTtsPreviewBusy && (!useLlm || llmModel) &&
     (!useTts || (ttsModel && (selectedTtsModel?.family !== 'zipvoice' ||
       (cloneVoiceFile && cloneReferenceText.trim()) || voice))));
   $: canSendAudio = Boolean(!cloneRecordingBusy && sourceFile && sttModel && (!sourceFromMicrophone || vadModel) && canGenerateReply);
   $: canSendText = Boolean(!cloneRecordingBusy && textInput.trim() && canGenerateReply);
+  $: canPreviewCloneTts = Boolean(cloneVoiceFile && cloneReferenceText.trim() && cloneTtsText.trim() && ttsModel &&
+    !cloneTranscribing && !cloneRecordingBusy && !running);
+  $: invalidateCloneTtsPreview(cloneVoiceFile, cloneReferenceText, cloneTtsText, ttsModel, audioBaseUrl);
+
+  function clearCloneTtsPreview() {
+    cloneTtsPreviewGeneration += 1;
+    cloneTtsPreviewAborter?.abort();
+    cloneTtsPreviewAborter = null;
+    cloneTtsPreviewPlayer?.pause();
+    if (cloneTtsPreviewUrl) URL.revokeObjectURL(cloneTtsPreviewUrl);
+    cloneTtsPreviewUrl = '';
+    cloneTtsPreviewStatus = '';
+    cloneTtsPreviewBusy = false;
+  }
+
+  function invalidateCloneTtsPreview(_file: File | null, _text: string, _ttsText: string, _model: string, _base: string) {
+    clearCloneTtsPreview();
+  }
+
+  async function playCloneTts() {
+    if (!canPreviewCloneTts || cloneTtsPreviewBusy || !cloneVoiceFile) return;
+    const referenceFile = cloneVoiceFile;
+    const transcript = cloneReferenceText.trim();
+    const ttsText = cloneTtsText.trim();
+    stopMicrophone();
+    document.querySelectorAll<HTMLAudioElement>('audio').forEach((audio) => audio.pause());
+    clearCloneTtsPreview();
+    const generation = cloneTtsPreviewGeneration;
+    const controller = new AbortController();
+    cloneTtsPreviewAborter = controller;
+    cloneTtsPreviewBusy = true;
+    cloneTtsPreviewStatus = 'Generating TTS preview…';
+    try {
+      const model = await ensureAudioModel(ttsModel, controller.signal);
+      const reference = await uploadAudio(referenceFile, controller.signal, 24000);
+      const output = await endpointBlob(audioBaseUrl, 'audio/speech', {
+        model: model.modelId, input: ttsText, response_format: 'wav',
+        voice_ref: reference, reference_text: transcript
+      }, controller.signal);
+      if (generation !== cloneTtsPreviewGeneration) return;
+      cloneTtsPreviewUrl = URL.createObjectURL(output);
+      cloneTtsPreviewStatus = 'TTS preview ready.';
+      await tick();
+      if (generation !== cloneTtsPreviewGeneration) return;
+      try { await cloneTtsPreviewPlayer?.play(); }
+      catch { if (generation === cloneTtsPreviewGeneration) cloneTtsPreviewStatus = 'TTS preview ready. Press play below to listen.'; }
+    } catch (error) {
+      if (generation === cloneTtsPreviewGeneration && !controller.signal.aborted)
+        cloneTtsPreviewStatus = `TTS preview failed: ${error instanceof Error ? error.message : String(error)}`;
+    } finally {
+      if (generation === cloneTtsPreviewGeneration) {
+        cloneTtsPreviewBusy = false;
+        cloneTtsPreviewAborter = null;
+      }
+    }
+  }
 
   function save() {
     localStorage.setItem('audiocpp.conversation.settings', JSON.stringify({
@@ -606,6 +662,7 @@
       cloneRecordingStatus = 'Microphone recording is unavailable. Open this page over HTTPS.';
       return;
     }
+    clearCloneTtsPreview();
     stopMicrophone();
     cancelCloneTranscription();
     document.querySelectorAll<HTMLAudioElement>('audio').forEach((audio) => audio.pause());
@@ -682,7 +739,6 @@
     cloneReferenceText = saved.transcript;
     cloneVoiceName = saved.name;
     if (cloneVoiceInput) cloneVoiceInput.value = '';
-    status = `Selected saved voice “${saved.name}”.`;
   }
 
   function clearCloneVoice() {
@@ -706,7 +762,7 @@
       await refreshSavedCloneVoices();
       savedCloneVoiceId = id;
       cloneVoiceName = name;
-      status = `Saved voice “${name}” in this browser.`;
+      status = `Saved voice “${name}” on the server for all web clients.`;
     } catch (error) {
       status = `Could not save voice: ${error instanceof Error ? error.message : String(error)}`;
     } finally {
@@ -721,7 +777,7 @@
       await deleteSavedVoice(savedCloneVoiceId);
       clearCloneVoice();
       await refreshSavedCloneVoices();
-      status = `Deleted saved voice “${saved?.name || ''}”.`;
+      status = `Deleted shared voice “${saved?.name || ''}” from the server.`;
     } catch (error) {
       status = `Could not delete voice: ${error instanceof Error ? error.message : String(error)}`;
     }
@@ -857,7 +913,7 @@
 
   async function toggleMicrophone() {
     if (microphoneListening || microphoneStarting) { stopMicrophone(); return; }
-    if (cloneRecordingBusy) return;
+    if (cloneRecordingBusy || cloneTtsPreviewBusy) return;
     if (!sttModel || !vadModel) {
       microphoneStatus = 'Choose ASR and VAD models before starting the microphone.';
       return;
@@ -1203,6 +1259,7 @@
   });
 
   onDestroy(() => {
+    clearCloneTtsPreview();
     cancelCloneTranscription();
     if (runtimeTimer) clearInterval(runtimeTimer);
     aborter?.abort();
@@ -1214,19 +1271,11 @@
 </script>
 
 <section class="page-head pipeline-head">
-  <p class="eyebrow">VOICE CONVERSATION PIPELINE</p>
-  <h1>Interactive Voice Response</h1>
-  <p>DetectSpeech.VAD → SpeechToText.ASR → KnowledgeBase.RAG → LanguageModel.LLM → TextToSpeech.TTS</p>
+  <p class="eyebrow">CASCADED PIPELINE</p>
+  <h1>Voice Assistant</h1>
+  <p>A complete system built from separate models: VAD → ASR → LLM + RAG → TTS.</p>
 </section>
 
-<nav class="pipeline-view-tabs" aria-label="Pipeline testing mode">
-  <button class:active={pipelineView === 'conversation'} on:click={() => pipelineView = 'conversation'}>Conversation</button>
-  <button class:active={pipelineView === 'sip'} disabled={running || cloneRecordingBusy} on:click={openSipTest}>SIP call test</button>
-</nav>
-
-{#if pipelineView === 'sip'}
-  <Sip />
-{:else}
 <section class="pipeline-steps" aria-label="Pipeline progress">
   {#each pipelineSteps as item, index}
     {@const elapsed = stageRuntime(item[0], runtimeTick)}
@@ -1244,7 +1293,6 @@
   <section class="panel page-panel pipeline-config">
     <div class="section-title"><div><span>SETTINGS</span><h2>Pipeline</h2></div></div>
     <fieldset class="pipeline-settings-fields" disabled={running}>
-    <p class="field-help">ASR: Qwen3-ASR 0.6B{#if !sttModel} · Install or configure this model to enable audio input.{/if}</p>
     <p class="field-help">VAD</p>
     {#if selectedVadIsSilero}
       <details>
@@ -1274,29 +1322,48 @@
       <div class="pipeline-clone-voice">
         <div class="section-title"><div><span>VOICE CLONE</span><h2>Reference voice</h2></div></div>
         <input hidden class="hidden-file" bind:this={cloneVoiceInput} type="file" accept="audio/*" on:change={(event) => chooseCloneVoice(event.currentTarget.files?.[0] || null)} />
-        <div class="media-actions">
-          <button type="button" disabled={cloneRecordingBusy} on:click={() => cloneVoiceInput?.click()}>Choose reference audio</button>
-          {#if cloneRecording}
-            <button type="button" class="danger" on:click={finishCloneRecording}>Stop recording</button>
-          {:else}
-            <button type="button" disabled={cloneRecordingBusy} on:click={startCloneRecording}>Record reference voice</button>
-          {/if}
+        <div class="audio-drop">
+          <div class="pipeline-audio-choice">
+            <div><strong>{cloneVoiceFile?.name || 'No reference audio selected'}</strong><small>WAV, MP3, or FLAC</small></div>
+            <button type="button" disabled={cloneRecordingBusy} on:click={() => cloneVoiceInput?.click()}>Choose audio</button>
+          </div>
+        </div>
+        <div class="media-actions reference-recording-actions">
+          <button type="button" class="microphone-toggle" class:danger={cloneRecording || cloneRecordingStarting}
+            aria-label={cloneRecording ? 'Stop recording reference voice' : 'Record reference voice'}
+            title={cloneRecording ? 'Stop recording reference voice' : 'Record reference voice'}
+            aria-pressed={cloneRecording || cloneRecordingStarting}
+            disabled={!cloneRecording && cloneRecordingBusy}
+            on:click={() => cloneRecording ? finishCloneRecording() : startCloneRecording()}>
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="9" y="2" width="6" height="12" rx="3" /><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3M8 22h8" /></svg>
+          </button>
           {#if cloneRecordingBusy}<button type="button" on:click={cancelCloneRecording}>Cancel recording</button>{/if}
           <button type="button" disabled={!cloneVoiceFile || cloneRecordingBusy} on:click={clearCloneVoice}>Clear</button>
-          {#if cloneVoiceFile}<span>{cloneVoiceFile.name}</span>{/if}
+          <span>{cloneRecording ? 'Recording reference voice…' : 'Record reference voice'}</span>
         </div>
         {#if cloneRecordingStatus}<p class="field-help" role="status">{cloneRecordingStatus}</p>{/if}
-        <p class="field-help">Choose or record a short, clear sample. The selected ASR model fills the transcript for you; review it before using the voice. Conversation listening stops while you record.</p>
-        <MediaPreview file={cloneVoiceFile} kind="audio" label="Reference preview" />
-        <label>Reference transcript<textarea rows="2" bind:value={cloneReferenceText} on:input={() => cloneTranscriptRevision += 1} placeholder="ASR fills this automatically; you can edit the exact words spoken"></textarea></label>
+        <label>Reference transcript<textarea rows="2" bind:value={cloneReferenceText} on:input={() => cloneTranscriptRevision += 1} placeholder={referenceTranscriptPlaceholder}></textarea></label>
         {#if cloneTranscriptStatus}<p class="field-help" role="status">{cloneTranscriptStatus}</p>{/if}
         <div class="voice-library pipeline-voice-library">
-          <label>Saved voices<select value={savedCloneVoiceId} disabled={cloneRecordingBusy} on:change={(event) => chooseSavedCloneVoice(event.currentTarget.value)}><option value="">Choose saved voice…</option>{#each savedCloneVoices as item}<option value={item.id}>{item.name}</option>{/each}</select></label>
+          <label>Saved voices <span>Shared on server</span><select value={savedCloneVoiceId} disabled={cloneRecordingBusy} on:change={(event) => chooseSavedCloneVoice(event.currentTarget.value)}><option value="">Choose saved voice…</option>{#each savedCloneVoices as item}<option value={item.id}>{item.name}</option>{/each}</select></label>
           <label>Voice name<input bind:value={cloneVoiceName} placeholder="Reference voice name" /></label>
           <div class="library-actions">
             <button type="button" disabled={!cloneVoiceFile || savingCloneVoice || cloneRecordingBusy || cloneTranscribing} on:click={storeCloneVoice}>{savingCloneVoice ? 'Saving…' : 'Save voice'}</button>
             <button class="danger" type="button" disabled={!savedCloneVoiceId || cloneRecordingBusy} on:click={removeCloneVoice}>Delete</button>
           </div>
+        </div>
+        <div class="reference-playback">
+          <MediaPreview file={cloneVoiceFile} kind="audio" label="Reference audio" />
+          <label>TTS transcript<textarea rows="3" bind:value={cloneTtsText}></textarea></label>
+          <div class="library-actions reference-tts-actions">
+            <button class="primary" type="button" disabled={!canPreviewCloneTts || cloneTtsPreviewBusy} on:click={playCloneTts}>{cloneTtsPreviewBusy ? 'Generating TTS…' : 'Play TTS'}</button>
+            {#if cloneTtsPreviewBusy}<button type="button" on:click={clearCloneTtsPreview}>Cancel</button>{/if}
+          </div>
+          {#if cloneTtsPreviewStatus}<p class="field-help" role="status">{cloneTtsPreviewStatus}</p>{/if}
+          {#if cloneTtsPreviewUrl}
+            <label for="clone-tts-preview">TTS result</label>
+            <audio id="clone-tts-preview" controls src={cloneTtsPreviewUrl} bind:this={cloneTtsPreviewPlayer}></audio>
+          {/if}
         </div>
       </div>
     {/if}
@@ -1359,7 +1426,7 @@
           }
         }}></textarea>
         <div class="composer-actions">
-          <button class="microphone-toggle" class:danger={microphoneListening || microphoneStarting} aria-label={microphoneListening || microphoneStarting ? 'Stop listening' : 'Start listening'} title={microphoneListening || microphoneStarting ? 'Stop continuous microphone' : 'Start continuous microphone'} aria-pressed={microphoneListening || microphoneStarting} disabled={!(microphoneListening || microphoneStarting) && (cloneRecordingBusy || running || !sttModel || !vadModel)} on:click={toggleMicrophone}>
+          <button class="microphone-toggle" class:danger={microphoneListening || microphoneStarting} aria-label={microphoneListening || microphoneStarting ? 'Stop listening' : 'Start listening'} title={microphoneListening || microphoneStarting ? 'Stop continuous microphone' : 'Start continuous microphone'} aria-pressed={microphoneListening || microphoneStarting} disabled={!(microphoneListening || microphoneStarting) && (cloneRecordingBusy || cloneTtsPreviewBusy || running || !sttModel || !vadModel)} on:click={toggleMicrophone}>
             <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="9" y="2" width="6" height="12" rx="3" /><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3M8 22h8" /></svg>
           </button>
           <button class="primary send-text" disabled={running || !canSendText} on:click={() => runPipeline('text')}>Send text</button>
@@ -1399,9 +1466,11 @@
     {#if useTts && selectedTtsModel?.family === 'zipvoice' && !voice && (!cloneVoiceFile || !cloneReferenceText.trim())}<p class="field-help">Choose reference audio and enter its matching transcript to enable ZipVoice cloning.</p>{/if}
   </section>
 </div>
-{/if}
 
 <style>
-  .pipeline-view-tabs { height: auto; gap: 8px; margin: 16px 0 24px; }
-  .pipeline-view-tabs button { min-height: 42px; padding: 10px 20px; }
+  .reference-recording-actions { flex-wrap: wrap; }
+  .reference-recording-actions .microphone-toggle { padding: 7px; font-size: inherit; }
+  .reference-playback { margin-top: 12px; }
+  .reference-tts-actions { margin-top: 10px; }
+  .reference-playback > audio { display: block; width: 100%; height: 38px; margin-top: 6px; }
 </style>

@@ -1027,6 +1027,9 @@ ServerState::ServerState(
             << " server backend is intended for portability and testing, but performance and model coverage may be lower than CUDA.\n";
     }
     if (config_.ui_enabled || config_.ui_management) {
+        const auto voices = config_.voice_dir.has_value()
+            ? resolve_path(request_base_, *config_.voice_dir) : request_base_ / "voices";
+        voice_library_ = std::make_unique<VoiceLibrary>(voices / "saved");
         upload_root_ = std::filesystem::temp_directory_path() /
             ("audiocpp-ui-" + std::to_string(
                 std::chrono::duration_cast<std::chrono::microseconds>(
@@ -1117,7 +1120,7 @@ HttpResponse ServerState::handle_request(const HttpRequest & request, bool use_f
         response.status = 204;
         response.content_type = "text/plain";
         response.headers["Access-Control-Allow-Headers"] = "*";
-        response.headers["Access-Control-Allow-Methods"] = "GET, POST";
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, DELETE";
     }
     else if (use_frontends && !frontends_.empty()) {
         response = frontends_.handle(*this, request);
@@ -1170,6 +1173,10 @@ HttpResponse ServerState::handle_request(const HttpRequest & request, bool use_f
     }
     else if (request.method == "POST" && request.path == "/v1/ui/upload") {
         response = handle_ui_upload(request);
+    }
+    else if ((request.method == "GET" || request.method == "POST" || request.method == "DELETE") &&
+             request.path == "/v1/ui/voices") {
+        response = handle_ui_voices(request);
     }
     else if (request.method == "GET" && request.path == "/v1/ui/knowledge") {
         response = handle_knowledge_list();
@@ -1465,6 +1472,31 @@ HttpResponse ServerState::handle_path_status(const std::string & body_text) cons
         ",\"exists\":" + (exists ? "true" : "false") +
         ",\"directory\":" + (directory ? "true" : "false") +
         ",\"file\":" + (regular_file ? "true" : "false") + "}");
+}
+
+HttpResponse ServerState::handle_ui_voices(const HttpRequest & request) {
+    if (!voice_library_) return error_response(403, "UI voice library is disabled", "forbidden");
+    try {
+        if (request.method == "GET") {
+            auto response = json_response(voice_library_->list());
+            response.headers["Cache-Control"] = "no-store";
+            return response;
+        }
+        if (request.body.size() > 23 * 1024 * 1024) {
+            return error_response(413, "Reference voice exceeds the 16 MiB limit", "invalid_request_error");
+        }
+        if (request.method == "POST") voice_library_->save(request.body);
+        else voice_library_->erase(query_param(request.query, "id"));
+        return json_response("{\"ok\":true}");
+    } catch (const std::filesystem::filesystem_error & ex) {
+        return error_response(500, ex.what(), "voice_storage_error");
+    } catch (const std::ios_base::failure & ex) {
+        return error_response(500, ex.what(), "voice_storage_error");
+    } catch (const std::invalid_argument & ex) {
+        return error_response(400, ex.what(), "invalid_request_error");
+    } catch (const std::runtime_error & ex) {
+        return error_response(400, ex.what(), "voice_library_error");
+    }
 }
 
 HttpResponse ServerState::handle_ui_upload(const HttpRequest & request) {

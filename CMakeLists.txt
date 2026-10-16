@@ -2958,6 +2958,14 @@ if (ENGINE_BUILD_TESTS OR ENGINE_BUILD_EXTENDED_TESTS OR ENGINE_BUILD_MODEL_TEST
         target_include_directories(server_base64_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/app/server)
         add_test(NAME server_base64_test COMMAND server_base64_test)
 
+        add_executable(server_voice_library_test
+            tests/unittests/test_server_voice_library.cpp
+            app/server/base64.cpp
+        )
+        target_include_directories(server_voice_library_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/app/server)
+        target_link_libraries(server_voice_library_test PRIVATE engine_runtime Threads::Threads)
+        add_test(NAME server_voice_library_test COMMAND server_voice_library_test)
+
         add_executable(server_busy_guard_test
             tests/unittests/test_server_busy_guard.cpp
         )
