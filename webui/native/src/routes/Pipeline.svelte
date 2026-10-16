@@ -87,8 +87,6 @@
   let sttModel = pipelineAsrModelId;
   let llmModel = '';
   let ttsModel = 'zipvoice';
-  let voice = '';
-  let voices: string[] = [];
   let language = '';
   function asrContextFromCsv(csv: string): string | null {
     const match = csv.replace(/^\uFEFF/, '').match(/^context\r?\n"([\s\S]*)"\r?\n?$/);
@@ -259,7 +257,7 @@
   let llmInputPreview = '';
   let outputUrl = '';
   let aborter: AbortController | null = null;
-  const defaultCloneVoiceName = 'lingCL';
+  const defaultCloneVoiceName = 'lingCLvocals';
   const exampleAudioFiles = [
     { name: '中央監控站2.mp3', url: centralStationExample },
     { name: '中控室.mp3', url: controlRoomExample },
@@ -304,7 +302,7 @@
   ];
   $: canGenerateReply = Boolean(!cloneTranscribing && !cloneTtsPreviewBusy && (!useLlm || llmModel) &&
     (!useTts || (ttsModel && (selectedTtsModel?.family !== 'zipvoice' ||
-      (cloneVoiceFile && cloneReferenceText.trim()) || voice))));
+      (cloneVoiceFile && cloneReferenceText.trim())))));
   $: canSendAudio = Boolean(!cloneRecordingBusy && sourceFile && sttModel && (!sourceFromMicrophone || vadModel) && canGenerateReply);
   $: canSendText = Boolean(!cloneRecordingBusy && textInput.trim() && canGenerateReply);
   $: canPreviewCloneTts = Boolean(cloneVoiceFile && cloneReferenceText.trim() && cloneTtsText.trim() && ttsModel &&
@@ -367,7 +365,7 @@
   function save() {
     localStorage.setItem('audiocpp.conversation.settings', JSON.stringify({
       promptDefaultsVersion: 2, vadModel, sileroVadSettings, vadUseLongestSilence, sttModel, llmModel, ttsModel,
-      audioBaseUrl, llmBaseUrl, asrContext, useHotwords, voice, language, promptMode,
+      audioBaseUrl, llmBaseUrl, asrContext, useHotwords, language, promptMode,
       useLlm, useTts, temperature, maxTokens,
       ragResultCount, ragSearchMode
     }));
@@ -534,7 +532,6 @@
     vadModel = nextVad[0]?.selectionId || '';
     sttModel = keepSelection(nextStt, sttModel);
     ttsModel = keepSelection(nextTts, ttsModel);
-    await refreshVoices();
     save();
   }
 
@@ -552,16 +549,6 @@
     const failures = results.filter((entry) => entry.status === 'rejected') as PromiseRejectedResult[];
     status = failures.length ? failures.map((entry) => entry.reason?.message || String(entry.reason)).join(' · ') : 'Local model services are ready.';
     running = false;
-  }
-
-  async function refreshVoices() {
-    if (!ttsModel) { voices = []; return; }
-    const selected = selectedAudioModel(ttsModel);
-    try {
-      const result = await endpointJson<{ voices?: string[] }>(audioBaseUrl, `audio/voices?model=${encodeURIComponent(selected?.modelId || ttsModel)}`);
-      voices = result.voices || selected?.builtinVoices || [];
-      if (!voices.includes(voice)) voice = voices[0] || '';
-    } catch { voices = selected?.builtinVoices || []; }
   }
 
   async function refreshSavedCloneVoices() {
@@ -585,7 +572,6 @@
     cloneReferenceText = '';
     savedCloneVoiceId = '';
     if (file) {
-      voice = '';
       cloneVoiceName = file.name.replace(/\.[^.]+$/, '');
       void transcribeCloneVoice(file);
     }
@@ -734,7 +720,6 @@
     savedCloneVoiceId = id;
     const saved = savedCloneVoices.find((entry) => entry.id === id);
     if (!saved) return;
-    voice = '';
     cloneVoiceFile = new File([saved.audio], `${saved.name}.wav`, { type: 'audio/wav' });
     cloneReferenceText = saved.transcript;
     cloneVoiceName = saved.name;
@@ -1203,8 +1188,6 @@
           }
           speechBody.voice_ref = await uploadAudio(cloneVoiceFile, aborter.signal, 24000);
           if (cloneReferenceText.trim()) speechBody.reference_text = cloneReferenceText.trim();
-        } else if (voice) {
-          speechBody.voice = voice;
         }
         const output = await endpointBlob(audioBaseUrl, 'audio/speech', speechBody, aborter.signal);
         outputUrl = URL.createObjectURL(output);
@@ -1240,7 +1223,6 @@
       vadUseLongestSilence = typeof saved.vadUseLongestSilence === 'boolean' ? saved.vadUseLongestSilence : true;
       llmModel = saved.llmModel || '';
       ttsModel = saved.ttsModel || ttsModel;
-      voice = saved.voice || '';
       language = saved.language || '';
       promptMode = saved.promptDefaultsVersion === 2 && (saved.promptMode === 'rag' || saved.promptMode === 'graphrag')
         ? saved.promptMode
@@ -1313,11 +1295,6 @@
     <label class="toggle pipeline-toggle"><input type="checkbox" role="switch" bind:checked={useHotwords} on:change={save} /><span aria-hidden="true"></span>ASR hotwords</label>
     <label>Context prompt (hotwords)<textarea rows="2" bind:value={asrContext} on:change={save} placeholder="Terminology or names to recognize"></textarea></label>
     <div class="prompt-actions"><button on:click={saveAsrContextCsv}>Save CSV</button></div>
-    {#if useTts}
-      <div class="field-grid">
-        <label>TTS voice<select bind:value={voice} disabled={cloneRecordingBusy} on:change={() => { if (voice) clearCloneVoice(); save(); }}><option value="">Default voice</option>{#each voices as item}<option value={item}>{item}</option>{/each}</select></label>
-      </div>
-    {/if}
     {#if useTts && supportsVoiceClone}
       <div class="pipeline-clone-voice">
         <div class="section-title"><div><span>VOICE CLONE</span><h2>Reference voice</h2></div></div>
@@ -1463,7 +1440,7 @@
       <button class="primary" disabled={running || !canSendAudio} on:click={sendAudio}>{running ? 'Running…' : 'Send audio'}</button>
     </div>
     </div>
-    {#if useTts && selectedTtsModel?.family === 'zipvoice' && !voice && (!cloneVoiceFile || !cloneReferenceText.trim())}<p class="field-help">Choose reference audio and enter its matching transcript to enable ZipVoice cloning.</p>{/if}
+    {#if useTts && selectedTtsModel?.family === 'zipvoice' && (!cloneVoiceFile || !cloneReferenceText.trim())}<p class="field-help">Choose reference audio and enter its matching transcript to enable ZipVoice cloning.</p>{/if}
   </section>
 </div>
 

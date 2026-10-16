@@ -1030,6 +1030,11 @@ ServerState::ServerState(
         const auto voices = config_.voice_dir.has_value()
             ? resolve_path(request_base_, *config_.voice_dir) : request_base_ / "voices";
         voice_library_ = std::make_unique<VoiceLibrary>(voices / "saved");
+        for (const auto * name : {"lingCLvocals", "wangSG9s"}) {
+            if (const auto transcript = load_voice_library_text(voices, name)) {
+                voice_library_->import_reference(name, voices / (std::string(name) + ".wav"), *transcript);
+            }
+        }
         upload_root_ = std::filesystem::temp_directory_path() /
             ("audiocpp-ui-" + std::to_string(
                 std::chrono::duration_cast<std::chrono::microseconds>(

@@ -6,6 +6,9 @@ clients of this server. Recordings, names, and transcripts persist under
 browser voices are imported when that browser next opens either page; its local
 recordings remain as backups. Reload or return to the page to refresh the list.
 Deleting a saved voice removes it from the shared library for every client.
+The `lingCLvocals` and `wangSG9s` recordings and their reference transcripts are
+imported into this library automatically on startup. Pipeline voice selection
+uses the shared Saved voices menu.
 
 This Compose project builds one container containing the embedded Svelte WebUI,
 the native audio.cpp worker (diarization, STT, and TTS), llama.cpp, and a

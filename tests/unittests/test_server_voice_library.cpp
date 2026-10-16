@@ -54,6 +54,25 @@ int main() {
         restarted.erase("test-voice");
         require(json::parse(first.list()).require("voices").as_array().empty(), "shared deletion not visible");
         first.erase("test-voice");
+        const auto source = root / "reference.wav";
+        {
+            std::ofstream output(source, std::ios::binary);
+            output.write(reinterpret_cast<const char *>(wav.data()), wav.size());
+        }
+        first.import_reference("lingCLvocals", source, "志玲參考逐字稿");
+        first.import_reference("wangSG9s", source, "王先生參考逐字稿");
+        auto presets = json::parse(restarted.list()).require("voices").as_array();
+        require(presets.size() == 2, "both reference presets must be shared");
+        for (const auto & preset : presets) {
+            const auto name = preset.require("name").as_string();
+            require(preset.require("transcript").as_string() == (name == "lingCLvocals" ? "志玲參考逐字稿" : "王先生參考逐字稿"), "preset transcript mismatch");
+            require(minitts::server::base64_decode(preset.require("audio").as_string()) == wav, "preset WAV mismatch");
+        }
+        restarted.import_reference("lingCLvocals", source, "must not overwrite");
+        require(json::parse(first.list()).require("voices").as_array().size() == 2, "preset import duplicated a voice");
+        first.erase("preset-lingCLvocals");
+        restarted.import_reference("lingCLvocals", source, "must not resurrect");
+        require(json::parse(first.list()).require("voices").as_array().size() == 1, "deleted preset reappeared after restart");
         std::filesystem::remove_all(root);
         std::cout << "PASS: shared voices, persistence, Unicode/audio roundtrip, idempotent import, validation and deletion\n";
         return 0;

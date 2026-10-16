@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <mutex>
 #include <stdexcept>
 #include <string>
@@ -16,6 +17,32 @@ namespace minitts::server {
 class VoiceLibrary {
 public:
     explicit VoiceLibrary(std::filesystem::path root) : root_(std::move(root)) {}
+
+    void import_reference(const std::string & name, const std::filesystem::path & wav,
+                          const std::string & transcript) {
+        namespace json = engine::io::json;
+        const auto id = "preset-" + name;
+        validate_id(id);
+        const auto marker = root_ / (id + ".imported");
+        if (std::filesystem::exists(marker) || !std::filesystem::is_regular_file(wav)) return;
+        if (std::filesystem::file_size(wav) > 16 * 1024 * 1024) {
+            throw std::invalid_argument("Reference voice exceeds the 16 MiB limit");
+        }
+        std::ifstream input(wav, std::ios::binary);
+        if (!input) throw std::ios_base::failure("Could not read reference voice: " + wav.string());
+        const std::vector<uint8_t> audio((std::istreambuf_iterator<char>(input)), {});
+        if (input.bad()) throw std::ios_base::failure("Could not read reference voice: " + wav.string());
+        save(json::stringify(json::Value::make_object({
+            {"id", json::Value::make_string(id)}, {"name", json::Value::make_string(name)},
+            {"transcript", json::Value::make_string(transcript)},
+            {"createdAt", json::Value::make_number(0)},
+            {"audio", json::Value::make_string(base64_encode(audio))}
+        })));
+        // Import once, so deleting a preset also survives server restarts.
+        std::ofstream imported(marker);
+        imported.close();
+        if (!imported) throw std::ios_base::failure("Could not mark reference voice as imported");
+    }
 
     std::string list() {
         std::lock_guard<std::mutex> lock(mutex_);
