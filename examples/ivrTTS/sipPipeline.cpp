@@ -115,6 +115,7 @@ SipPipelineConfig SipPipelineConfig::from_environment() {
     config.llm_model = env("LLM_MODEL");
     if (config.llm_model.empty() || config.llm_model == "REPLACE_WITH_REGISTERED_LLM_ID")
         throw std::runtime_error("set LLM_MODEL to a registered LLM model ID");
+    config.use_rag = env("SIP_USE_RAG", "0") == "1";
     config.rag_url = base(env("RAG_URL", config.audio_url + "/v1/rag"));
     for (const auto& url : {config.audio_url, config.llm_url, config.rag_url})
         if (url.rfind("http://", 0) != 0 && url.rfind("https://", 0) != 0) throw std::runtime_error("pipeline URLs require HTTP(S)");
@@ -186,28 +187,32 @@ void SipPipeline::respond(const std::vector<unsigned char>& pcm) {
     auto transcript = post(config_.audio_url + "/v1/audio/transcriptions/details", stt.get(), stopping_);
     auto caller = text(transcript.get(), "text");
     if (caller.find_first_not_of(" \r\n\t") == std::string::npos) { resume(); return; }
-    std::cout << "Caller: " << caller << "\nPipeline: RAG\n";
-    auto init = object(); json_object_object_add(init.get(), "protocolVersion", json_object_new_int(1));
-    auto client = object(); add(client.get(), "name", "ivrTTS-SIP"); add(client.get(), "version", "1.0");
-    json_object_object_add(init.get(), "client", json_object_get(client.get()));
-    json_object_object_add(init.get(), "capabilities", json_object_new_object());
-    rpc(config_.rag_url + "/initialize", "initialize", init.get(), stopping_);
-    auto query = object(); add(query.get(), "query", caller); add(query.get(), "mode", "hybrid");
-    json_object_object_add(query.get(), "k", json_object_new_int(5));
-    json_object_object_add(query.get(), "includeText", json_object_new_boolean(true));
-    auto knowledge = rpc(config_.rag_url + "/retrieve", "retrieve", query.get(), stopping_);
-    auto* result = member(knowledge.get(), "result");
-    if (!result) throw std::runtime_error("RAG response has no result");
-    std::string context = text(result, "summary");
-    auto* hits = member(result, "hits");
-    if (hits && json_object_is_type(hits, json_type_array)) {
-        for (size_t i = 0; i < std::min(size_t(5), json_object_array_length(hits)); ++i) {
-            auto passage = text(json_object_array_get_idx(hits, i), "text");
-            if (!passage.empty()) context += "\n" + passage.substr(0, 4000);
+    std::cout << "Caller: " << caller << "\n";
+    std::string context;
+    if (config_.use_rag) {
+        std::cout << "Pipeline: RAG\n";
+        auto init = object(); json_object_object_add(init.get(), "protocolVersion", json_object_new_int(1));
+        auto client = object(); add(client.get(), "name", "ivrTTS-SIP"); add(client.get(), "version", "1.0");
+        json_object_object_add(init.get(), "client", json_object_get(client.get()));
+        json_object_object_add(init.get(), "capabilities", json_object_new_object());
+        rpc(config_.rag_url + "/initialize", "initialize", init.get(), stopping_);
+        auto query = object(); add(query.get(), "query", caller); add(query.get(), "mode", "hybrid");
+        json_object_object_add(query.get(), "k", json_object_new_int(5));
+        json_object_object_add(query.get(), "includeText", json_object_new_boolean(true));
+        auto knowledge = rpc(config_.rag_url + "/retrieve", "retrieve", query.get(), stopping_);
+        auto* result = member(knowledge.get(), "result");
+        if (!result) throw std::runtime_error("RAG response has no result");
+        context = text(result, "summary");
+        auto* hits = member(result, "hits");
+        if (hits && json_object_is_type(hits, json_type_array)) {
+            for (size_t i = 0; i < std::min(size_t(5), json_object_array_length(hits)); ++i) {
+                auto passage = text(json_object_array_get_idx(hits, i), "text");
+                if (!passage.empty()) context += "\n" + passage.substr(0, 4000);
+            }
         }
+        context = context.substr(0, 20000);
+        if (context.empty()) context = "No relevant records were found.";
     }
-    context = context.substr(0, 20000);
-    if (context.empty()) context = "No relevant records were found.";
     std::cout << "Pipeline: LLM\n";
     auto llm = object(); add(llm.get(), "model", config_.llm_model);
     json_object_object_add(llm.get(), "stream", json_object_new_boolean(false));
@@ -219,7 +224,7 @@ void SipPipeline::respond(const std::vector<unsigned char>& pcm) {
         json_object_array_add(messages, json_object_get(item.get()));
     };
     json_object_object_add(llm.get(), "messages", messages);
-    message("system", config_.prompt + "\n\nRetrieved reference data:\n" + context);
+    message("system", config_.prompt + (config_.use_rag ? "\n\nRetrieved reference data:\n" + context : ""));
     for (const auto& previous : history_) message(previous.first, previous.second);
     message("user", caller);
     auto completion = post(config_.llm_url + "/chat/completions", llm.get(), stopping_, env("LLM_API_KEY"));
@@ -229,9 +234,19 @@ void SipPipeline::respond(const std::vector<unsigned char>& pcm) {
     auto answer = text(member(json_object_array_get_idx(choices, 0), "message"), "content");
     if (answer.empty()) throw std::runtime_error("LLM returned no reply text");
     std::cout << "Assistant: " << answer << "\nPipeline: TTS\n";
+    // The spoken form is separate from the original answer/history. Even if
+    // the LLM misses the prompt's pronunciation rules, never send ASCII digits
+    // to Chinese TTS, which can otherwise pronounce mixed IDs in English.
+    static const char* digits[] = {"零", "一", "二", "三", "四", "伍", "六", "七", "八", "九"};
+    std::string spoken;
+    for (unsigned char c : answer) {
+        if (c >= '0' && c <= '9') spoken += digits[c - '0'];
+        else spoken += static_cast<char>(c);
+    }
+    std::cout << "TTS text: " << spoken << "\n";
     ivrTTS tts; tts.create(config_.audio_url, config_.tts_model, config_.voice);
     std::vector<unsigned char> output;
-    tts.run_stream(answer, [&](const unsigned char* bytes, size_t size) { output.insert(output.end(), bytes, bytes + size); },
+    tts.run_stream(spoken, [&](const unsigned char* bytes, size_t size) { output.insert(output.end(), bytes, bytes + size); },
                    ivrTTS::AudioMode::Wav, [&] { return stopping_.load(); });
     history_.emplace_back("user", caller); history_.emplace_back("assistant", answer);
     if (history_.size() > 12) history_.erase(history_.begin(), history_.begin() + 2);

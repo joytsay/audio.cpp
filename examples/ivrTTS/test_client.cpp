@@ -637,7 +637,7 @@ void test_sip(const std::string& executable) {
         check(reference(greeting.get()) == b64(read_file(std::filesystem::path(TEST_VOICES) / "lingCLvocals.wav")), "#1 greeting reference is not lingCL");
         check(reference(alternate_greeting.get()) == b64(read_file(std::filesystem::path(TEST_VOICES) / "wangSG9s.wav")), "#2 greeting reference is not WangSG");
         check(client.output.find("Playing welcome greeting.") != std::string::npos, "greeting did not start on call establishment");
-        for (const char* route : {"/v1/tasks/run", "/v1/audio/transcriptions/details", "/v1/rag/retrieve", "/v1/chat/completions", "/v1/audio/speech"})
+        for (const char* route : {"/v1/tasks/run", "/v1/audio/transcriptions/details", "/v1/chat/completions", "/v1/audio/speech"})
             check(std::any_of(requests.begin(), requests.end(), [&](const auto& request) { return request.first == route; }),
                   std::string("RTP conversation skipped ") + route);
     }
@@ -707,14 +707,25 @@ void test_pipeline() {
             }
             if (request.first == "/v1/chat/completions") {
                 auto json = parse(request.second); json_object* messages = nullptr; json_object_object_get_ex(json.get(), "messages", &messages);
-                check(field(json_object_array_get_idx(messages, 0), "content").find("floor 3") != std::string::npos, "RAG context not given to LLM");
+                check(field(json_object_array_get_idx(messages, 0), "content") == config.prompt, "system prompt changed in prompt-only mode");
                 check(json_object_array_length(messages) == (llm_count ? 4 : 2), "conversation history missing"); ++llm_count;
             }
         }
+        check(std::none_of(requests.begin(), requests.end(), [](const auto& request) { return request.first.find("/v1/rag/") == 0; }), "prompt-only mode called RAG");
+        size_t tts_count = 0;
+        for (const auto& request : requests) {
+            if (request.first == "/v1/audio/speech") {
+                auto json = parse(request.second);
+                check(field(json.get(), "input") == "The office is on floor 三.", "TTS received an unnormalized digit");
+                ++tts_count;
+            }
+        }
+        check(tts_count == 2, "normalized TTS requests missing");
         check(stt_count == 2 && llm_count == 2, "pipeline skipped a turn");
     }
     {
-        server.rag_fails = true; SipPipeline pipeline(config); pipeline.resume(); send_turn(pipeline);
+        auto rag_config = config; rag_config.use_rag = true;
+        server.rag_fails = true; SipPipeline pipeline(rag_config); pipeline.resume(); send_turn(pipeline);
         auto deadline = Clock::now() + 6s;
         while (pipeline.error().empty() && Clock::now() < deadline) std::this_thread::sleep_for(10ms);
         check(pipeline.error().find("503") != std::string::npos, "RAG failure was silently ignored"); server.rag_fails = false;

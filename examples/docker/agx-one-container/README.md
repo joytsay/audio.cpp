@@ -273,3 +273,13 @@ Leave `COMPOSE_PROFILES` empty to start only the web/inference services. The
 standalone [coturn Compose file](../cotrun/compose.yml) remains available, but do
 not start both coturn services on the same host ports. TURN carries audio;
 SIP registration and ACKs still go directly through your SIP proxy.
+
+### SIP prompt-only grounding
+
+The SIP service reads `/app/prompt.csv` through `SYSTEM_PROMPT_FILE` at client
+startup. It sends that system prompt and conversation history directly to the
+LLM. `SIP_USE_RAG=0` is the default: SIP calls do not query the RAG service.
+Set `SIP_USE_RAG=1` in `.env` to additionally retrieve reference passages.
+Recreate the SIP container after changing environment settings, and restart it
+after editing the mounted prompt. Existing calls retain their loaded prompt.
+The browser Conversation knowledge-base selector is independent of SIP.

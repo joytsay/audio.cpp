@@ -141,11 +141,14 @@ services:
       STT_MODEL: ${SIP_STT_MODEL:-qwen3-asr}
       STT_LANGUAGE: ${SIP_STT_LANGUAGE:-}
       STT_HOTWORDS_FILE: /app/hotword.csv
+      SYSTEM_PROMPT_FILE: /app/prompt.csv
+      SIP_USE_RAG: ${SIP_USE_RAG:-0}
       TTS_MODEL: ${SIP_TTS_MODEL:-zipvoice}
       TTS_VOICE: ${SIP_TTS_VOICE:-lingCL}
       IVRTTS_VOICE_DIR: /opt/sip/share/voices
     volumes:
       - ../../../hotword.csv:/app/hotword.csv:ro
+      - ../../../prompt.csv:/app/prompt.csv:ro
       - ../../../.devops/sip-entrypoint.sh:/app/sip-entrypoint.sh:ro
 
   coturn:

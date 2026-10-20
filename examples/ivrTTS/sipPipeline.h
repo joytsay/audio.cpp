@@ -11,6 +11,7 @@
 
 struct SipPipelineConfig {
     std::string audio_url, llm_url, llm_model, rag_url;
+    bool use_rag = false;
     std::string vad_model = "silero-vad", stt_model = "qwen3-asr", tts_model = "zipvoice";
     std::string hotwords, prompt, language, voice = "lingCL";
     static SipPipelineConfig from_environment();
