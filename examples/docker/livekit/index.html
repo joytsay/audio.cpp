@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="zh-Hant">
+<meta charset="utf-8"><meta name="viewport" content="width=device-width">
+<title>audio.cpp · LiveKit Console</title>
+<style>
+:root{color-scheme:dark;--bg:#10151d;--panel:#19212d;--line:#303d4e;--text:#e5ecf5;--muted:#a4b4c9;--accent:#78dfbd}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px system-ui}header{padding:24px 32px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center;gap:15px}h1{font-size:23px;margin:0}small,.hint{color:var(--muted)}main{max-width:1550px;margin:auto;padding:24px;display:grid;grid-template-columns:minmax(300px,420px) 1fr;gap:24px}section,details{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px;margin-bottom:16px}summary{cursor:pointer;font-weight:650}label{display:block;margin-top:14px;color:var(--muted);font-size:13px}input,select,textarea,button{font:inherit;border:1px solid var(--line);border-radius:7px;background:#111925;color:var(--text);padding:10px}input:not([type=checkbox]),select,textarea{width:100%;margin-top:5px}textarea{resize:vertical;line-height:1.6}input[type=checkbox]{accent-color:var(--accent)}button{cursor:pointer}button:disabled{opacity:.4;cursor:default}button.primary{background:var(--accent);color:#10251e;border-color:var(--accent);font-weight:650}.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.row>*{flex:1}.toolbar{display:flex;gap:10px;flex-wrap:wrap}.badge{border:1px solid var(--line);padding:6px 12px;border-radius:30px;font-size:13px}#agent-state{color:var(--accent)}#conversation{min-height:340px;max-height:58vh;overflow:auto}.message{padding:14px;border:1px solid var(--line);border-radius:10px;margin:12px 0;white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.7}.message.assistant{border-left:3px solid var(--accent)}.message small{display:block;font-size:11px}#logs{max-height:180px;overflow:auto;white-space:pre-wrap;font:12px monospace;color:var(--muted)}.meter{height:7px;background:#0e1520;border-radius:5px;overflow:hidden}.meter span{display:block;height:100%;width:0;background:var(--accent)}#error{color:#ffb2a9;white-space:pre-wrap}#partial{min-height:25px;color:var(--muted);margin-top:12px}#room{font:12px monospace;overflow-wrap:anywhere}h2{font-size:17px;margin-top:0}#audio{display:none}.empty{color:var(--muted);padding:40px 10px;text-align:center}fieldset{border:0;padding:0;margin:0}a{color:var(--accent)}@media(max-width:850px){main{grid-template-columns:1fr;padding:12px}header{padding:18px}aside{order:2}}
+</style>
+<header><div><h1>audio.cpp <span style="color:var(--accent)">LiveKit Console</span></h1><small>Local voice agent · Jetson AGX Orin</small></div><span class="badge" id="status" role="status">Disconnected</span></header>
+<main><aside>
+<section><h2>Session settings</h2><p class="hint">設定套用於下一次連線。麥克風與播放控制可即時調整。</p><div class="toolbar"><button id="defaults">Reload defaults</button><button id="export-settings">Export settings</button><button id="import-settings">Import</button><input hidden id="import-file" type="file" accept="application/json"></div></section>
+<fieldset id="settings">
+<details open><summary>Speech recognition · STT</summary>
+<label>API base URL<input data-key="stt_url" type="url"></label>
+<label>Model ID<input data-key="stt_model" list="stt-models"></label><datalist id="stt-models"></datalist><button data-models="stt">Load models / check API</button>
+<label>Language<input data-key="language" placeholder="zh"></label>
+<label><input data-key="hotwords_enabled" type="checkbox"> Enable hotwords</label><label>Recognition context<textarea data-key="hotwords" rows="3"></textarea></label>
+</details>
+<details><summary>Language model · LLM</summary><label>API base URL<input data-key="llm_url" type="url"></label><label>Model ID<input data-key="llm_model" list="llm-models"></label><datalist id="llm-models"></datalist><button data-models="llm">Load models / check API</button>
+<div class="row"><label>Temperature<input data-key="temperature" type="number" min="0" max="2" step="0.1"></label><label>Max output tokens<input data-key="max_tokens" type="number" min="32" max="4096" step="1"></label></div>
+</details>
+<details><summary>Speech synthesis · TTS</summary><label>API base URL<input data-key="tts_url" type="url"></label><label>Model ID<input data-key="tts_model" list="tts-models"></label><datalist id="tts-models"></datalist><button data-models="tts">Load models / check API</button>
+<label>Voice<input data-key="voice" list="voices"></label><datalist id="voices"><option value="lingCL"><option value="WangSG"></datalist>
+<label><input data-key="chinese_numbers" type="checkbox"> Read remaining digits in Chinese</label>
+</details>
+<details><summary>Turn detection & interruptions</summary>
+<div class="row"><label>Min turn delay (s)<input data-key="endpoint_delay" type="number" min="0" max="10" step="0.1"></label><label>Max turn delay (s)<input data-key="max_endpoint_delay" type="number" min="0" max="15" step="0.1"></label></div>
+<div class="row"><label>VAD threshold<input data-key="vad_threshold" type="number" min="0.05" max="0.95" step="0.05"></label><label>VAD silence (s)<input data-key="vad_silence" type="number" min="0.1" max="5" step="0.05"></label></div>
+<label><input data-key="interruptions" type="checkbox"> Allow microphone interruptions</label><label>Min interruption duration (s)<input data-key="interruption_duration" type="number" min="0.1" max="5" step="0.1"></label>
+<label><input data-key="preemptive" type="checkbox"> Preemptive generation</label><label>Backend timeout (s)<input data-key="timeout" type="number" min="5" max="600"></label>
+</details>
+<details><summary>Prompt & greeting</summary><label>System instructions<textarea data-key="prompt" rows="14"></textarea></label><label>Greeting<textarea data-key="greeting" rows="3"></textarea></label><p class="hint">Session override only. Mounted prompt.csv and hotword.csv remain unchanged.</p></details>
+</fieldset>
+</aside><div>
+<section><div class="toolbar"><button class="primary" id="connect" disabled>Connect</button><button id="disconnect" disabled>Disconnect</button><button id="mute" disabled>Mute mic</button><button id="enable-audio" disabled>Enable audio</button></div>
+<div class="row"><label>Microphone<select id="microphone"><option value="default">System default</option></select></label><label>Speaker<select id="speaker"><option value="default">System default</option></select></label></div>
+<label>Playback volume <input id="volume" type="range" min="0" max="1" step="0.05" value="1"></label><div class="meter" aria-label="Microphone level"><span id="level"></span></div>
+<p><span class="badge" id="agent-state">Agent offline</span> <small id="quality"></small></p><div id="room"></div><p id="error" role="alert"></p></section>
+<section><div class="row"><h2>Conversation</h2><div class="toolbar"><button id="clear">Clear view</button><button id="download">Download transcript</button></div></div><div id="conversation" role="log" aria-live="polite"><p class="empty">Connect to start a conversation.</p></div><div id="partial"></div>
+<form id="text-form"><label>Text message</label><div class="row"><input id="text" placeholder="輸入文字，或使用麥克風…" autocomplete="off"><button id="send" disabled>Send</button></div></form></section>
+<details><summary>Connection events</summary><pre id="logs"></pre></details>
+</div></main><div id="audio"></div><script type="module" src="/client.js"></script></html>

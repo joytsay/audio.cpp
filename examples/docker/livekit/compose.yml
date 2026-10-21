@@ -1,0 +1,60 @@
+name: audiocpp-livekit
+services:
+  livekit:
+    image: livekit/livekit-server:v1.9.0
+    network_mode: host
+    restart: unless-stopped
+    entrypoint: ["/livekit-server"]
+    command:
+      - --dev
+      - --bind
+      - 0.0.0.0
+      - --node-ip
+      - ${LIVEKIT_NODE_IP:?Set LIVEKIT_NODE_IP to the Jetson LAN IPv4 address in .env}
+      - --port
+      - ${LIVEKIT_PORT:-7880}
+      - --keys
+      - '${LIVEKIT_API_KEY:-devkey}: ${LIVEKIT_API_SECRET:-secret}'
+      - --config-body
+      - 'rtc: {tcp_port: ${LIVEKIT_TCP_PORT:-7881}, udp_port: ${LIVEKIT_UDP_PORT:-7882}}'
+  agent:
+    build: .
+    network_mode: host
+    restart: unless-stopped
+    depends_on: [livekit]
+    env_file: .env
+    environment:
+      LIVEKIT_URL: ws://127.0.0.1:${LIVEKIT_PORT:-7880}
+      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY:-devkey}
+      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET:-secret}
+      LIVEKIT_NODE_IP: ${LIVEKIT_NODE_IP}
+      LIVEKIT_PORT: ${LIVEKIT_PORT:-7880}
+      LIVEKIT_PUBLIC_URL: ${LIVEKIT_PUBLIC_URL:-wss://${LIVEKIT_NODE_IP}:${LIVEKIT_HTTPS_PORT:-8093}/livekit}
+      WEB_PORT: ${WEB_PORT:-8090}
+      ADAPTER_PORT: ${ADAPTER_PORT:-8095}
+      STT_BASE_URL: ${STT_BASE_URL:-http://127.0.0.1:8081/v1}
+      TTS_BASE_URL: ${TTS_BASE_URL:-http://127.0.0.1:8081/v1}
+      LLM_BASE_URL: ${LLM_BASE_URL:-http://127.0.0.1:8082/v1}
+    volumes:
+      - ../../../prompt.csv:/data/prompt.csv:ro
+      - ../../../hotword.csv:/data/hotword.csv:ro
+      - ../../../voices:/data/voices:ro
+
+  https:
+    image: caddy:2.11.4-alpine
+    network_mode: host
+    restart: unless-stopped
+    depends_on: [livekit, agent]
+    environment:
+      LIVEKIT_NODE_IP: ${LIVEKIT_NODE_IP}
+      LIVEKIT_HTTPS_PORT: ${LIVEKIT_HTTPS_PORT:-8093}
+      LIVEKIT_PORT: ${LIVEKIT_PORT:-7880}
+      WEB_PORT: ${WEB_PORT:-8090}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - https-data:/data
+      - https-config:/config
+
+volumes:
+  https-data:
+  https-config:

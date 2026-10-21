@@ -1,0 +1,19 @@
+{
+    auto_https disable_redirects
+    skip_install_trust
+    admin off
+    default_sni {$LIVEKIT_NODE_IP}
+}
+
+https://{$LIVEKIT_NODE_IP}:{$LIVEKIT_HTTPS_PORT:8093} {
+    tls internal
+
+    # Strip /livekit before forwarding signaling, including /rtc and validation.
+    handle_path /livekit/* {
+        reverse_proxy 127.0.0.1:{$LIVEKIT_PORT:7880}
+    }
+
+    handle {
+        reverse_proxy 127.0.0.1:{$WEB_PORT:8090}
+    }
+}
