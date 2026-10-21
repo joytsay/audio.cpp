@@ -92,6 +92,7 @@ LD_LIBRARY_PATH="/opt/llama.cpp${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" \
     --host 0.0.0.0 \
     --port 8082 \
     --models-dir /app/llama-models \
+    --jinja \
     --models-max "${LLAMA_MODELS_MAX:-1}" \
     --ctx-size "${LLAMA_CTX_SIZE:-4096}" \
     --n-gpu-layers "${LLAMA_GPU_LAYERS:-99}" &

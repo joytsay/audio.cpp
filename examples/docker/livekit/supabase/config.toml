@@ -1,0 +1,5 @@
+project_id = "audiocpp-voice-memory"
+
+[functions.embed]
+# The handler authenticates its server-only shared secret explicitly.
+verify_jwt = false

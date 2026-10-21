@@ -1,5 +1,7 @@
 import {Room, RoomEvent} from 'livekit-client';
+import {createClient} from '@supabase/supabase-js';
 const $ = id => document.getElementById(id);
+let supabase, memoryUser, memoryChannel, memoryTimer, refreshVersion = 0;
 let room, busy = false, audioContext, analyser, meterSource, frame;
 const messages = new Map();
 const log = text => { $('logs').textContent = (new Date().toLocaleTimeString() + ' ' + text + '\n' + $('logs').textContent).slice(0, 18000); };
@@ -16,10 +18,23 @@ function fillSettings(data) {
   }
 }
 async function api(path, body) {
-  const response = await fetch(path, body === undefined ? {} : {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+  const headers = {'Content-Type': 'application/json'};
+  if (supabase) { const {data} = await supabase.auth.getSession(); if (data.session) headers.Authorization = 'Bearer ' + data.session.access_token; }
+  const response = await fetch(path, body === undefined ? {headers} : {method: 'POST', headers, body: JSON.stringify(body)});
   const result = await response.json();
+  if (response.status === 401 && supabase) {
+    await clearMemorySession();
+    throw new Error('Memory identity expired or was removed. Click Connect memory identity, then reconnect the call.');
+  }
   if (!response.ok) throw new Error(typeof result.detail === 'string' ? result.detail : JSON.stringify(result.detail || result));
   return result;
+}
+async function clearMemorySession() {
+  // Clear this browser only; after a DB reset the old account no longer exists.
+  const {error} = await supabase.auth.signOut({scope: 'local'});
+  if (error) log('Local memory sign-out: ' + error.message);
+  await memoryIdentity(null);
+  $('memory-info').textContent = 'Memory identity expired or was removed. Click Connect memory identity to continue.';
 }
 function controls(connected) {
   $('connect').disabled = busy || connected;
@@ -27,6 +42,8 @@ function controls(connected) {
   $('settings').disabled = connected || busy;
   $('defaults').disabled = connected || busy;
   $('import-settings').disabled = connected || busy;
+  $('memory-login').disabled = !supabase || Boolean(memoryUser) || connected || busy;
+  $('memory-logout').disabled = !memoryUser || connected || busy;
 }
 function message(id, role, text, final = true) {
   if (!text) return;
@@ -76,7 +93,12 @@ $('connect').onclick = async () => {
   busy = true; controls(false); $('error').textContent = ''; $('status').textContent = 'Connecting…';
   let current;
   try {
-    const config = await api('/connect', readSettings());
+    if (readSettings().memory_enabled && !memoryUser) throw new Error('Connect a Supabase memory identity before enabling memory.');
+    const settings = readSettings();
+    $('persistence-status').textContent = settings.memory_enabled
+      ? 'Personal memory and conversation history enabled for this call.'
+      : 'Memory disabled for this call. Reconnect with Persistent memory enabled to save memories and history.';
+    const config = await api('/connect', settings);
     current = room = new Room();
     current.on(RoomEvent.TrackSubscribed, (track) => {
       if (track.kind === 'audio') {
@@ -88,11 +110,22 @@ $('connect').onclick = async () => {
     current.on(RoomEvent.Disconnected, reason => { if (room === current) { room = null; disconnected(); log('Disconnected: ' + reason); } });
     current.on(RoomEvent.Reconnecting, () => { $('status').textContent = 'Reconnecting…'; log('Reconnecting'); });
     current.on(RoomEvent.Reconnected, () => { $('status').textContent = 'Connected'; });
+    current.on(RoomEvent.DataReceived, (bytes, participant, kind, topic) => {
+      if (topic !== 'audiocpp.persistence') return;
+      try {
+        const event = JSON.parse(new TextDecoder().decode(bytes));
+        handlePersistenceEvent(event);
+      } catch (error) { memoryError(error); }
+    });
     current.on(RoomEvent.TranscriptionReceived, (segments, participant) => {
       const role = participant?.identity === current.localParticipant.identity ? 'user' : 'assistant';
       segments.forEach(s => message(`${participant?.identity}:${s.id}`, role, s.text, s.final));
     });
     const state = participant => {
+      const persistence = participant.attributes?.['audiocpp.persistence'];
+      if (persistence) {
+        try { handlePersistenceEvent(JSON.parse(persistence)); } catch (error) { memoryError(error); }
+      }
       const value = participant.attributes?.['lk.agent.state'];
       if (value) { $('agent-state').textContent = 'Agent: ' + value; log('Agent: ' + value); }
     };
@@ -137,3 +170,109 @@ for (const button of document.querySelectorAll('[data-models]')) button.onclick 
 try { fillSettings(await api('/settings')); controls(false); await devices(); } catch (error) { fail(error); }
 if (!navigator.mediaDevices) fail('Microphone requires trusted HTTPS or localhost.');
 else navigator.mediaDevices.addEventListener('devicechange', () => devices().catch(fail));
+
+
+function memoryError(error) { $('memory-error').textContent = String(error); log('Memory: ' + error); }
+function cell(row, text) { const td = document.createElement('td'); td.style.cssText = 'padding:10px;border-bottom:1px solid var(--line);white-space:pre-wrap;overflow-wrap:anywhere;max-width:420px'; td.textContent = text == null ? '' : typeof text === 'object' ? JSON.stringify(text) : String(text); row.appendChild(td); return td; }
+async function refreshMemory() {
+  const version = ++refreshVersion;
+  if (!supabase || !memoryUser) return;
+  const kind = $('memory-table').value;
+  const columns = {memories:'id,user_id,memory_type,content,updated_at', sessions:'room,user_id,status,started_at,ended_at,report', turns:'id,user_id,room,role,content,created_at'};
+  const order = {memories:'updated_at',sessions:'started_at',turns:'created_at'};
+  let query = supabase.from('voice_' + kind).select(columns[kind]).order(order[kind], {ascending:false}).limit(50);
+  const {data, error} = await query;
+  if (version !== refreshVersion) return;
+  if (error) throw error;
+  $('memory-error').textContent = '';
+  const header = $('memory-grid').querySelector('thead'), body = $('memory-grid').querySelector('tbody'); header.replaceChildren(); body.replaceChildren();
+  const keys = columns[kind].split(',').filter(key => key !== 'user_id');
+  const labels = {reported_at:'回報時間',customer:'客戶',work_order_name:'工單名稱',site_code:'廠區代碼',test_result:'起機結果',equipment_id:'設備編號',maintenance_type:'保養項目',exhaust_fan_quantity:'強排FAN數量',panel_fan_quantity:'間面FAN數量',part_number:'料號',serial_number:'序號',manufactured_on:'製造日期',capacitance_value:'電容值',capacitance_unit:'單位',source_text:'原始回報',readback_text:'語音複誦'};
+  const head = document.createElement('tr'); keys.forEach(key => cell(head,labels[key] ? labels[key] + ' (' + key + ')' : key)); cell(head,'Actions'); header.appendChild(head);
+  for (const item of data || []) {
+    const tr = document.createElement('tr'); keys.forEach(key => cell(tr,item[key])); const actions = cell(tr,'');
+    if (kind === 'memories') {
+      const edit = document.createElement('button'); edit.textContent = 'Edit'; edit.onclick = () => {
+        $('memory-kind').value = kind; $('memory-key').value = item.title || item.memory_type; $('memory-content').value = item.content;
+        $('memory-form').closest('details').open = true;
+      }; actions.appendChild(edit);
+      const remove = document.createElement('button'); remove.textContent = 'Delete'; remove.onclick = async () => {
+        if (!confirm('Delete this ' + kind + ' row?')) return;
+        try { const {data} = await supabase.auth.getSession(); const response = await fetch('/memory/rows/' + kind + '/' + item.id, {method:'DELETE',headers:{Authorization:'Bearer ' + data.session.access_token}}); if (!response.ok) throw new Error(await response.text()); await refreshMemory(); } catch (error) { memoryError(error); }
+      }; actions.appendChild(remove);
+    }
+    body.appendChild(tr);
+  }
+  if (!data?.length) { const tr = document.createElement('tr'); cell(tr,'No rows yet.'); body.appendChild(tr); }
+}
+async function subscribeMemory() {
+  if (memoryChannel) await supabase.removeChannel(memoryChannel);
+  if (!memoryUser) return;
+  memoryChannel = supabase.channel('voice-tables-' + memoryUser.id);
+  for (const table of ['voice_memories','voice_sessions','voice_turns']) {
+    memoryChannel.on('postgres_changes', {event:'*',schema:'public',table}, () => {
+      clearTimeout(memoryTimer); memoryTimer = setTimeout(() => refreshMemory().catch(memoryError), 150);
+    });
+  }
+  memoryChannel.subscribe(status => {
+    $('memory-status').textContent = status === 'SUBSCRIBED' ? 'Live updates connected' : 'Realtime: ' + status;
+    if (status === 'SUBSCRIBED') refreshMemory().catch(memoryError);
+    if (['CHANNEL_ERROR','TIMED_OUT'].includes(status)) memoryError('Realtime unavailable; check publication, RLS and WebSocket connectivity. Use Refresh while reconnecting.');
+  });
+  await refreshMemory();
+}
+async function memoryIdentity(session) {
+  memoryUser = session?.user;
+  $('memory-info').textContent = memoryUser ? 'Shared workspace · connected identity: ' + memoryUser.id : 'Connect an identity to access shared memories and history.';
+  for (const id of ['memory-refresh','memory-save']) $(id).disabled = !memoryUser;
+  controls(Boolean(room));
+  if (memoryUser) await subscribeMemory();
+  else { ++refreshVersion; clearTimeout(memoryTimer); if (memoryChannel) await supabase.removeChannel(memoryChannel); memoryChannel = null; $('memory-grid').querySelector('tbody').replaceChildren(); $('memory-grid').querySelector('thead').replaceChildren(); $('memory-status').textContent = 'Signed out'; }
+}
+$('memory-login').onclick = async () => {
+  try { const {data,error} = await supabase.auth.signInAnonymously(); if (error) throw error; await memoryIdentity(data.session); } catch (error) { memoryError(error); }
+};
+$('memory-logout').onclick = async () => { try { await clearMemorySession(); } catch (error) { memoryError(error); } };
+$('memory-refresh').onclick = () => refreshMemory().catch(memoryError);
+$('memory-table').onchange = () => refreshMemory().catch(memoryError);
+$('memory-form').onsubmit = async event => {
+  event.preventDefault(); $('memory-save').disabled = true;
+  try { await api('/memory/rows', {kind:'memories',key:$('memory-key').value,content:$('memory-content').value}); $('memory-table').value = 'memories'; await refreshMemory(); log('Personal memory saved'); }
+  catch (error) { memoryError(error); } finally { $('memory-save').disabled = !memoryUser; }
+};
+try {
+  const config = await api('/memory/config');
+  if (config.enabled) {
+    supabase = createClient(config.url, config.publishable_key);
+    const {data,error} = await supabase.auth.getSession();
+    if (error) {
+      if ([400,401,403].includes(error.status)) await clearMemorySession();
+      else throw error;
+    } else if (data.session) {
+      // getSession reads local storage; getUser verifies the account still exists.
+      const verified = await supabase.auth.getUser();
+      if (verified.error) {
+        if ([401,403,404].includes(verified.error.status)) await clearMemorySession();
+        else throw verified.error;
+      } else await memoryIdentity(data.session);
+    } else await memoryIdentity(null);
+    // Defer work outside the Supabase auth callback to avoid refresh deadlocks.
+    supabase.auth.onAuthStateChange((event, session) => {
+      if (event === 'SIGNED_OUT') setTimeout(() => memoryIdentity(null).catch(memoryError), 0);
+      if (event === 'TOKEN_REFRESHED' && session) supabase.realtime.setAuth(session.access_token);
+    });
+  } else $('memory-info').textContent = 'Set Supabase environment variables and apply supabase/001_voice_memory.sql to enable this panel.';
+} catch (error) { memoryError(error); }
+
+export function handlePersistenceEvent(event) {
+        if (!['ready','checking','unchanged','pending','saving','saved','error'].includes(event.state)) return;
+        const labels = {ready:'記憶處理器已連線',checking:'正在讀取記憶',unchanged:'本輪無需更新記憶',pending:'等待記憶儲存',saving:'正在儲存記憶',saved:'記憶已儲存至 Supabase',error:'記憶未儲存'};
+        $('persistence-status').textContent = labels[event.state] + ' — ' + event.detail;
+        log('Memory write: ' + event.state + ' / ' + event.detail);
+        if (event.state === 'error') $('memory-error').textContent = event.detail;
+        if (event.state === 'saved') {
+          $('memory-error').textContent = '';
+          $('memory-table').value = 'memories';
+          refreshMemory().catch(memoryError);
+        }
+}

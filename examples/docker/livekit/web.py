@@ -1,6 +1,7 @@
 """LAN development client and local participant-token endpoint."""
 import os
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from memory import public_config, verified_user, save_identity, Store, MemoryRow
 import httpx
 from settings import Settings, defaults, save_session
 from fastapi.responses import FileResponse
@@ -20,10 +21,15 @@ async def javascript():
 
 
 @app.post('/connect')
-async def connect(settings: Settings):
+async def connect(settings: Settings, request: Request):
     import uuid
     room = 'maintenance-' + uuid.uuid4().hex[:12]
-    save_session(room, settings)
+    if settings.memory_enabled:
+        user_id = await verified_user(request.headers.get("authorization"))
+        save_session(room, settings)
+        save_identity(room, user_id)
+    else:
+        save_session(room, settings)
     token = (api.AccessToken(os.environ['LIVEKIT_API_KEY'], os.environ['LIVEKIT_API_SECRET'])
              .with_identity('operator-' + uuid.uuid4().hex[:12])
              .with_grants(api.VideoGrants(room_join=True, room=room)))
@@ -49,3 +55,33 @@ async def models(kind: str, settings: Settings):
             return response.json()
     except httpx.HTTPError as error:
         raise HTTPException(502, str(error)) from error
+
+
+@app.get('/memory/config')
+async def memory_config():
+    return public_config()
+
+
+@app.post('/memory/rows')
+async def put_memory_row(row: MemoryRow, request: Request):
+    user_id = await verified_user(request.headers.get('authorization'))
+    try:
+        return await Store(user_id).upsert(row.kind, row.key, row.content)
+    except (httpx.HTTPError, ValueError) as error:
+        raise HTTPException(502, 'Could not save memory; check database and Supabase embedding function') from error
+
+
+@app.delete('/memory/rows/{kind}/{row_id}')
+async def delete_memory_row(kind: str, row_id: str, request: Request):
+    import uuid
+    if kind != 'memories':
+        raise HTTPException(404)
+    try:
+        uuid.UUID(row_id)
+    except ValueError:
+        raise HTTPException(400, 'Invalid row ID')
+    user_id = await verified_user(request.headers.get('authorization'))
+    result = await Store(user_id).delete(kind, row_id)
+    if not result:
+        raise HTTPException(404, 'Owned row not found')
+    return {'deleted': True}

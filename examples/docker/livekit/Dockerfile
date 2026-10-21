@@ -1,6 +1,6 @@
 FROM node:22-bookworm-slim AS web-build
 WORKDIR /web
-RUN npm install --save-exact livekit-client@2.15.6 esbuild@0.25.5
+RUN npm install --save-exact livekit-client@2.15.6 @supabase/supabase-js@2.49.8 esbuild@0.25.5
 COPY client.js .
 RUN ./node_modules/.bin/esbuild client.js --bundle --format=esm --outfile=bundle.js
 
@@ -10,7 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 && rm 
 ENV PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
 COPY requirements.txt .
 RUN pip install -r requirements.txt
-COPY agent.py adapter.py web.py settings.py index.html entrypoint.sh ./
+COPY agent.py adapter.py web.py settings.py memory.py personal_memory_agent.py index.html entrypoint.sh ./
 COPY --from=web-build /web/bundle.js /app/client.js
 RUN python agent.py download-files
 ENTRYPOINT ["bash", "/app/entrypoint.sh"]

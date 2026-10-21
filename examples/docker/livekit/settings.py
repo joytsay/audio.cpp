@@ -32,6 +32,8 @@ class Settings(BaseModel):
     interruptions: bool = True
     interruption_duration: float = Field(default=0.5, ge=0.1, le=5)
     preemptive: bool = False
+    memory_enabled: bool = False
+    memory_top_k: int = Field(default=3, ge=1, le=10)
 
     @field_validator('stt_url', 'llm_url', 'tts_url')
     @classmethod
@@ -56,6 +58,7 @@ def defaults():
                        'timeout': 'API_TIMEOUT'}.items():
         if env in os.environ:
             data[field] = os.environ[env]
+    data['memory_enabled'] = all(os.getenv(key) for key in ('SUPABASE_URL', 'SUPABASE_PUBLISHABLE_KEY', 'SUPABASE_SECRET_KEY'))
     data['hotwords_enabled'] = os.getenv('USE_HOTWORDS', '0') == '1'
     data['chinese_numbers'] = os.getenv('CHINESE_NUMBERS', '1') == '1'
     data['prompt'] = Path(os.getenv('PROMPT_FILE', '/data/prompt.csv')).read_text(encoding='utf-8')

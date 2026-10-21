@@ -1,0 +1,196 @@
+# Merge with compose.yml; configure all values in .env (see .env.example).
+services:
+  meta:
+    image: supabase/postgres-meta:v0.100.0
+    restart: unless-stopped
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    environment:
+      PG_META_PORT: 8080
+      PG_META_DB_HOST: db
+      PG_META_DB_PORT: 5432
+      PG_META_DB_NAME: postgres
+      PG_META_DB_USER: postgres
+      PG_META_DB_PASSWORD: ${VOICE_DB_PASSWORD}
+      CRYPTO_KEY: ${SUPABASE_META_CRYPTO_KEY:-local-development-meta-crypto-key}
+  studio:
+    image: supabase/studio:2026.10.12-sha-3699278
+    restart: unless-stopped
+    depends_on: [meta, supabase-api]
+    # Studio grants database administration access. Bind only to a trusted LAN.
+    ports:
+      - "${SUPABASE_STUDIO_BIND_IP:-${LIVEKIT_NODE_IP}}:${SUPABASE_STUDIO_PORT:-54323}:3000"
+    environment:
+      HOSTNAME: 0.0.0.0
+      STUDIO_PG_META_URL: http://meta:8080
+      POSTGRES_HOST: db
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: postgres
+      POSTGRES_PASSWORD: ${VOICE_DB_PASSWORD}
+      POSTGRES_USER_READ_WRITE: postgres
+      PG_META_CRYPTO_KEY: ${SUPABASE_META_CRYPTO_KEY:-local-development-meta-crypto-key}
+      PGRST_DB_SCHEMAS: public
+      PGRST_DB_MAX_ROWS: 1000
+      PGRST_DB_EXTRA_SEARCH_PATH: public,extensions
+      DEFAULT_ORGANIZATION_NAME: Local Voice AI
+      DEFAULT_PROJECT_NAME: Maintenance work orders
+      SUPABASE_URL: http://supabase-api:8000
+      SUPABASE_PUBLIC_URL: ${SUPABASE_PUBLIC_URL}
+      SUPABASE_ANON_KEY: ${SUPABASE_PUBLISHABLE_KEY}
+      SUPABASE_SERVICE_KEY: ${SUPABASE_SECRET_KEY}
+      AUTH_JWT_SECRET: ${VOICE_JWT_SECRET}
+      ENABLED_FEATURES_LOGS_ALL: "false"
+      NEXT_ANALYTICS_BACKEND_PROVIDER: postgres
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:3000/api/platform/profile').then(r => { if (r.status !== 200) process.exit(1) }).catch(() => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+  db:
+    image: supabase/postgres:17.6.1.136
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: ${VOICE_DB_PASSWORD:?Set VOICE_DB_PASSWORD in .env (see .env.example)}
+      PGPASSWORD: ${VOICE_DB_PASSWORD}
+      POSTGRES_DB: postgres
+      # Native migrations require this bootstrap superuser.
+      POSTGRES_USER: supabase_admin
+      POSTGRES_HOST: /var/run/postgresql
+      PGHOST: /var/run/postgresql
+      PGDATABASE: postgres
+      PGPORT: 5432
+      JWT_SECRET: ${VOICE_JWT_SECRET:?Set VOICE_JWT_SECRET in .env}
+      JWT_EXP: 3600
+    command: [postgres, -c, config_file=/etc/postgresql/postgresql.conf, -c, wal_level=logical, -c, max_replication_slots=10, -c, max_wal_senders=10]
+    volumes:
+      - supabase-db:/var/lib/postgresql/data
+      - supabase-db-config:/etc/postgresql-custom
+      - ./local-supabase/roles.sql:/docker-entrypoint-initdb.d/init-scripts/99-voice-roles.sql:ro
+    healthcheck:
+      # Verify initialized roles/schema, not just a listening socket.
+      test:
+        - CMD-SHELL
+        - >-
+          test "$$(psql -h 127.0.0.1 -U supabase_admin -d postgres -Atqc
+          "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='authenticator')
+          AND EXISTS (SELECT 1 FROM pg_namespace WHERE nspname='auth')
+          AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname='postgres' AND NOT rolsuper)")" = t
+      interval: 5s
+      timeout: 5s
+      retries: 30
+  auth:
+    image: supabase/gotrue:v2.197.0
+    restart: unless-stopped
+    depends_on:
+      db: {condition: service_healthy}
+    environment:
+      GOTRUE_API_HOST: 0.0.0.0
+      GOTRUE_API_PORT: 9999
+      API_EXTERNAL_URL: ${SUPABASE_PUBLIC_URL}/auth/v1
+      GOTRUE_DB_DRIVER: postgres
+      GOTRUE_DB_DATABASE_URL: postgres://supabase_auth_admin:${VOICE_DB_PASSWORD}@db:5432/postgres
+      GOTRUE_SITE_URL: https://${LIVEKIT_NODE_IP}:${LIVEKIT_HTTPS_PORT:-8093}
+      GOTRUE_DISABLE_SIGNUP: "false"
+      GOTRUE_JWT_SECRET: ${VOICE_JWT_SECRET:?Set VOICE_JWT_SECRET in .env}
+      GOTRUE_JWT_AUD: authenticated
+      GOTRUE_JWT_DEFAULT_GROUP_NAME: authenticated
+      GOTRUE_JWT_ADMIN_ROLES: service_role
+      GOTRUE_JWT_EXP: 3600
+      GOTRUE_EXTERNAL_ANONYMOUS_USERS_ENABLED: "true"
+      GOTRUE_EXTERNAL_EMAIL_ENABLED: "false"
+      GOTRUE_EXTERNAL_PHONE_ENABLED: "false"
+    healthcheck:
+      test: [CMD, wget, --no-verbose, --tries=1, --spider, http://localhost:9999/health]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+  rest:
+    image: postgrest/postgrest:v14.18
+    restart: unless-stopped
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    environment:
+      PGRST_DB_URI: postgres://authenticator:${VOICE_DB_PASSWORD}@db:5432/postgres
+      PGRST_DB_SCHEMAS: public
+      PGRST_DB_ANON_ROLE: anon
+      PGRST_JWT_SECRET: ${VOICE_JWT_SECRET:?Set VOICE_JWT_SECRET in .env}
+      PGRST_DB_EXTRA_SEARCH_PATH: public,extensions
+      PGRST_DB_MAX_ROWS: 1000
+  realtime:
+    hostname: realtime-dev.supabase-realtime
+    image: supabase/realtime:v2.143.3
+    restart: unless-stopped
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    networks:
+      default:
+        aliases: [realtime-dev.supabase-realtime]
+    environment:
+      PORT: 4000
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_USER: supabase_admin
+      DB_PASSWORD: ${VOICE_DB_PASSWORD}
+      DB_NAME: postgres
+      DB_AFTER_CONNECT_QUERY: SET search_path TO _realtime
+      DB_ENC_KEY: ${VOICE_REALTIME_DB_KEY:?Set VOICE_REALTIME_DB_KEY in .env}
+      API_JWT_SECRET: ${VOICE_JWT_SECRET:?Set VOICE_JWT_SECRET in .env}
+      SECRET_KEY_BASE: ${VOICE_REALTIME_SECRET:?Set VOICE_REALTIME_SECRET in .env}
+      METRICS_JWT_SECRET: ${VOICE_JWT_SECRET:?Set VOICE_JWT_SECRET in .env}
+      ERL_AFLAGS: -proto_dist inet_tcp
+      DNS_NODES: "''"
+      RLIMIT_NOFILE: "10000"
+      APP_NAME: realtime
+      SEED_SELF_HOST: "true"
+      RUN_JANITOR: "true"
+  functions:
+    image: supabase/edge-runtime:v1.77.4
+    restart: unless-stopped
+    environment:
+      VOICE_EMBED_SECRET: ${SUPABASE_EMBED_SECRET:?Set SUPABASE_EMBED_SECRET in .env}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SECRET_KEY:?Set SUPABASE_SECRET_KEY in .env}
+    command: [start, --main-service, /home/deno/functions/embed]
+    volumes:
+      - ./supabase/functions/embed:/home/deno/functions/embed:ro
+      - supabase-deno-cache:/root/.cache/deno
+      - supabase-model-cache:/root/.cache/huggingface
+  supabase-api:
+    image: caddy:2.11.4-alpine
+    restart: unless-stopped
+    depends_on: [auth, rest, realtime, functions]
+    ports: ["127.0.0.1:${SUPABASE_API_PORT:-54321}:8000"]
+    volumes:
+      - ./local-supabase/Caddyfile:/etc/caddy/Caddyfile:ro
+  migrate:
+    image: supabase/postgres:17.6.1.136
+    depends_on:
+      auth: {condition: service_healthy}
+    environment:
+      PGHOST: db
+      PGUSER: supabase_admin
+      PGPASSWORD: ${VOICE_DB_PASSWORD}
+      PGDATABASE: postgres
+    entrypoint: [/bin/sh, /migrate.sh]
+    volumes:
+      - ./local-supabase/migrate.sh:/migrate.sh:ro
+      - ./supabase:/migrations:ro
+  agent:
+    environment:
+      SUPABASE_URL: ${SUPABASE_URL:?Set SUPABASE_URL in .env}
+      SUPABASE_PUBLIC_URL: ${SUPABASE_PUBLIC_URL:?Set SUPABASE_PUBLIC_URL in .env}
+      SUPABASE_PUBLISHABLE_KEY: ${SUPABASE_PUBLISHABLE_KEY:?Set SUPABASE_PUBLISHABLE_KEY in .env}
+      SUPABASE_SECRET_KEY: ${SUPABASE_SECRET_KEY:?Set SUPABASE_SECRET_KEY in .env}
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      supabase-api: {condition: service_started}
+  https:
+    environment:
+      SUPABASE_API_PORT: ${SUPABASE_API_PORT:-54321}
+volumes:
+  supabase-db:
+    name: ${SUPABASE_DB_VOLUME:-${COMPOSE_PROJECT_NAME:-audiocpp-livekit}_supabase-db}
+  supabase-db-config:
+    name: ${SUPABASE_DB_VOLUME:-${COMPOSE_PROJECT_NAME:-audiocpp-livekit}_supabase-db}-config
+  supabase-deno-cache:
+  supabase-model-cache:
