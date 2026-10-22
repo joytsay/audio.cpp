@@ -1,6 +1,61 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+# Incoming calls reuse pre-generated greetings in the native worker.
+export SIP_CONTINUOUS=1
+
+# Shared settings mode: the WebUI atomically replaces gateway.env. No file is
+# sourced; exampleSIP parses literal values with its existing --env loader.
+if [[ -n "${SIP_SETTINGS_DIR:-}" ]]; then
+    mkdir -p "$SIP_SETTINGS_DIR"
+    settings="$SIP_SETTINGS_DIR/gateway.env"
+    heartbeat="$SIP_SETTINGS_DIR/worker.heartbeat"
+    export AUDIOCPP_URL="${AUDIOCPP_URL:-http://127.0.0.1:8081}"
+    export LLM_URL="${LLM_URL:-http://127.0.0.1:8082/v1}"
+    export RAG_URL="${RAG_URL:-${AUDIOCPP_URL}/v1/rag}"
+    export IVRTTS_VOICE_DIR="${IVRTTS_VOICE_DIR:-/opt/sip/share/voices}"
+    export BARESIP_MODULE_PATH="${BARESIP_MODULE_PATH:-/opt/sip/lib/baresip/modules}"
+    sip_pid=""
+    stop_shared_sip() {
+        trap - EXIT INT TERM
+        rm -f "$heartbeat"
+        if [[ -n "$sip_pid" ]]; then
+            kill -TERM "$sip_pid" 2>/dev/null || true
+            wait "$sip_pid" 2>/dev/null || true
+        fi
+        exit 0
+    }
+    trap stop_shared_sip EXIT INT TERM
+    for url in "${AUDIOCPP_URL%/}/health" "${LLM_URL%/v1}/health"; do
+        until curl -fsS --connect-timeout 3 --max-time 5 "$url" >/dev/null; do sleep 2; done
+    done
+    while true; do
+        if [[ ! -s "$settings" ]]; then sleep 1; continue; fi
+        revision="$(sha256sum "$settings")"
+        # The shared file must override any old Compose account environment.
+        env -u SIP_ACCOUNT -u SIP_PROXY -u SIP_SECRET -u SIP_AUTHUSER -u SIP_DISPLAY_NAME -u SIP_TARGET \
+            stdbuf -oL -eL /opt/sip/bin/exampleSIP --env "$settings" --pipeline &
+        sip_pid=$!
+        while kill -0 "$sip_pid" 2>/dev/null; do
+            touch "$heartbeat"
+            sleep 1
+            if [[ "$(sha256sum "$settings")" != "$revision" ]]; then
+                echo "[sip] Gateway settings changed; restarting SIP registration"
+                kill -TERM "$sip_pid" 2>/dev/null || true
+                break
+            fi
+        done
+        set +e
+        wait "$sip_pid"
+        status=$?
+        set -e
+        sip_pid=""
+        rm -f "$heartbeat"
+        if (( status != 0 )); then echo "[sip] Worker exited ($status); retrying in two seconds"; fi
+        sleep 1
+    done
+fi
+
 for key in SIP_ACCOUNT SIP_PROXY SIP_SECRET LLM_MODEL; do
     if [[ -z "${!key:-}" ]]; then
         echo "[sip] Set $key in examples/docker/agx-one-container/.env" >&2

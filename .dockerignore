@@ -40,10 +40,10 @@ examples/ivrTTS/**
 !examples/ivrTTS/voices/prompt_text
 !examples/docker/
 examples/docker/**
-!examples/docker/cotrun/
-examples/docker/cotrun/**
-!examples/docker/cotrun/CMakeLists.txt
-!examples/docker/cotrun/setupEnv.cpp
+!examples/docker/coturn/
+examples/docker/coturn/**
+!examples/docker/coturn/CMakeLists.txt
+!examples/docker/coturn/setupEnv.cpp
 
 # Private runtime settings must never enter an image build context.
 **/.env

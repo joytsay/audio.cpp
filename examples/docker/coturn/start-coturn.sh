@@ -37,6 +37,7 @@ done
 if [ "$COTURN_PORT" -ge "$COTURN_MIN_PORT" ] && [ "$COTURN_PORT" -le "$COTURN_MAX_PORT" ]; then
     fail 'Coturn listening port overlaps its relay port range'
 fi
+case "${COTURN_VERBOSE:-0}" in 0|1) ;; *) fail 'COTURN_VERBOSE must be 0 or 1' ;; esac
 umask 077
 config=$(mktemp /tmp/coturn.XXXXXX)
 {
@@ -44,7 +45,10 @@ config=$(mktemp /tmp/coturn.XXXXXX)
     printf 'listening-port=%s\nmin-port=%s\nmax-port=%s\n' "$COTURN_PORT" "$COTURN_MIN_PORT" "$COTURN_MAX_PORT"
     printf 'realm=%s\nuser=%s:%s\n' "${COTURN_REALM:-ivrtts}" "$COTURN_USERNAME" "$COTURN_PASSWORD"
     [ -z "${COTURN_EXTERNAL_IP:-}" ] || printf 'external-ip=%s\n' "$COTURN_EXTERNAL_IP"
-    printf '%s\n' lt-cred-mech fingerprint no-cli no-tls no-dtls no-multicast-peers no-software-attribute log-file=stdout simple-log pidfile=/tmp/coturn.pid
+    # Coturn 4.18 disables CLI and DTLS by default; their old negative flags
+    # are deprecated or rejected. Keep plain TURN and disable TLS explicitly.
+    [ "${COTURN_VERBOSE:-0}" = 0 ] || printf '%s\n' verbose
+    printf '%s\n' lt-cred-mech fingerprint no-tls no-multicast-peers no-software-attribute log-file=stdout simple-log pidfile=/tmp/coturn.pid
 } > "$config"
 # Credentials stay in the private tmpfs config, rather than process arguments.
 exec turnserver -c "$config"

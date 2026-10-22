@@ -17,14 +17,14 @@ package is `libcurl4-openssl-dev`; on Arch Linux, it is `curl`.
 Build the C++ setup tool from the repository root:
 
 ```sh
-cmake -S examples/docker/cotrun -B examples/docker/cotrun/build
-cmake --build examples/docker/cotrun/build --parallel
+cmake -S examples/docker/coturn -B examples/docker/coturn/build
+cmake --build examples/docker/coturn/build --parallel
 ```
 
 Detect the local IPv4 address and update the shared `.env` automatically:
 
 ```sh
-./examples/docker/cotrun/build/coturn_setup
+./examples/docker/coturn/build/coturn_setup
 ```
 
 The tool selects the source address for the default Internet route. It creates
@@ -37,7 +37,7 @@ not displayed. Exported shell variables can override the file when Compose runs.
 For a machine with multiple network interfaces, select the required interface:
 
 ```sh
-./examples/docker/cotrun/build/coturn_setup --interface enp130s0
+./examples/docker/coturn/build/coturn_setup --interface enp130s0
 ```
 
 Use `--local-ip 192.168.5.151` to supply an address explicitly. Use `--dry-run`
@@ -47,7 +47,7 @@ or configure a firewall.
 For Internet callers, detect the public IPv4 address too:
 
 ```sh
-./examples/docker/cotrun/build/coturn_setup --public
+./examples/docker/coturn/build/coturn_setup --public
 ```
 
 This sends an HTTPS request to `https://api.ipify.org`. Alternatively, use
@@ -61,7 +61,7 @@ To update an existing SIP client settings file with the same TURN URL and
 credentials, add `--sip-env`:
 
 ```sh
-./examples/docker/cotrun/build/coturn_setup --public \
+./examples/docker/coturn/build/coturn_setup --public \
   --sip-env examples/ivrTTS/.env.sip
 ```
 
@@ -90,17 +90,17 @@ Start the server:
 
 ```sh
 docker compose --env-file examples/docker/agx-one-container/.env \
-  -f examples/docker/cotrun/compose.yml up -d
+  -f examples/docker/coturn/compose.yml up -d
 ```
 
 Inspect or stop it:
 
 ```sh
 docker compose --env-file examples/docker/agx-one-container/.env \
-  -f examples/docker/cotrun/compose.yml logs -f coturn
+  -f examples/docker/coturn/compose.yml logs -f coturn
 
 docker compose --env-file examples/docker/agx-one-container/.env \
-  -f examples/docker/cotrun/compose.yml down
+  -f examples/docker/coturn/compose.yml down
 ```
 
 The startup script writes a mode `0600` config in container tmpfs and starts
@@ -120,3 +120,18 @@ COTURN_PASSWORD='your TURN password'
 Then start `exampleSIP` normally. Its baresip installation needs the `turn` module.
 TURN relays media; SIP signaling still connects directly to the SIP proxy, so it
 does not resolve missing SIP ACKs.
+
+### Diagnose missing media
+
+Set `COTURN_VERBOSE=1` in the Compose environment and recreate coturn to log
+allocations, permissions and channel bindings. In the integrated stack:
+
+```bash
+COTURN_VERBOSE=1 docker compose --profile sip up -d --no-deps --force-recreate coturn
+docker compose logs --since 1m -f coturn sip
+```
+
+Make a new call after coturn restarts. An existing call loses its TURN allocation
+when the relay restarts. Restore `COTURN_VERBOSE=0` after collecting diagnostics.
+Coturn 4.18 leaves CLI and DTLS disabled by default; the startup script omits the
+obsolete `no-cli` and `no-dtls` options.

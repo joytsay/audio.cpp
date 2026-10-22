@@ -220,7 +220,7 @@ RUN cmake -S re -B re/build -DCMAKE_BUILD_TYPE=Release \
         -DMODULES="g711;opus;turn" && \
     cmake --build baresip/build --parallel "${BUILD_JOBS}" && cmake --install baresip/build
 COPY examples/ivrTTS/ /src/ivrTTS/
-COPY examples/docker/cotrun/CMakeLists.txt examples/docker/cotrun/setupEnv.cpp /src/coturn-setup/
+COPY examples/docker/coturn/CMakeLists.txt examples/docker/coturn/setupEnv.cpp /src/coturn-setup/
 RUN PKG_CONFIG_PATH=/opt/sip/lib/pkgconfig cmake -S ivrTTS -B ivrTTS/build \
         -DCMAKE_BUILD_TYPE=Release -DIVRTTS_BUILD_SIP=ON -DIVRTTS_BUILD_TUI=OFF \
         -DCMAKE_BUILD_RPATH=/opt/sip/lib && \
@@ -241,6 +241,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=sip-build /opt/sip/ /opt/sip/
 COPY .devops/sip-entrypoint.sh /app/sip-entrypoint.sh
 RUN if ! id -u ubuntu >/dev/null 2>&1; then useradd --create-home --shell /bin/bash ubuntu; fi && \
+    mkdir -p /app/sip-data && chown ubuntu:ubuntu /app/sip-data && \
     chmod +x /app/sip-entrypoint.sh
 WORKDIR /app
 USER ubuntu
@@ -319,8 +320,8 @@ COPY prompt.csv /app/prompt.csv
 COPY hotword.csv /app/hotword.csv
 
 RUN chmod +x /app/all-in-one-entrypoint.sh && \
-    mkdir -p /app/models /app/llama-models /app/rag-data && \
-    chown -R ubuntu:ubuntu /app/models /app/llama-models /app/rag-data /app/knowledge /app/prompt.csv /app/hotword.csv
+    mkdir -p /app/models /app/llama-models /app/rag-data /app/sip-data && \
+    chown -R ubuntu:ubuntu /app/sip-data /app/models /app/llama-models /app/rag-data /app/knowledge /app/prompt.csv /app/hotword.csv
 
 USER ubuntu
 
