@@ -29,6 +29,7 @@ services:
       - "8081:8081"
       - "8082:8082"
     environment:
+      SIP_SETTINGS_DIR: /app/sip-data
       NVIDIA_VISIBLE_DEVICES: all
       LLAMA_CACHE: /app/llama-models/cache
       AUDIOCPP_MAX_LOADED_MODELS: 1
@@ -47,6 +48,7 @@ services:
       - ../../../llama-models:/app/llama-models
       - ../../../rag-data:/app/rag-data
       - ../../../knowledge:/app/knowledge
+      - audiocpp-sip-data:/app/sip-data
       - ../../../voices:/app/voices
       - ../../../prompt.csv:/app/prompt.csv
       - ../../../hotword.csv:/app/hotword.csv
@@ -117,6 +119,7 @@ services:
     init: true
     stop_grace_period: 15s
     environment:
+      SIP_SETTINGS_DIR: /app/sip-data
       SIP_ACCOUNT: ${SIP_ACCOUNT:-}
       SIP_PROXY: ${SIP_PROXY:-}
       SIP_SECRET: ${SIP_SECRET:-}
@@ -147,6 +150,7 @@ services:
       TTS_VOICE: ${SIP_TTS_VOICE:-lingCL}
       IVRTTS_VOICE_DIR: /opt/sip/share/voices
     volumes:
+      - audiocpp-sip-data:/app/sip-data
       - ../../../hotword.csv:/app/hotword.csv:ro
       - ../../../prompt.csv:/app/prompt.csv:ro
       - ../../../.devops/sip-entrypoint.sh:/app/sip-entrypoint.sh:ro
@@ -177,5 +181,6 @@ services:
       - /var/lib/coturn:mode=1777
 
 volumes:
+  audiocpp-sip-data:
   audiocpp-https-data:
   audiocpp-https-config:

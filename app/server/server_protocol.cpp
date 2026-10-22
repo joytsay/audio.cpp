@@ -772,7 +772,7 @@ static std::string request_content_type(const HttpRequest &request) {
 
 void log_request_body_if_enabled(const ServerConfig &config,
                                  const HttpRequest &request) {
-  if (!config.log_request_body || !engine::debug::log_enabled()) {
+  if (request.path == "/v1/ui/sip" || !config.log_request_body || !engine::debug::log_enabled()) {
     return;
   }
   if (request.method != "POST") {

@@ -135,6 +135,7 @@ public:
         while (output.find(marker) == std::string::npos && Clock::now() < deadline) pump();
         check(output.find(marker) != std::string::npos, "missing TUI text: " + marker + "\n" + output.substr(output.size() > 1800 ? output.size() - 1800 : 0));
     }
+    void terminate() { if (pid_ > 0) kill(pid_, SIGTERM); }
     int finish(int seconds = 15) {
         auto deadline = Clock::now() + std::chrono::seconds(seconds); int status = 0;
         while (Clock::now() < deadline) {
@@ -383,8 +384,8 @@ public:
     std::atomic<bool> authenticated{false}, invited{false}, unregistered{false}, bye{false};
     std::atomic<unsigned> packets{0}, voiced_packets{0}, voiced_before_ready{0}, voiced_before_selection{0};
     std::atomic<bool> ready_sent{false};
-    SipServer(bool reject, bool busy, bool incoming, bool opus = false, bool conversation = false, bool wait_for_ready = false)
-        : reject_(reject), busy_(busy), incoming_(incoming), opus_(opus), conversation_(conversation), wait_for_ready_(wait_for_ready) {
+    SipServer(bool reject, bool busy, bool incoming, bool opus = false, bool conversation = false, bool wait_for_ready = false, bool rtp_digits = false)
+        : reject_(reject), busy_(busy), incoming_(incoming), opus_(opus), conversation_(conversation), wait_for_ready_(wait_for_ready), rtp_digits_(rtp_digits) {
         auto bind_udp = [](int& fd) {
             fd = socket(AF_INET, SOCK_DGRAM, 0); check(fd >= 0, "cannot open SIP test socket");
             fcntl(fd, F_SETFD, FD_CLOEXEC);
@@ -405,7 +406,23 @@ public:
                         const char digits[] = {'#', '1', '#', '2', '#', '1'};
                         if (greeting_step_ == 0) voiced_before_ready = voiced_packets.load();
                         if (greeting_step_ == 1) voiced_before_selection = voiced_packets.load();
-                        info(dialog_from_, dialog_to_, dialog_id_, signal_peer_, digits[greeting_step_++]);
+                        const auto digit = digits[greeting_step_++];
+                        if (rtp_digits_) {
+                            // RFC 4733 telephone-event, including repeated end packets.
+                            for (unsigned packet_index = 0; packet_index < 4; ++packet_index) {
+                                unsigned char packet[16] = {0x80, 101, 0, 0, 0, 0, 0, 0, 0, 0, 0, 42};
+                                const unsigned sequence = 1000 + (greeting_step_ - 1) * 4 + packet_index;
+                                packet[1] |= packet_index == 0 ? 0x80 : 0;
+                                packet[2] = sequence >> 8; packet[3] = sequence;
+                                const unsigned timestamp = greeting_step_ * 800;
+                                for (unsigned i = 0; i < 4; ++i) packet[4 + i] = timestamp >> (24 - i * 8);
+                                packet[12] = digit == '#' ? 11 : unsigned(digit - '0');
+                                packet[13] = 10 | (packet_index ? 0x80 : 0);
+                                const unsigned duration = packet_index ? 320 : 160;
+                                packet[14] = duration >> 8; packet[15] = duration;
+                                check(sendto(rtp_, packet, sizeof(packet), 0, reinterpret_cast<sockaddr*>(&media_peer_), sizeof(media_peer_)) == sizeof(packet), "DTMF RTP send failed");
+                            }
+                        } else info(dialog_from_, dialog_to_, dialog_id_, signal_peer_, digit);
                         ready_sent = true;
                     }
                     if (conversation_ && connected_ && Clock::now() >= next_audio_) {
@@ -516,12 +533,19 @@ private:
             auto destination = header(request, "Contact"); destination = destination.substr(destination.find('<') + 1); destination = destination.substr(0, destination.find('>'));
             send("ACK " + destination + " SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:" + std::to_string(port_) +
                  ";branch=z9hG4bKack\r\nFrom: " + from + "\r\nTo: " + to + "\r\nCall-ID: incoming-test\r\nCSeq: 1 ACK\r\nContent-Length: 0\r\n\r\n", peer);
+            dialog_from_ = from; dialog_to_ = to; dialog_id_ = "incoming-test";
+            auto media = request.find("m=audio ");
+            check(media != std::string::npos, "answer lacks RTP address");
+            media_peer_ = peer; media_peer_.sin_port = htons(std::stoul(request.substr(media + 8)));
+            signal_peer_ = peer;
+            connected_ = true; next_audio_ = Clock::now() + (conversation_ ? 2s : 0s);
+            ready_at_ = Clock::now() + 700ms;
             info(from, to, "incoming-test", peer);
         } else if (request.rfind("BYE ", 0) == 0) { bye = true; response(request, peer, "200 OK"); }
     }
     int sip_ = -1, rtp_ = -1;
     unsigned port_, media_port_;
-    bool reject_, busy_, incoming_, opus_, conversation_, wait_for_ready_;
+    bool reject_, busy_, incoming_, opus_, conversation_, wait_for_ready_, rtp_digits_;
     bool connected_ = false, sent_bye_ = false;
     unsigned info_cseq_ = 2, greeting_step_ = 0;
     unsigned audio_frames_ = 0;
@@ -574,9 +598,9 @@ void test_sip(const std::string& executable) {
         sip.verify();
     }
 #ifdef IVRTTS_TEST_PIPELINE
-    {
+    for (bool rtp_digits : {false, true}) {
         Server audio;
-        SipServer sip(false, false, false, false, false, true);
+        SipServer sip(false, false, false, false, false, true, rtp_digits);
         setenv("SIP_WAIT_FOR_MEDIA", "1", 1);
         setenv("SIP_CODEC", "PCMU", 1);
         Process client(executable, {"sip:1001@127.0.0.1", sip.uri, "sip:1002@127.0.0.1",
@@ -640,6 +664,36 @@ void test_sip(const std::string& executable) {
         for (const char* route : {"/v1/tasks/run", "/v1/audio/transcriptions/details", "/v1/chat/completions", "/v1/audio/speech"})
             check(std::any_of(requests.begin(), requests.end(), [&](const auto& request) { return request.first == route; }),
                   std::string("RTP conversation skipped ") + route);
+    }
+    {
+        Server audio; audio.pipeline_mode = true;
+        SipServer sip(false, false, true, false, true);
+        setenv("SIP_CONTINUOUS", "1", 1);
+        setenv("SIP_WAIT_FOR_MEDIA", "0", 1);
+        setenv("AUDIOCPP_URL", audio.url.c_str(), 1);
+        setenv("LLM_URL", (audio.url + "/v1").c_str(), 1);
+        setenv("RAG_URL", (audio.url + "/v1/rag").c_str(), 1);
+        Process client(executable, {"--pipeline", "sip:1001@127.0.0.1", sip.uri, "listen"});
+        client.until("Call finished; reusing greetings for the next caller.", 12);
+        const auto deadline = Clock::now() + 3s;
+        const std::string waiting = "Waiting for one incoming call...";
+        while (Clock::now() < deadline) {
+            client.pump();
+            const auto first = client.output.find(waiting);
+            if (first != std::string::npos && client.output.find(waiting, first + waiting.size()) != std::string::npos) break;
+        }
+        client.terminate();
+        check(client.finish(3) == 0, "continuous SIP worker did not stop cleanly: " + client.output);
+        const auto first = client.output.find(waiting);
+        check(first != std::string::npos && client.output.find(waiting, first + waiting.size()) != std::string::npos,
+              "continuous worker did not register for the next incoming call: " + client.output);
+        const auto greeting = client.output.find("Generating welcome greeting (lingCL)...");
+        check(greeting != std::string::npos && client.output.find("Generating welcome greeting (lingCL)...", greeting + 1) == std::string::npos,
+              "normal hangup regenerated welcome greetings: " + client.output);
+        check(client.output.find("Incoming RTP established.") != std::string::npos,
+              "incoming RTP diagnostic missing: " + client.output);
+        unsetenv("SIP_CONTINUOUS");
+        sip.verify();
     }
 #endif
     std::cout << "PASS: direct SIP digest registration, failures, incoming/outgoing PCMU/Opus RTP, DTMF, BYE and unregister\n";

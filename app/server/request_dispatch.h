@@ -3,6 +3,7 @@
 #include "busy_guard.h"
 #include "model_memory.h"
 #include "server_protocol.h"
+#include "sip_settings.h"
 
 #include "engine/framework/debug/trace.h"
 #include "engine/framework/runtime/errors.h"
@@ -46,6 +47,8 @@ struct RequestDispatcher {
         response.content_type = "image/x-icon";
       } else if (request.method == "GET" && request.path == "/health") {
         response = state.handle_health();
+      } else if ((request.method == "GET" || request.method == "POST") && request.path == "/v1/ui/sip") {
+        response = sip_settings_response(request, state.config_.ui_management, state.request_base_);
       } else if (request.method == "GET" && request.path == "/v1/models") {
         const auto include_session_options =
             query_param(request.query, "include_session_options");

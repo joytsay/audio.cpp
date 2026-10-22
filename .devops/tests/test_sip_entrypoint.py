@@ -15,6 +15,7 @@ with tempfile.TemporaryDirectory(prefix="sip-entrypoint-") as directory:
     curl.chmod(0o755)
     client = root / "exampleSIP"
     client.write_text('''#!/bin/sh
+[ "$SIP_CONTINUOUS" = 1 ] || exit 4
 [ "$1" = --pipeline ] && [ "$2" = sip:test@example.test ] && [ "$3" = sip:example.test ] || exit 2
 [ "$AUDIOCPP_URL" = http://127.0.0.1:8081 ] && [ "$BARESIP_MODULE_PATH" = /opt/sip/lib/baresip/modules ] || exit 3
 printf 'call\\n' >> "$TEST_CALLS"

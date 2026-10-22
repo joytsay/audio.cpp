@@ -231,6 +231,7 @@ public:
         require(conf_configure_buf(reinterpret_cast<const uint8_t*>(config.data()), config.size()), "configure baresip");
         configured_ = true;
         conf_config()->call.accept = true; conf_config()->call.max_calls = 1;
+        conf_config()->avt.rtp_stats = true;
         require(baresip_init(conf_config()), "initialize baresip"); initialized_ = true;
         bridge = &audio_;
         require(ausrc_register(&source_, baresip_ausrcl(), "ivrtts", source_alloc), "register audio source");
@@ -248,7 +249,12 @@ public:
             require(module_load(path.c_str(), "turn"), "load baresip TURN module (rebuild with MODULES=g711;opus;turn)");
         }
         require(bevent_register(event_handler, this), "register SIP events"); events_ = true;
-        require(ua_alloc(&ua_, ("<" + account_ + ">;regint=300").c_str()), "create SIP account");
+        const auto display = env("SIP_DISPLAY_NAME");
+        if (display.find_first_of("\"\\<>\r\n") != std::string::npos)
+            throw std::runtime_error("invalid SIP display name");
+        const auto identity = display.empty() ? "<" + account_ + ">;regint=300"
+            : "\"" + display + "\" <" + account_ + ">;regint=300";
+        require(ua_alloc(&ua_, identity.c_str()), "create SIP account");
         auto* account = ua_account(ua_);
         require(account_set_auth_pass(account, env("SIP_SECRET").c_str()), "set SIP password");
         if (!env("SIP_AUTHUSER").empty()) require(account_set_auth_user(account, env("SIP_AUTHUSER").c_str()), "set SIP auth user");
@@ -296,7 +302,9 @@ private:
             break;
         case BEVENT_CALL_ESTABLISHED:
             established_ = true; audio_.activate(true);
+            media_deadline_ = Clock::now() + std::chrono::seconds(5);
             std::cout << "SIP call established.\n";
+            re_printf("%H", stream_debug, audio_strm(call_audio(call_)));
             if (!announcement_.empty()) {
                 if (wait_for_media_ && !media_ready_) {
                     waiting_for_media_ = true;
@@ -304,7 +312,14 @@ private:
                 } else start_announcement();
             } else if (pipeline_) pipeline_->resume();
             break;
+        case BEVENT_CALL_RTPESTAB:
+            if (call == call_) {
+                rtp_received_ = true;
+                std::cout << "Incoming RTP established.\n";
+            }
+            break;
         case BEVENT_CALL_DTMF_START:
+            if (call == call_) std::cout << "DTMF: " << bevent_get_text(data) << '\n';
             if (call == call_ && !announcement_.empty()) {
                 const std::string digit = bevent_get_text(data);
                 if (digit == "#") { greeting_prefix_ = true; break; }
@@ -319,7 +334,6 @@ private:
                     }
                 }
             }
-            if (call == call_) std::cout << "DTMF: " << bevent_get_text(data) << '\n';
             break;
         case BEVENT_CALL_CLOSED:
             if (call != call_) break;
@@ -349,6 +363,11 @@ private:
         } else if (interrupted) close();
         else {
             if (!established_ && !waiting_ && Clock::now() > deadline_) throw std::runtime_error("SIP operation timed out");
+            if (established_ && !rtp_received_ && !media_warning_ && Clock::now() >= media_deadline_) {
+                media_warning_ = true;
+                std::cerr << "No incoming RTP after 5 seconds. Check the SDP media address, TURN public mapping, UDP relay ports, and caller DTMF mode (telephone-event or SIP INFO).\n";
+                re_printf("%H", stream_debug, audio_strm(call_audio(call_)));
+            }
             if (audio_.failed()) throw std::runtime_error("SIP audio driver failed");
             if (pipeline_) {
                 auto error = pipeline_->error(); if (!error.empty()) throw std::runtime_error(error);
@@ -392,7 +411,8 @@ private:
     bool registered_ = false, established_ = false, waiting_ = false, closing_ = false, draining_ = false;
     bool wait_for_media_ = false, waiting_for_media_ = false, media_ready_ = false, announcement_playing_ = false;
     bool greeting_prefix_ = false;
-    Clock::time_point deadline_, playback_end_;
+    bool rtp_received_ = false, media_warning_ = false;
+    Clock::time_point deadline_, playback_end_, media_deadline_;
 };
 
 void self_test() {
@@ -442,6 +462,7 @@ int main(int argc, char** argv) {
                          "SIP_GREETING: opening message; an empty value disables it\n"
                          "Greetings: #1 lingCL, #2 WangSG; repeat either sequence to replay\n"
                          "SIP_WAIT_FOR_MEDIA=1: wait for greeting selection (default 1; 0 starts automatically)\n"
+                         "SIP_CONTINUOUS=1: answer successive pipeline calls and reuse greetings\n"
                          "Settings file: exampleSIP [--env PATH] (defaults to .env.sip, full pipeline)\n"
                          "Required: SIP_SECRET, LLM_MODEL (pipeline). Optional: SIP_AUTHUSER, SIP_CODEC=PCMU|OPUS,\n"
                          "  SIP_LISTEN, SIP_INTERFACE, SIP_RTP_PORTS, SIP_DTMF_MODE=rtp|info, BARESIP_MODULE_PATH\n"
@@ -483,9 +504,21 @@ int main(int argc, char** argv) {
                 std::cout << "Generating welcome greeting (WangSG)...\n";
                 alternate = tts.run(greeting); decode_wav(alternate);
             }
-            auto conversation = std::make_unique<SipPipeline>(std::move(config));
-            SipCall call(args[1], args[2], args[3], std::move(welcome), std::move(conversation), std::move(alternate));
-            return call.run();
+            const auto continuous = env("SIP_CONTINUOUS");
+            if (!continuous.empty() && continuous != "0" && continuous != "1")
+                throw std::runtime_error("SIP_CONTINUOUS must be 0 or 1");
+            do {
+                // Each caller gets fresh conversation state, but greetings stay in
+                // memory across normal hangups instead of re-running TTS.
+                auto conversation = std::make_unique<SipPipeline>(SipPipelineConfig::from_environment());
+                {
+                    SipCall call(args[1], args[2], args[3], welcome, std::move(conversation), alternate);
+                    call.run();
+                }
+                if (interrupted || args[3] != "listen" || continuous != "1") return 0;
+                std::cout << "Call finished; reusing greetings for the next caller.\n";
+            } while (!interrupted);
+            return 0;
         }
         if (args[3].rfind("http://", 0) != 0 && args[3].rfind("https://", 0) != 0)
             throw std::runtime_error("TTS URL must use HTTP(S)");

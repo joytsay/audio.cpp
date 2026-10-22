@@ -206,18 +206,34 @@ both. This detects the outbound public IPv4 address and sets the TURN mapping.
 Router port forwarding is still required. See the
 [coturn network guide](../cotrun/README.md) for the server ports.
 
-Edit `.env` and set the SIP account:
+Enable the SIP service in `.env`:
 
 ```dotenv
 COMPOSE_PROFILES=sip
-SIP_ACCOUNT=sip:521@YOUR_SIP_SERVER
-SIP_PROXY=sip:YOUR_SIP_SERVER:9900
-SIP_SECRET='YOUR_SIP_PASSWORD'
-SIP_TARGET=listen
 ```
 
-Replace the server address, port, account and password with your actual values.
-The TURN URL and password are read directly from this `.env`; a separate
+Open `/#/sip` in the WebUI to configure **SIP Gateway**. The form starts with
+outbound proxy `sip:175.180.90.33:9900`, account `sip:521@175.180.90.33`,
+authentication username and display name `521`. Enter the account's secret and
+click **Save and register**. “Plain secret” means a password is supplied to
+baresip for SIP digest authentication; it is not a precomputed hash.
+
+Settings are persisted in the `audiocpp-sip-data` volume and shared by the web
+server and SIP container. The secret is stored in an owner-only file, is never
+returned by the settings API, and is excluded from request-body debug logging.
+Leaving the secret empty after saving keeps the existing password. Saving
+changed settings restarts the worker within two seconds and ends active calls.
+The worker waits for the first save before starting registration. In this stack,
+the page's saved account replaces the old `SIP_ACCOUNT`, `SIP_PROXY`,
+`SIP_AUTHUSER`, `SIP_SECRET`, and `SIP_TARGET` environment settings.
+
+The page controls native SIP/RTP on the server; it does not use browser WebRTC.
+“Running” reports a live worker process, not successful gateway registration;
+confirm `SIP registered.` in the SIP logs. Incoming calls reuse pre-generated
+greetings across normal hangups; the process only regenerates them on restart. The standalone SIP entrypoint still
+supports its original environment configuration when `SIP_SETTINGS_DIR` is unset.
+
+The TURN URL and password are read directly from `.env`; a separate
 `examples/ivrTTS/.env.sip` is not required. `SIP_LLM_MODEL` defaults to the model
 that this stack downloads. If you use another LLM, set its registered model ID.
 The audio model IDs default to `silero-vad`, `qwen3-asr` and `zipvoice`.

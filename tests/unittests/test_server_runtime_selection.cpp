@@ -1,6 +1,7 @@
 // Public legacy handlers reject every explicit slots field before touching state.
 // Exercise frontend forwarding too; no test hook in the original runtime is needed.
 #include "runtime.h"
+#include "sip_settings.h"
 #include "engine/framework/io/json.h"
 
 #include <filesystem>
@@ -9,6 +10,39 @@
 
 int main() {
     try {
+        {
+            const auto root = std::filesystem::temp_directory_path() /
+                ("sip-settings-test-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+            struct Cleanup { std::filesystem::path path; ~Cleanup() { std::filesystem::remove_all(path); } } cleanup{root};
+            minitts::server::HttpRequest request;
+            request.path = "/v1/ui/sip";
+            request.method = "POST";
+            request.body = R"({"proxy":"sip:175.180.90.33:9900","account":"sip:521@175.180.90.33","auth_user":"521","display_name":"521","secret":"private-test-secret"})";
+            if (minitts::server::sip_settings_response(request, false, root).status != 403 || std::filesystem::exists(root))
+                throw std::runtime_error("SIP settings bypassed management guard");
+            if (minitts::server::sip_settings_response(request, true, root).status != 200)
+                throw std::runtime_error("SIP gateway settings were not saved");
+            const auto saved = root / "sip-data" / "gateway.env";
+            auto read = [&]() { std::ifstream input(saved); return std::string(std::istreambuf_iterator<char>(input), {}); };
+            const auto original = read();
+            request.method = "GET";
+            const auto response = minitts::server::sip_settings_response(request, true, root);
+            const auto settings = engine::io::json::parse(response.body);
+            if (response.body.find("private-test-secret") != std::string::npos ||
+                !settings.require("has_secret").as_bool() || settings.require("worker_running").as_bool() ||
+                settings.require("proxy").as_string() != "sip:175.180.90.33:9900")
+                throw std::runtime_error("SIP settings exposed secret or incorrect status");
+            request.method = "POST";
+            request.body = R"({"proxy":"sip:175.180.90.33:9900","account":"sip:521@175.180.90.33","auth_user":"521","display_name":"521","secret":""})";
+            if (minitts::server::sip_settings_response(request, true, root).status != 200 || read() != original)
+                throw std::runtime_error("blank SIP secret did not preserve saved credentials");
+            request.body = R"({"proxy":"sip:host\nSIP_SECRET=injected","account":"sip:521@host","auth_user":"521","display_name":"521","secret":"x"})";
+            if (minitts::server::sip_settings_response(request, true, root).status != 400 || read() != original)
+                throw std::runtime_error("SIP settings accepted injected configuration");
+            const auto permissions = std::filesystem::status(saved).permissions();
+            if ((permissions & (std::filesystem::perms::group_all | std::filesystem::perms::others_all)) != std::filesystem::perms::none)
+                throw std::runtime_error("SIP credentials are not private");
+        }
         minitts::server::ServerConfig config;
         config.backend = engine::core::BackendType::Cpu;
         config.ui_management = true;

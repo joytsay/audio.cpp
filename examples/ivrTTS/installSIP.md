@@ -287,6 +287,27 @@ beginning, even during playback. Other digits cancel a pending selection and
 are logged normally. There is no greeting wait timeout. The browser never
 sends these sequences automatically.
 
+The Docker worker sets `SIP_CONTINUOUS=1`: it retains both greeting buffers
+between incoming calls and creates a fresh conversation for each caller.
+Normal hangup no longer regenerates TTS or depends on the supervisor to start
+the next call. Direct command-line use still handles one call unless this
+option is enabled. Changing gateway settings restarts the process and generates
+the greetings again.
+
+The worker accepts DTMF as RTP `telephone-event` or SIP INFO. In-band audio
+tones are not decoded. Logs include every received digit, including `#`, an
+`Incoming RTP established.` message, media addresses and RTP statistics. If no
+RTP arrives after five seconds, the worker logs a warning. SIP registration and
+`200 OK` alone do not establish that audio can cross NAT.
+
+For an external SIP gateway, a local TURN relay must advertise a public mapping
+reachable by that gateway, and its UDP relay port range must be forwarded and
+allowed by the firewall. On a device with both Ethernet and Wi-Fi, check that
+the relay's bound address and public mapping correspond to the network actually
+carrying the traffic. Inspect `COTURN_URL`, `COTURN_LISTEN_IP`,
+`COTURN_RELAY_IP`, `COTURN_EXTERNAL_IP`, and the relay port range before changing
+SIP credentials or codecs.
+
 `TTS_VOICE` still controls conversation replies. Set `SIP_WAIT_FOR_MEDIA=0`
 explicitly for automatic greeting playback on answer, or empty `SIP_GREETING`
 to disable greetings. In fixed-announcement mode, the optional VOICE argument
