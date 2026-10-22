@@ -1,7 +1,7 @@
 #pragma once
 
 #include "engine/framework/core/backend_weight_store.h"
-#include "engine/framework/modules/attention/feed_forward.h"
+#include "engine/framework/modules/feed_forward_modules.h"
 #include "engine/framework/modules/attention/types.h"
 #include "engine/framework/modules/conv_modules.h"
 #include "engine/framework/modules/linear_module.h"
@@ -66,6 +66,7 @@ std::shared_ptr<const MoonshineWeights> load_moonshine_asr_weights(
     engine::assets::TensorStorageType encoder_storage_type,
     engine::assets::TensorStorageType decoder_storage_type,
     engine::assets::TensorStorageType conv_storage_type,
-    size_t weight_context_bytes);
+    size_t weight_context_bytes,
+    bool include_decoder = true);
 
 }  // namespace engine::models::moonshine_asr

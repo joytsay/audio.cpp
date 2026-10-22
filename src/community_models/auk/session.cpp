@@ -1,5 +1,6 @@
 #include "engine/community_models/auk/session.h"
 
+#include "engine/framework/runtime/errors.h"
 #include "engine/framework/runtime/options.h"
 #include "engine/framework/runtime/spec_backed_model.h"
 #include "engine/framework/core/attention_fallback.h"
@@ -144,15 +145,17 @@ AukSession::AukSession(runtime::TaskSpec task, runtime::SessionOptions options,
     : RuntimeSessionBase(options), task_(task), assets_(select_component_assets(std::move(assets), options)),
       contract_(std::move(contract)) {
     runtime::validate_spec_backed_session_options(options, *contract_, "auk", "AuK");
-    if ((task.task != runtime::VoiceTaskKind::Tts && task.task != runtime::VoiceTaskKind::AudioGeneration) ||
+    if ((task.task != runtime::VoiceTaskKind::Tts &&
+         task.task != runtime::VoiceTaskKind::VoiceCloning &&
+         task.task != runtime::VoiceTaskKind::AudioGeneration) ||
         task.mode != runtime::RunMode::Offline) {
-        throw std::runtime_error("AuK currently implements offline TTS and audio editing");
+        throw std::runtime_error("AuK currently implements offline TTS, voice cloning, and audio editing");
     }
     if (!assets_ || !assets_->model || !assets_->qwen || !assets_->vae || !assets_->tokenizer) {
         throw std::runtime_error("AuK requires model, Qwen, VAE, and tokenizer assets");
     }
-    if (options.backend.type != core::BackendType::Cuda) {
-        throw std::runtime_error("AuK native session currently requires CUDA");
+    if (execution_context().backend_type() == core::BackendType::Cpu) {
+        throw std::runtime_error("AuK native session does not support the CPU backend");
     }
     if (const auto value = runtime::find_option(options.options, {"auk.mem_saver"})) {
         mem_saver_ = runtime::parse_bool_option(*value, "auk.mem_saver");
@@ -180,11 +183,11 @@ runtime::TaskResult AukSession::run(const runtime::TaskRequest & request) {
         throw std::runtime_error("AuK audio editing requires source audio");
     }
     if (!request.input_artifacts.empty()) {
-        throw std::runtime_error("AuK cached artifacts are not supported");
+        throw runtime::InvalidRequestError("AuK cached artifacts are not supported");
     }
     const runtime::AudioBuffer * reference_input = request.audio_input ? &*request.audio_input : nullptr;
     if (request.voice) {
-        if (task_.task != runtime::VoiceTaskKind::Tts) {
+        if (task_.task == runtime::VoiceTaskKind::AudioGeneration) {
             throw std::runtime_error("AuK audio editing takes its source in audio_input, not a voice reference");
         }
         if (request.voice->style || !request.voice->speaker || request.voice->speaker->cached_voice_id ||
@@ -219,14 +222,14 @@ runtime::TaskResult AukSession::run(const runtime::TaskRequest & request) {
     std::string instruction = request.text_input->text;
     // Without a voice description, text carries the complete upstream instruction.
     if (const auto description = runtime::find_option(request.options, {"instruct"})) {
-        if (task_.task != runtime::VoiceTaskKind::Tts) {
+        if (task_.task == runtime::VoiceTaskKind::AudioGeneration) {
             throw std::runtime_error("AuK editing takes its instruction in text; instruct is for TTS");
         }
         instruction = "Generate speech based on the following description: \"" + *description +
             "\". The content to speak is: \"" + request.text_input->text + "\".";
     }
     auto & execution = execution_context();
-    const auto policy = sampling::resolve_torch_cuda_sampling_policy(core::BackendType::Cuda,
+    const auto policy = sampling::resolve_torch_cuda_sampling_policy(execution.backend_type(),
         options().backend.device, "auk", "AuK");
     std::vector<float> audio_embeddings, reference_latents;
     int64_t reference_frames = 0, valid_reference_frames = 0;
@@ -237,7 +240,7 @@ runtime::TaskResult AukSession::run(const runtime::TaskRequest & request) {
         debug::timing_log_scalar("auk.stage.audio_frontend_ms", debug::elapsed_ms(stage_started));
         stage_started = std::chrono::steady_clock::now();
         if (!audio_conditioning_) {
-            audio_conditioning_ = std::make_unique<AudioConditioningRuntime>(execution, *assets_->qwen, features.frames);
+            audio_conditioning_ = std::make_unique<AuKQwen25OmniAudioEncoderRuntime>(execution, *assets_->qwen, features.frames);
         } else {
             audio_conditioning_->prepare(features.frames);
         }
@@ -252,7 +255,7 @@ runtime::TaskResult AukSession::run(const runtime::TaskRequest & request) {
         debug::timing_log_scalar("auk.stage.reference_resample_ms", debug::elapsed_ms(stage_started));
         stage_started = std::chrono::steady_clock::now();
         if (!reference_encoder_) {
-            reference_encoder_ = std::make_unique<VaeEncoderRuntime>(execution, *assets_->vae, reference_audio.size());
+            reference_encoder_ = std::make_unique<VAEEncoderRuntime>(execution, *assets_->vae, reference_audio.size());
         } else {
             reference_encoder_->prepare(reference_audio.size());
         }
@@ -274,7 +277,7 @@ runtime::TaskResult AukSession::run(const runtime::TaskRequest & request) {
     const bool use_flash_attention = core::resolve_flash_attention(execution.backend(), 64, attention);
     debug::trace_log_scalar("auk.attention.allow_flash", use_flash_attention);
     if (!conditioning_) {
-        conditioning_ = std::make_unique<ConditioningRuntime>(execution, *assets_->qwen, *assets_->model,
+        conditioning_ = std::make_unique<AuKQwen25OmniConditioningRuntime>(execution, *assets_->qwen, *assets_->model,
             input.token_ids.size(), false, false, audio_tokens);
     } else {
         conditioning_->prepare(input.token_ids.size(), audio_tokens);
@@ -287,7 +290,7 @@ runtime::TaskResult AukSession::run(const runtime::TaskRequest & request) {
             flow_->prepare(frames, input.token_ids.size(), guidance >= 1e-5F, reference_frames, valid_reference_frames, steps);
         }
         if (!decoder_) {
-            decoder_ = std::make_unique<VaeDecoderRuntime>(execution, *assets_->vae, frames);
+            decoder_ = std::make_unique<VAEDecoderRuntime>(execution, *assets_->vae, frames);
         } else {
             decoder_->prepare(frames);
         }

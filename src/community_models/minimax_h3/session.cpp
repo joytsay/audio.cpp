@@ -29,15 +29,15 @@ std::shared_ptr<const engine::model_spec::ModelContract> require_contract(
     return contract;
 }
 
-MiniMaxH3DitAccelerationMode parse_dit_acceleration_mode(const std::string & value) {
+MiniMaxH3DiTAccelerationMode parse_dit_acceleration_mode(const std::string & value) {
     if (value == "none" || value == "off" || value == "0") {
-        return MiniMaxH3DitAccelerationMode::None;
+        return MiniMaxH3DiTAccelerationMode::None;
     }
     if (value == "first_block_cache" || value == "first-block-cache") {
-        return MiniMaxH3DitAccelerationMode::FirstBlockCache;
+        return MiniMaxH3DiTAccelerationMode::FirstBlockCache;
     }
     if (value == "spectrum") {
-        return MiniMaxH3DitAccelerationMode::Spectrum;
+        return MiniMaxH3DiTAccelerationMode::Spectrum;
     }
     throw std::runtime_error("MiniMax-H3 unsupported dit_acceleration mode: " + value);
 }
@@ -159,7 +159,7 @@ MiniMaxH3GenerateRequest MiniMaxH3Session::make_request(const runtime::TaskReque
     out.width = runtime::parse_int_option(request.options, {"width"}).value_or(assets_->config.width);
     out.num_frames = runtime::parse_int_option(request.options, {"num_frames"}).value_or(assets_->config.num_frames);
     out.guidance_scale = runtime::parse_float_option(request.options, {"guidance_scale"}).value_or(out.guidance_scale);
-    if (const auto value = runtime::find_option(request.options, {"sampler", "minimax_h3.sampler"})) {
+    if (const auto value = runtime::find_option(request.options, {"sampler_mode", "sampler", "minimax_h3.sampler"})) {
         out.sampler = parse_sampler_mode(*value);
     }
     out.flow_shift = runtime::parse_float_option(request.options, {"flow_shift"}).value_or(out.flow_shift);

@@ -1,12 +1,12 @@
 #include "engine/models/builtin_audio_utils/session.h"
 
 #include "engine/framework/audio/conversion.h"
-#include "engine/framework/audio/deepfilternet2.h"
-#include "engine/framework/audio/flashsr.h"
-#include "engine/framework/audio/gtcrn.h"
-#include "engine/framework/audio/rnnoise.h"
-#include "engine/framework/audio/utility_api.h"
-#include "engine/framework/audio/zipenhancer.h"
+#include "engine/framework/audio/utilities/deepfilternet2.h"
+#include "engine/framework/audio/utilities/flashsr.h"
+#include "engine/framework/audio/utilities/gtcrn.h"
+#include "engine/framework/audio/utilities/rnnoise.h"
+#include "engine/framework/audio/utilities/utility_api.h"
+#include "engine/framework/audio/utilities/zipenhancer.h"
 #include "engine/framework/debug/profiler.h"
 #include "engine/framework/runtime/options.h"
 
@@ -222,16 +222,6 @@ public:
         inspection.discovered_weights.push_back(runtime::NamedAsset{
             model_id,
             asset});
-        inspection.cli.request_options.push_back(runtime::CliOptionInfo{
-            "audio",
-            "wav",
-            "Input WAV audio to process.",
-            true});
-        inspection.cli.request_options.push_back(runtime::CliOptionInfo{
-            "out",
-            "wav",
-            "Output WAV path.",
-            true});
         inspection.cli.load_options.push_back(runtime::CliOptionInfo{
             "utility",
             "utility-id",

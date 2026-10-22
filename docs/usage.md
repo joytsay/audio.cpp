@@ -6,11 +6,13 @@ Use `audiocpp_cli` for direct model inference.
 audiocpp_cli --task <task> --family <family> --model <model-dir> --backend <backend> [inputs] [outputs]
 ```
 
+> **Always specify `--family` for model commands, including model-specific help.** Treat it as required; omission is supported only for backward compatibility. Automatic loader discovery without it can substantially slow startup and `--model ... --help`.
+
 ## Common Options
 
 | Option | Values | Default | Meaning |
 |---|---|---:|---|
-| `--task` | `gen`, `tts`, `clon`, `vc`, `svc`, `s2s`, `asr`, `align`, `vad`, `diar`, `sep`, `vdes`, `midi` | required | User task. |
+| `--task` | `gen`, `tts`, `clon`, `vc`, `svc`, `s2s`, `asr`, `align`, `vad`, `diar`, `sep`, `vdes`, `midi`, `wake`, `cls` | required | User task. |
 | `--family` | model family name | required | Selects the model implementation. Must match a registered loader (`audiocpp_cli --list-loaders`). |
 | `--model` | local model directory | required | Path to local model assets. |
 | `--backend` | `cpu`, `cuda`, `vulkan`, `metal`, `best` | `cpu` | Inference backend. |
@@ -27,7 +29,7 @@ audiocpp_cli --task <task> --family <family> --model <model-dir> --backend <back
 | Option | Used by | Meaning |
 |---|---|---|
 | `--text` | generation, TTS, ASR context, alignment transcript | Input text. |
-| `--audio` | generation/editing, ASR, VAD, diarization, separation, conversion, alignment | Input WAV, or `-` to stream raw PCM from stdin (requires `--mode streaming`). |
+| `--audio` | generation/editing, ASR, classification, wake word, VAD, diarization, separation, conversion, alignment | Input WAV, or `-` to stream raw PCM from stdin (requires `--mode streaming`). |
 | `--input-format` | streaming ASR with `--audio -` | Raw PCM sample format, `s16le` or `f32le`. Default `s16le`. |
 | `--input-rate` | streaming ASR with `--audio -` | Raw PCM sample rate in Hz. Default `16000`. |
 | `--input-channels` | streaming ASR with `--audio -` | Raw PCM channel count. Default `1`. |
@@ -39,13 +41,16 @@ audiocpp_cli --task <task> --family <family> --model <model-dir> --backend <back
 | `--segments-out` | VAD | Speech segments JSON. |
 | `--vad-chunks-out` | offline VAD | VAD-based audio chunk windows JSON. |
 | `--turns-out` | diarization | Speaker turns JSON. |
-| `--words-out` | ASR/alignment | Word timestamps JSON. |
+| `--words-out` | ASR/alignment | Word timestamps JSON. Sets `return_timestamps`. For `kokoro_tts` the entries are phoneme groups, not written words — read [its page](models/kokoro_tts.md#phoneme-group-timings) before joining them to text. |
 | `--audio-chunk-seconds` | ASR | Split long audio before model inference, where supported. |
 | `--audio-chunk-mode` | ASR/alignment | `auto`, `fixed`, `vad`, or `none`, where supported. |
 
 ## Common Generation Options
 
-Omit these unless you need explicit control. If `--seed` is omitted, models that sample use a random seed.
+Omit these unless you need explicit control. Seed defaults are model-specific:
+some models choose a random seed when omitted, while others use a fixed default
+(for example, AudioSR uses 42 and MiDashengLM uses 0). Neither `0` nor `-1` is a
+universal random-seed sentinel; check the model's usage page.
 
 | Option | Values | Meaning |
 |---|---|---|
@@ -112,13 +117,16 @@ The JSON may be either an array or an object with a `requests` array. Each item 
 
 For each request id, `--metrics` prints `metrics[<id>].wall_ms`, `audio_duration_ms`, `rtf`, `x_realtime`, `sample_rate`, and `channels`.
 
+A request can also pass input artifacts in an `artifacts` array, in the shape the server's [`/v1/tasks/run`](../app/server/README.md#post-v1tasksrun) takes: `id`, `kind`, `payload` (Base64) or `path` (a file holding the bytes, relative to the JSON file), and optional `meta`. Workflow requests take the same field, with paths relative to the workflow file.
+
 ## Model Docs
 
 | Need | Doc |
 |---|---|
 | Speech, voice clone, long-form TTS | [tts.md](tts.md) |
 | Music and sound generation | [music_generation.md](music_generation.md) |
+| Video lip synchronization | [LatentSync](models/latentsync.md) |
 | OmniVoice TTS, voice cloning, voice design, and streaming | [models/omnivoice.md](models/omnivoice.md) |
 | ASR models | [asr.md](asr.md) |
-| VAD and diarization | [speech_analysis.md](speech_analysis.md) |
+| Classification, wake word, VAD, and diarization | [speech_analysis.md](speech_analysis.md) |
 | Audio tools, voice conversion, codec, and source separation | [audio_tools.md](audio_tools.md) |

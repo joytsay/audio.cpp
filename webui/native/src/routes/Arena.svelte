@@ -14,11 +14,14 @@
   } from '$lib/api';
   import type { Translator } from '$lib/i18n';
   import MediaPreview from '$lib/MediaPreview.svelte';
+  import VoicePicker from '$lib/VoicePicker.svelte';
+  import type { SavedVoice } from '$lib/voices';
   import type { CatalogEntry, InstallPackageChoice, LoadedModel, ServerHealth } from '$lib/types';
   import { createLocalId } from '$lib/voices';
 
   export let activeCatalog: CatalogEntry[] = [];
   export let loadedModels: LoadedModel[] = [];
+  export let savedVoices: SavedVoice[] = [];
   export let server: ServerHealth | null = null;
   export let modelsFolder = '';
   export let maxTokens = 1024;
@@ -68,6 +71,7 @@
   let arenaGroundTruthText = '';
   let arenaVoiceMode: ArenaVoiceMode = 'default';
   let arenaBuiltinVoice = '';
+  let arenaSavedVoiceId = '';
   let arenaVoiceFile: File | null = null;
   let arenaVoiceInput: HTMLInputElement | null = null;
   let arenaReferenceText = '';
@@ -94,12 +98,12 @@
     demo_4_woman: 'demo_4_woman'
   };
 
-  $: arenaCatalog = activeCatalog.filter((entry) =>
+  $: arenaCatalog = activeCatalog.filter((entry) => entry.arena !== false && (
     arenaMode === 'tts'
       ? ['tts', 'clon'].includes(entry.task)
       : arenaMode === 'vc'
         ? entry.task === 'vc'
-        : entry.task === 'asr');
+        : entry.task === 'asr'));
   $: if (!arenaModelId || !arenaCatalog.some((entry) => entry.id === arenaModelId)) {
     arenaModelId = arenaCatalog[0]?.id || '';
   }
@@ -169,8 +173,21 @@
     return path.replace(/\\/g, '/').replace(/\/$/, '').toLowerCase();
   }
 
+  // The server reports an absolute path. A bundled model has a relative catalog path.
+  function loadedPathMatches(requestedPath: string, loadedPath: string) {
+    const actual = comparablePath(loadedPath);
+    const expected = comparablePath(requestedPath);
+    return actual === expected || actual.endsWith(`/${expected}`);
+  }
+
+  // Used as the server config sets it, as in the Studio: every entry without UI
+  // management, and a configured entry with it.
+  function isConfiguredEntry(entry: CatalogEntry) {
+    return Boolean(server) && (!server?.ui_management || entry.configured === true);
+  }
+
   function modelPathForChoice(entry: CatalogEntry, choice?: InstallPackageChoice) {
-    if (server && !server.ui_management) return entry.path;
+    if (isConfiguredEntry(entry)) return entry.path;
     return resolveCatalogPath(choice?.path || entry.path);
   }
 
@@ -266,19 +283,27 @@
     return tr(`arena.itemStatus.${status}`, {}, status);
   }
 
-  function chooseArenaVoiceMode(mode: ArenaVoiceMode) {
-    arenaVoiceMode = mode;
-    if (mode !== 'reference') {
-      arenaVoiceFile = null;
-      arenaReferenceText = '';
-      if (arenaVoiceInput) arenaVoiceInput.value = '';
-    }
-    if (mode !== 'builtin') {
-      arenaBuiltinVoice = '';
+  function chooseArenaVoice(value: string) {
+    clearArenaReference();
+    if (value.startsWith('saved:')) {
+      const voice = savedVoices.find((entry) => entry.id === value.slice(6));
+      if (!voice) return;
+      arenaSavedVoiceId = voice.id;
+      arenaVoiceMode = 'reference';
+      arenaVoiceFile = new File([voice.audio], `${voice.name}.wav`, { type: voice.audio.type || 'audio/wav' });
+      arenaReferenceText = voice.transcript;
+    } else if (value.startsWith('preset:')) {
+      arenaVoiceMode = 'builtin';
+      arenaBuiltinVoice = value.slice(7);
+    } else if (value === 'reference') {
+      arenaVoiceMode = 'reference';
     }
   }
 
   function chooseArenaReferenceVoice(file: File | null) {
+    if (arenaSavedVoiceId || arenaBuiltinVoice) arenaReferenceText = '';
+    arenaSavedVoiceId = '';
+    arenaBuiltinVoice = '';
     arenaVoiceFile = file;
     if (file) arenaVoiceMode = 'reference';
   }
@@ -290,6 +315,7 @@
 
   function clearArenaReference() {
     arenaVoiceMode = 'default';
+    arenaSavedVoiceId = '';
     arenaBuiltinVoice = '';
     arenaVoiceFile = null;
     arenaReferenceText = '';
@@ -386,7 +412,7 @@
   }
 
   async function ensureArenaItemLoaded(entry: CatalogEntry, choice?: InstallPackageChoice) {
-    if (!server?.ui_management) {
+    if (isConfiguredEntry(entry)) {
       if (!loadedModels.some((model) => model.id === entry.id && model.loaded)) {
         throw new Error(tr('arena.error.unregistered'));
       }
@@ -397,12 +423,12 @@
     }
     const path = modelPathForChoice(entry, choice);
     const resident = loadedModels.find((model) => model.id === entry.id && model.loaded &&
-      comparablePath(model.path) === comparablePath(path) &&
+      loadedPathMatches(path, model.path) &&
       (!choice || packageSessionOptionsMatch(entry, choice, model)));
     if (resident) return;
 
     const replaced = loadedModels.filter((model) => model.loaded &&
-      (model.id !== entry.id || comparablePath(model.path) !== comparablePath(path)));
+      (model.id !== entry.id || !loadedPathMatches(path, model.path)));
     for (const model of replaced) {
       await unloadModel(model.id);
     }
@@ -418,7 +444,7 @@
     });
     await refresh();
     if (!loadedModels.some((model) => model.id === entry.id && model.loaded &&
-      comparablePath(model.path) === comparablePath(path) &&
+      loadedPathMatches(path, model.path) &&
       (!choice || packageSessionOptionsMatch(entry, choice, model)))) {
       throw new Error(tr('arena.error.loadFailed'));
     }
@@ -617,7 +643,7 @@
 </section>
 
 <div class="arena-grid">
-  <section class="panel arena-inputs">
+  <section class="arena-inputs">
     <div class="section-title">
       <div><span>{tr('arena.input.label')}</span><h2>{tr('arena.input.title')}</h2></div>
       <span class="task-chip">{arenaModeText}</span>
@@ -659,16 +685,14 @@
       {/if}
     </div>
 
-    {#if arenaMode === 'tts'}
+    {#if arenaMode !== 'asr'}
       <div class="reference-input-grid">
         <div>
-          <label for="arena-voice-mode">{tr('arena.voice.label')} <span>{tr('arena.shared')}</span></label>
-          <select id="arena-voice-mode" value={arenaVoiceMode}
-            on:change={(event) => chooseArenaVoiceMode(event.currentTarget.value as ArenaVoiceMode)}>
-            <option value="default">{tr('arena.voice.modelDefault')}</option>
-            {#if builtinVoices.length}<option value="builtin">{tr('arena.voice.builtin')}</option>{/if}
-            <option value="reference">{tr('arena.voice.reference')}</option>
-          </select>
+          <VoicePicker id="arena-voice-mode"
+            value={arenaSavedVoiceId ? `saved:${arenaSavedVoiceId}` : arenaVoiceMode === 'builtin' ? `preset:${arenaBuiltinVoice}` : arenaVoiceMode === 'reference' ? 'reference' : ''}
+            presets={arenaMode === 'tts' ? builtinVoices : []} {savedVoices}
+            presetLabel={tr('arena.voice.builtin')} emptyLabel={tr('arena.voice.modelDefault')}
+            allowEmpty={arenaMode === 'tts'} referenceOption {tr} disabled={running} onselect={chooseArenaVoice} />
         </div>
         <div>
           <label for="arena-reference-text">{tr('voice.referenceText')} <span>{tr('request.optional')}</span></label>
@@ -678,12 +702,6 @@
     {/if}
 
     {#if arenaVoiceMode === 'builtin'}
-      <label for="arena-builtin-voice">{tr('arena.voice.builtin')}</label>
-      <select id="arena-builtin-voice" bind:value={arenaBuiltinVoice}>
-        {#each builtinVoices as voice}
-          <option value={voice}>{voice}</option>
-        {/each}
-      </select>
       <div class="quick-voice-note">
         {tr('arena.voice.builtinNote')}
       </div>
@@ -711,7 +729,7 @@
     </details>
   </section>
 
-  <section class="panel arena-queue">
+  <section class="arena-queue">
     <div class="section-title">
       <div><span>{tr('arena.queue.label')}</span><h2>{tr('arena.queue.title')}</h2></div>
       <span class="task-chip">{arenaItems.length}</span>
@@ -760,33 +778,27 @@
       <div class="empty-output"><p>{tr('arena.queue.empty')}</p></div>
     {/if}
 
-    <div class="runbar arena-runbar">
-      <button class="run" disabled={running || !arenaItems.length} on:click={runArena}>
-        <span>{running ? tr('run.working') : tr('arena.run')}</span>
-        <kbd>Ctrl Enter</kbd>
-      </button>
-      <button disabled={!running} on:click={cancel}>{tr('run.cancel')}</button>
-      <button disabled={running || !arenaItems.length} on:click={resetArena}>{tr('arena.queue.clear')}</button>
-    </div>
-    <div class="status" class:busy={running}>{status || tr('status.ready')}</div>
   </section>
 
-  <section class="panel arena-results">
+  <section class="arena-results">
     <div class="section-title">
       <div><span>{tr('result.label')}</span><h2>{tr('arena.results.title')}</h2></div>
-      <span class="task-chip">{arenaItems.filter((item) => item.status === 'done').length}</span>
+      <span class="task-chip">{arenaItems.filter((item) => item.status === 'done').length} / {arenaItems.length}</span>
     </div>
 
     {#if arenaItems.length}
+      <p class="arena-result-order">{arenaItems.every((item) => ['done', 'failed', 'skipped'].includes(item.status))
+        ? tr('arena.results.orderRtf') : tr('arena.results.orderSelection')}</p>
       <div class="arena-result-list">
-        {#each arenaResultItems as item}
+        {#each arenaResultItems as item, index}
           <article class:done={item.status === 'done'} class:failed={item.status === 'failed'} class:skipped={item.status === 'skipped'}>
             <header>
-              <div>
+              <span class="arena-result-number">{String(index + 1).padStart(2, '0')}</span>
+              <div class="arena-result-identity">
                 <strong>{item.label}</strong>
                 <span>{item.packageLabel}</span>
               </div>
-              <span>{arenaStatusLabel(item.status)}</span>
+              <span class="arena-status">{arenaStatusLabel(item.status)}</span>
             </header>
             {#if item.outputUrl}
               <audio controls src={item.outputUrl}></audio>
@@ -795,11 +807,11 @@
               <pre class="arena-text-output">{item.outputText}</pre>
             {/if}
             {#if item.outputUrl || item.outputText || item.wallMs || item.rtf || item.wer}
-              <div class="arena-metrics">
-                <span>{tr('arena.metric.wall')} {item.wallMs || '?'}</span>
-                <span>{tr('arena.metric.rtf')} {item.rtf || '?'}</span>
-                {#if item.wer}<span>{tr('arena.metric.wer')} {item.wer}</span>{/if}
-              </div>
+              <dl class="arena-metrics">
+                <div><dt>{tr('arena.metric.wall')}</dt><dd>{item.wallMs || '?'}</dd></div>
+                <div><dt>{tr('arena.metric.rtf')}</dt><dd>{item.rtf || '?'}</dd></div>
+                {#if item.wer}<div><dt>{tr('arena.metric.wer')}</dt><dd>{item.wer}</dd></div>{/if}
+              </dl>
             {/if}
             {#if item.note}<p>{item.note}</p>{/if}
             {#if item.error}<p class="arena-error">{item.error}</p>{/if}
@@ -810,4 +822,15 @@
       <div class="empty-output"><div class="wave">~</div><p>{tr('arena.results.empty')}</p></div>
     {/if}
   </section>
+  <div class="arena-actions">
+    <div class="runbar arena-runbar">
+      <button class="run" disabled={running || !arenaItems.length} on:click={runArena}>
+        <span>{running ? tr('run.working') : tr('arena.run')}</span>
+        <kbd>Ctrl Enter</kbd>
+      </button>
+      <button disabled={!running} on:click={cancel}>{tr('run.cancel')}</button>
+      <button disabled={running || !arenaItems.length} on:click={resetArena}>{tr('arena.queue.clear')}</button>
+    </div>
+    <div class="status" class:busy={running}>{status || tr('status.ready')}</div>
+  </div>
 </div>

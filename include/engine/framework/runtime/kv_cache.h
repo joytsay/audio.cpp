@@ -2,6 +2,7 @@
 
 #include "engine/framework/core/module.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -29,6 +30,27 @@ inline int64_t ring_stored_position(
     return row < pinned_prefix_steps ? row : current_end - valid_steps + row;
 }
 
+// Bucketed capacity for a static-cache AR loop: prompt rows plus a small
+// generated window to start, doubling buckets up to prompt + max_tokens. A
+// family that sizes its step graph from this number builds (and attends over)
+// the cache the request can fill, not the model's full cache length.
+inline int64_t bucketed_cache_steps(
+    int64_t prompt_steps,
+    int64_t max_tokens,
+    int64_t initial_generated_steps = 128,
+    int64_t minimum_bucket_steps = 128) {
+    const int64_t maximum = prompt_steps + max_tokens;
+    const int64_t required = prompt_steps + std::min(max_tokens, initial_generated_steps);
+    int64_t bucket = minimum_bucket_steps;
+    while (bucket < required && bucket <= maximum / 2) {
+        bucket *= 2;
+    }
+    if (bucket < required) {
+        bucket = required;
+    }
+    return std::min(bucket, maximum);
+}
+
 struct TransformerKVCacheOptions {
     bool allow_f16_storage = false;
     bool allow_bf16_storage = false;
@@ -37,6 +59,8 @@ struct TransformerKVCacheOptions {
     // reserved (e.g. prompt / attention sinks); positions stay absolute.
     bool ring_mode = false;
     int64_t ring_pinned_steps = 0;
+    // Device-only users can defer host staging allocation until import_state.
+    bool lazy_import_scratch = false;
 };
 
 class TransformerKVCache {
@@ -55,6 +79,12 @@ public:
         TransformerKVCacheOptions options);
 
     void import_state(const TransformerKVState & state);
+    // Import a contiguous, same-precision prefix starting at position zero.
+    // Backend copies preserve device residency; unused cache rows are zeroed.
+    void import_prefix(
+        const std::vector<core::TensorValue> & keys,
+        const std::vector<core::TensorValue> & values,
+        int64_t steps);
     void clear_on_backend();
     TransformerKVState export_state() const;
 

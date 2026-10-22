@@ -1,16 +1,22 @@
 #include "engine/framework/model_spec/package.h"
 #include "engine/framework/assets/tensor_source.h"
+#include "engine/framework/assets/weight_adapter.h"
+#include "engine/framework/assets/resource_bundle.h"
 #include "engine/framework/io/filesystem.h"
 #include "engine/framework/io/safetensors.h"
 #include "gguf.h"
 #include "test_assert.h"
 
 #include <cstring>
+#include <algorithm>
+#include <atomic>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -99,6 +105,110 @@ void test_safetensors_to_gguf_roundtrip() {
         binary_sidecar,
         "binary nested GGUF sidecar");
 
+    std::filesystem::remove_all(root);
+}
+
+void test_source_policy_cache_and_views() {
+    using namespace engine::assets;
+    const auto root = std::filesystem::temp_directory_path() / "audiocpp_source_policy_test";
+    std::filesystem::create_directories(root);
+    const auto file = root / "model.safetensors";
+    engine::io::write_safetensors_file(file, {
+        {"block/weight", "F32", {2, 2}, bytes_for(std::vector<float>{1, 2, 3, 4})},
+        {"block/step", "I64", {}, bytes_for(std::vector<int64_t>{42})},
+        {"norm.weight_g", "F32", {2, 1}, bytes_for(std::vector<float>{1, 2})},
+        {"norm.weight_v", "F32", {2, 2}, bytes_for(std::vector<float>{3, 4, 3, 4})},
+    });
+    const auto index = root / "model.safetensors.index.json";
+    std::ofstream(index) << R"({"weight_map":{"block/weight":"model.safetensors","block/step":"model.safetensors","norm.weight_g":"model.safetensors","norm.weight_v":"model.safetensors"}})";
+    const auto gguf = root / "model.gguf";
+    convert_tensor_source_to_gguf(file, gguf, TensorStorageType::F32, true, false);
+    // Bundle cache synchronization and source storage synchronization are separate opt-ins.
+    ResourceBundle bundle(root, ResourceBundleOptions{true});
+    bundle.add_file("primary", file);
+    bundle.add_file("alias", file);
+    bundle.add_tensor_source("prefix", file, "block");
+    const auto original = bundle.open_tensor_source("primary");
+    const auto shared = bundle.open_tensor_source("primary", TensorSourceOptions{true});
+    engine::test::require(original != shared, "synchronized resource reused a legacy cached source");
+    engine::test::require(bundle.open_tensor_source("alias") == original,
+        "legacy canonical-path cache behavior changed");
+    engine::test::require(bundle.open_tensor_source("alias", TensorSourceOptions{true}) == shared,
+        "synchronized canonical-path cache did not retain source identity");
+    std::vector<std::future<void>> jobs;
+    for (int worker = 0; worker < 8; ++worker) {
+        jobs.push_back(std::async(std::launch::async, [&] {
+            for (int wave = 0; wave < 50; ++wave) {
+                const auto source = bundle.open_tensor_source("prefix", TensorSourceOptions{true});
+                engine::test::require(source->require_i64_scalar("step") == 42, "prefixed source policy lost data");
+                shared->release_storage();
+            }
+        }));
+    }
+    for (auto & job : jobs) { job.get(); }
+    // Indexed shards and both view types retain the underlying source's storage lock.
+    for (const auto & path : {file, gguf, index}) {
+        const auto source = open_tensor_source(path, TensorSourceOptions{true});
+        const auto prefix = make_prefixed_tensor_source(source, "block");
+        const auto folded = make_weight_norm_folded_tensor_source(source, {"norm.weight"});
+        const auto expected = folded->require_f32("norm.weight");
+        auto release = std::async(std::launch::async, [&] {
+            for (int i = 0; i < 100; ++i) { source->release_storage(); }
+        });
+        for (int i = 0; i < 100; ++i) {
+            engine::test::require(prefix->require_i64_scalar("step") == 42, "indexed/prefixed scalar changed");
+            engine::test::require(folded->require_f32("norm.weight") == expected, "folded view lost source synchronization");
+        }
+        release.get();
+    }
+    std::filesystem::remove_all(root);
+}
+
+void test_concurrent_storage_release() {
+    const auto root = std::filesystem::temp_directory_path() / "audiocpp_concurrent_tensor_source_test";
+    std::filesystem::create_directories(root);
+    const auto safetensors = root / "model.safetensors";
+    const auto gguf = root / "model.gguf";
+    std::vector<float> values(262144);
+    for (size_t i = 0; i < values.size(); ++i) values[i] = static_cast<float>(i % 128);
+    const auto expected = bytes_for(values);
+    engine::io::write_safetensors_file(safetensors, {
+        {"weight", "F32", {512, 512}, expected},
+        {"step", "I64", {}, bytes_for(std::vector<int64_t>{42})},
+    });
+    engine::assets::convert_tensor_source_to_gguf(
+        safetensors, gguf, engine::assets::TensorStorageType::F32, true, false);
+    for (const auto & path : {safetensors, gguf}) {
+        const auto source = engine::assets::open_tensor_source(path, engine::assets::TensorSourceOptions{true});
+        source->release_storage();
+        std::atomic<bool> start{false};
+        std::atomic<bool> failed{false};
+        auto read = [&] {
+            while (!start.load()) std::this_thread::yield();
+            try {
+                for (int i = 0; i < 100; ++i) {
+                    const auto tensor = source->require_tensor_data("weight");
+                    if (tensor.bytes.size() != expected.size() ||
+                        std::memcmp(tensor.bytes.data(), expected.data(), expected.size()) != 0 ||
+                        source->require_i64_scalar("step") != 42) failed.store(true);
+                }
+            } catch (...) { failed.store(true); }
+        };
+        std::thread first(read);
+        std::thread second(read);
+        std::thread release([&] {
+            while (!start.load()) std::this_thread::yield();
+            for (int i = 0; i < 1000; ++i) {
+                source->release_storage();
+                std::this_thread::yield();
+            }
+        });
+        start.store(true);
+        first.join();
+        second.join();
+        release.join();
+        engine::test::require(!failed.load(), "concurrent read/release changed tensor data");
+    }
     std::filesystem::remove_all(root);
 }
 
@@ -424,17 +534,77 @@ void test_malformed_embedded_sidecars_are_rejected_by_the_name_reader() {
     std::filesystem::remove_all(root);
 }
 
+void test_weight_adapter_conversion() {
+    using namespace engine;
+    const auto root = std::filesystem::temp_directory_path() / "audiocpp_gguf_adapter_test";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root);
+    const auto original = root / "original.safetensors";
+    io::write_safetensors_file(original, {
+        {"projection.weight", "F32", {2, 32}, bytes_for(std::vector<float>(64, 0.25F))},
+        {"untouched.weight", "F32", {2, 32}, bytes_for(std::vector<float>(64, 0.5F))},
+        {"step", "F32", {}, bytes_for(std::vector<float>{42.0F})},
+    });
+    const auto base_path = root / "base.gguf";
+    assets::convert_tensor_sources_to_gguf({{original, ""}}, base_path, assets::TensorStorageType::F16,
+        false, false);
+    const auto base = assets::open_tensor_source(base_path);
+    const auto original_bytes = base->require_tensor_data("projection.weight").bytes;
+    auto adapter = std::make_shared<assets::WeightAdapter>();
+    adapter->updates.emplace("projection.weight", assets::WeightUpdate{
+        assets::LowRankWeightUpdate{std::vector<float>(32, 0.5F), {1.0F, -1.0F}, 1, 32, 2},
+        0.5F, assets::WeightMergeMode::DeltaF32});
+    const auto overlay = assets::make_weight_adapter_source(base, *adapter);
+    int index = 0;
+    for (auto type : {assets::TensorStorageType::Native, assets::TensorStorageType::F16,
+                     assets::TensorStorageType::BF16, assets::TensorStorageType::Q8_0}) {
+        assets::GgufConversionOptions options;
+        options.weight_adapter = adapter;
+        const auto output = root / (std::to_string(index++) + ".gguf");
+        assets::convert_tensor_sources_to_gguf({{base_path, ""}}, output, type, false, false,
+            {}, {}, std::nullopt, options);
+        const auto actual = assets::open_tensor_source(output);
+        test::require(actual->require_tensor_data("step").bytes == base->require_tensor_data("step").bytes,
+            "Adapter conversion must preserve untouched scalar metadata");
+        for (const auto & name : {"projection.weight", "untouched.weight"}) {
+            const auto expected = overlay->require_tensor(name, type, {2, 32});
+            test::require(actual->require_tensor_data(name).bytes == expected.bytes,
+                "GGUF adapter must merge before dtype conversion, including orig");
+        }
+    }
+    test::require(base->require_tensor_data("projection.weight").bytes == original_bytes,
+        "GGUF adapter conversion changed base weights");
+    auto replacement = std::make_shared<assets::WeightAdapter>();
+    replacement->replacements.emplace("projection.weight",
+        assets::WeightReplacement{{2, 32}, std::vector<float>(64, 0.1001F)});
+    assets::GgufConversionOptions replacement_options;
+    replacement_options.weight_adapter = replacement;
+    replacement_options.weight_adapter_merge_mode = assets::WeightMergeMode::RoundedBF16Delta;
+    const auto replacement_path = root / "replacement.gguf";
+    assets::convert_tensor_sources_to_gguf({{base_path, ""}}, replacement_path,
+        assets::TensorStorageType::F32, false, false, {}, {}, std::nullopt, replacement_options);
+    const auto rounded = assets::open_tensor_source(replacement_path)->require_f32("projection.weight");
+    const float want = ggml_bf16_to_fp32(ggml_fp32_to_bf16(0.1001F));
+    test::require(std::all_of(rounded.begin(), rounded.end(), [want](float value) { return value == want; }),
+        "Replacement-only export must retain the selected BF16 merge policy");
+    std::filesystem::remove_all(root);
+}
+
 }  // namespace
 
 int main() {
     try {
+        engine::io::json::enable_serialized_json_parsing();
         test_safetensors_to_gguf_roundtrip();
+        test_concurrent_storage_release();
+        test_source_policy_cache_and_views();
         test_packed_multi_source_gguf();
         test_all_rank0_gguf();
         test_embedded_model_spec_roundtrip_and_precedence();
         test_release_named_gguf_directory_selects_the_gguf_source();
         test_package_spec_errors_name_selected_spec();
         test_malformed_embedded_sidecars_are_rejected_by_the_name_reader();
+        test_weight_adapter_conversion();
     } catch (const std::exception & error) {
         std::cerr << error.what() << '\n';
         return 1;

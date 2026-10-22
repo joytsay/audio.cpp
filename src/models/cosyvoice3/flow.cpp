@@ -5,7 +5,7 @@
 #include "engine/framework/debug/profiler.h"
 #include "engine/framework/debug/trace.h"
 #include "engine/framework/modules/activation_modules.h"
-#include "engine/framework/modules/attention/feed_forward.h"
+#include "engine/framework/modules/feed_forward_modules.h"
 #include "engine/framework/modules/attention/projected_grouped_self_attention.h"
 #include "engine/framework/modules/conv_modules.h"
 #include "engine/framework/modules/linear_module.h"
@@ -14,6 +14,7 @@
 #include "engine/framework/modules/primitive_modules.h"
 #include "engine/framework/modules/structural_modules.h"
 #include "engine/framework/modules/weight_binding.h"
+#include "engine/models/cosyvoice3/rknn_flow.h"
 
 #include <ggml-alloc.h>
 #include <ggml.h>
@@ -192,7 +193,7 @@ struct CosyDiTBlockWeights {
     modules::FeedForwardWeights ff;
 };
 
-struct CosyFlowWeights {
+struct CosyDiTFlowWeights {
     std::shared_ptr<core::BackendWeightStore> store;
     core::TensorValue token_embedding;
     modules::LinearWeights speaker_projection;
@@ -249,12 +250,12 @@ CosyDiTBlockWeights load_block(
     return out;
 }
 
-std::shared_ptr<CosyFlowWeights> load_flow_weights(
+std::shared_ptr<CosyDiTFlowWeights> load_flow_weights(
     const CosyVoice3Assets & assets,
     core::ExecutionContext & execution,
     size_t weight_context_bytes,
     engine::assets::TensorStorageType storage_type) {
-    auto weights = std::make_shared<CosyFlowWeights>();
+    auto weights = std::make_shared<CosyDiTFlowWeights>();
     weights->store = std::make_shared<core::BackendWeightStore>(
         execution.backend(),
         execution.backend_type(),
@@ -269,6 +270,10 @@ std::shared_ptr<CosyFlowWeights> load_flow_weights(
         *weights->store, source, "pre_lookahead_layer.conv1", storage_type, c.flow_hidden_size, c.flow_mel_channels, c.pre_lookahead_len + 1, true);
     weights->pre_lookahead_conv2 = binding::conv1d_from_source(
         *weights->store, source, "pre_lookahead_layer.conv2", storage_type, c.flow_mel_channels, c.flow_hidden_size, 3, true);
+    // The ggml DiT weights are loaded in both paths, deliberately: the RKNN ladder covers a fixed
+    // set of lengths, and an utterance longer than the largest engine runs the ggml graph, so the
+    // copy is not spare memory. Skipping it would trade a fallback that works for one that throws
+    // `weight is invalid` the first time the ladder runs out.
     weights->input_projection = binding::linear_from_source(
         *weights->store, source, "decoder.estimator.input_embed.proj", storage_type, c.flow_hidden_size, 320, true);
     weights->conv_pos_1.weight = weights->store->load_tensor(
@@ -333,7 +338,7 @@ modules::ProjectedGroupedSelfAttentionConfig attention_config(const CosyVoice3Co
 core::TensorValue causal_conv_pos_embed(
     core::ModuleBuildContext & ctx,
     const core::TensorValue & input,
-    const CosyFlowWeights & weights) {
+    const CosyDiTFlowWeights & weights) {
     auto x = modules::TransposeModule({{0, 2, 1, 3}, input.shape.rank}).build(ctx, input);
     x = core::wrap_tensor(
         ggml_pad_ext(ctx.ggml, x.tensor, kConvPosKernel - 1, 0, 0, 0, 0, 0, 0, 0),
@@ -390,7 +395,7 @@ class ConditionGraph {
 public:
     ConditionGraph(
         core::ExecutionContext & execution,
-        std::shared_ptr<const CosyFlowWeights> weights,
+        std::shared_ptr<const CosyDiTFlowWeights> weights,
         CosyVoice3Config config,
         size_t graph_arena_bytes)
         : execution_(execution),
@@ -484,7 +489,7 @@ private:
     }
 
     core::ExecutionContext & execution_;
-    std::shared_ptr<const CosyFlowWeights> weights_;
+    std::shared_ptr<const CosyDiTFlowWeights> weights_;
     CosyVoice3Config config_;
     size_t graph_arena_bytes_ = 0;
     GraphMemory mem_;
@@ -497,7 +502,7 @@ class DiTGraph {
 public:
     DiTGraph(
         core::ExecutionContext & execution,
-        std::shared_ptr<const CosyFlowWeights> weights,
+        std::shared_ptr<const CosyDiTFlowWeights> weights,
         CosyVoice3Config config,
         size_t graph_arena_bytes)
         : execution_(execution),
@@ -514,7 +519,7 @@ public:
         const std::vector<float> & mu,
         const std::vector<float> & cond,
         const std::vector<float> & speaker,
-        const std::vector<float> & time_embedding,
+        float t,
         int64_t frames) {
         if (frames <= 0) {
             throw std::runtime_error("CosyVoice3 DiT frames must be positive");
@@ -524,10 +529,15 @@ public:
         if (static_cast<int64_t>(x.size()) != batch * channels * frames ||
             static_cast<int64_t>(mu.size()) != batch * channels * frames ||
             static_cast<int64_t>(cond.size()) != batch * channels * frames ||
-            static_cast<int64_t>(speaker.size()) != batch * channels ||
-            static_cast<int64_t>(time_embedding.size()) != batch * kTimeEmbeddingSize) {
+            static_cast<int64_t>(speaker.size()) != batch * channels) {
             throw std::runtime_error("CosyVoice3 DiT input size mismatch");
         }
+        // The graph takes the timestep embedding, not the timestep: the sinusoidal expansion is
+        // host-side here and inside the graph in the RKNN engine. Both backends get `t`.
+        const auto temb = timestep_embedding(t);
+        std::vector<float> time_embedding(static_cast<size_t>(batch) * kTimeEmbeddingSize);
+        std::copy(temb.begin(), temb.end(), time_embedding.begin());
+        std::copy(temb.begin(), temb.end(), time_embedding.begin() + kTimeEmbeddingSize);
         ensure(frames);
         ggml_backend_tensor_set(x_, x.data(), 0, x.size() * sizeof(float));
         ggml_backend_tensor_set(mu_, mu.data(), 0, mu.size() * sizeof(float));
@@ -639,7 +649,7 @@ private:
     }
 
     core::ExecutionContext & execution_;
-    std::shared_ptr<const CosyFlowWeights> weights_;
+    std::shared_ptr<const CosyDiTFlowWeights> weights_;
     CosyVoice3Config config_;
     size_t graph_arena_bytes_ = 0;
     GraphMemory mem_;
@@ -655,7 +665,7 @@ private:
 
 std::vector<float> normalize_and_project_speaker(
     const CosyVoice3Config & config,
-    const CosyFlowWeights & weights,
+    const CosyDiTFlowWeights & weights,
     core::ExecutionContext & execution,
     const std::vector<float> & speaker_embedding,
     size_t graph_arena_bytes) {
@@ -704,7 +714,7 @@ std::vector<float> normalize_and_project_speaker(
 
 std::vector<float> read_noise_prefix(
     const CosyVoice3Config & config,
-    const CosyFlowWeights & weights,
+    const CosyDiTFlowWeights & weights,
     int64_t frames) {
     if (frames > 50 * 300) {
         throw std::runtime_error("CosyVoice3 requested mel frames exceed fixed flow noise capacity");
@@ -721,22 +731,35 @@ std::vector<float> read_noise_prefix(
 
 }  // namespace
 
-class CosyVoice3FlowRuntime::Impl {
+class CosyVoice3DiTFlowRuntime::Impl {
 public:
     Impl(
         std::shared_ptr<const CosyVoice3Assets> assets,
         core::ExecutionContext & execution,
         size_t graph_arena_bytes,
         size_t weight_context_bytes,
-        engine::assets::TensorStorageType storage_type)
+        engine::assets::TensorStorageType storage_type,
+        const std::vector<std::string> & rknn_engine_paths)
         : assets_(std::move(assets)),
           execution_(execution),
-          weights_(load_flow_weights(*assets_, execution_, weight_context_bytes, storage_type)),
+          weights_(load_flow_weights(
+              *assets_,
+              execution_,
+              weight_context_bytes,
+              storage_type)),
           condition_(execution_, weights_, assets_->config, graph_arena_bytes),
           dit_(execution_, weights_, assets_->config, graph_arena_bytes),
           graph_arena_bytes_(graph_arena_bytes) {
         if (assets_ == nullptr) {
             throw std::runtime_error("CosyVoice3 flow runtime requires assets");
+        }
+        if (!rknn_engine_paths.empty()) {
+            // The engines' own channel count is checked against the checkpoint when an engine
+            // loads, so nothing to compare here: registering the ladder loads none of it.
+            rknn_ = std::make_unique<CosyVoice3RknnFlow>(
+                rknn_engine_paths, assets_->config.flow_mel_channels);
+            debug::trace_log_scalar("cosyvoice3.flow.dit.rknn.engines", rknn_->engine_count());
+            debug::trace_log_scalar("cosyvoice3.flow.dit.rknn.max_frames", rknn_->max_frames());
         }
     }
 
@@ -788,15 +811,20 @@ public:
         std::copy(speaker_cond.begin(), speaker_cond.end(), spks.begin());
 
         const auto schedule = cosine_time_schedule(request.num_inference_steps);
+        // The NPU ladder covers a fixed range of lengths; past its largest engine the ggml graph
+        // is the only backend that has a shape for the utterance, so the fallback is per call.
+        const bool on_npu = rknn_ != nullptr && total_frames <= rknn_->max_frames();
+        if (rknn_ != nullptr && !on_npu) {
+            debug::timing_log_scalar(
+                "cosyvoice3.flow.dit.rknn.fallback_frames", static_cast<int64_t>(total_frames));
+        }
         const auto dit_start = std::chrono::steady_clock::now();
         for (int64_t step = 1; step < static_cast<int64_t>(schedule.size()); ++step) {
             const float t = schedule[static_cast<size_t>(step - 1)];
             const float dt = schedule[static_cast<size_t>(step)] - t;
-            auto temb = timestep_embedding(t);
-            std::vector<float> time_batched(static_cast<size_t>(2 * kTimeEmbeddingSize));
-            std::copy(temb.begin(), temb.end(), time_batched.begin());
-            std::copy(temb.begin(), temb.end(), time_batched.begin() + kTimeEmbeddingSize);
-            auto pred = dit_.run(x_batched, mu, cond, spks, time_batched, total_frames);
+            auto pred = on_npu
+                ? rknn_->run(x_batched.data(), mu.data(), cond.data(), spks.data(), t, total_frames)
+                : dit_.run(x_batched, mu, cond, spks, t, total_frames);
             const size_t branch = static_cast<size_t>(c.flow_mel_channels * total_frames);
             for (size_t i = 0; i < branch; ++i) {
                 const float guided = (1.0F + kInferenceCfgRate) * pred[i] - kInferenceCfgRate * pred[branch + i];
@@ -829,32 +857,35 @@ public:
 private:
     std::shared_ptr<const CosyVoice3Assets> assets_;
     core::ExecutionContext & execution_;
-    std::shared_ptr<CosyFlowWeights> weights_;
+    std::shared_ptr<CosyDiTFlowWeights> weights_;
     ConditionGraph condition_;
     DiTGraph dit_;
+    std::unique_ptr<CosyVoice3RknnFlow> rknn_;
     size_t graph_arena_bytes_ = 0;
 };
 
-CosyVoice3FlowRuntime::CosyVoice3FlowRuntime(
+CosyVoice3DiTFlowRuntime::CosyVoice3DiTFlowRuntime(
     std::shared_ptr<const CosyVoice3Assets> assets,
     engine::core::ExecutionContext & execution,
     size_t graph_arena_bytes,
     size_t weight_context_bytes,
-    engine::assets::TensorStorageType storage_type)
+    engine::assets::TensorStorageType storage_type,
+    const std::vector<std::string> & rknn_engine_paths)
     : impl_(std::make_unique<Impl>(
           std::move(assets),
           execution,
           graph_arena_bytes,
           weight_context_bytes,
-          storage_type)) {}
+          storage_type,
+          rknn_engine_paths)) {}
 
-CosyVoice3FlowRuntime::~CosyVoice3FlowRuntime() = default;
+CosyVoice3DiTFlowRuntime::~CosyVoice3DiTFlowRuntime() = default;
 
-CosyVoice3FlowOutput CosyVoice3FlowRuntime::generate(const CosyVoice3FlowRequest & request) {
+CosyVoice3FlowOutput CosyVoice3DiTFlowRuntime::generate(const CosyVoice3FlowRequest & request) {
     return impl_->generate(request);
 }
 
-void CosyVoice3FlowRuntime::release_graphs() {
+void CosyVoice3DiTFlowRuntime::release_graphs() {
     impl_->release_graphs();
 }
 

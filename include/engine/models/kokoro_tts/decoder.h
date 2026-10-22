@@ -3,32 +3,44 @@
 #include "engine/models/kokoro_tts/predictor.h"
 
 #include <cstdint>
+#include <memory>
+#include <string>
 #include <vector>
 
 typedef struct ggml_backend * ggml_backend_t;
 
 namespace kokoro_ggml {
 
-struct KokoroDecoderCapacityContract {
+struct KokoroIstftNetDecoderCapacityContract {
     int64_t decoder_frames = 0;
     int64_t conditioning_frames = 0;
 };
 
-class KokoroDecoderRuntime {
+class KokoroIstftNetDecoderRuntime {
 public:
-    KokoroDecoderRuntime(
+    // `rknn_generator_path` (optional) routes the generator stage to a pre-compiled
+    // RKNN engine; see engine/models/kokoro_tts/rknn_generator.h.
+    // `rknn_generator_overlap` / `rknn_generator_gain` come from exec_plan.params on that
+    // sidecar's window walk (overlap-blend / per-window loudness correction); both
+    // default to the shipping walk.
+    KokoroIstftNetDecoderRuntime(
         std::shared_ptr<const KokoroWeights> weights,
         ggml_backend_t backend,
         int n_threads,
         bool use_device_backend,
         uint64_t rng_seed,
-        KokoroDecoderCapacityContract contract);
-    ~KokoroDecoderRuntime();
+        KokoroIstftNetDecoderCapacityContract contract,
+        const std::string & rknn_generator_path = {},
+        int64_t rknn_generator_overlap = 0,
+        bool rknn_generator_gain = false,
+        bool neon_generator = false);
+    ~KokoroIstftNetDecoderRuntime();
 
-    KokoroDecoderRuntime(const KokoroDecoderRuntime &) = delete;
-    KokoroDecoderRuntime & operator=(const KokoroDecoderRuntime &) = delete;
+    KokoroIstftNetDecoderRuntime(const KokoroIstftNetDecoderRuntime &) = delete;
+    KokoroIstftNetDecoderRuntime & operator=(const KokoroIstftNetDecoderRuntime &) = delete;
 
-    void prepare(KokoroDecoderCapacityContract contract);
+    void prepare(KokoroIstftNetDecoderCapacityContract contract);
+    void set_seed(uint64_t seed);
 
     std::vector<float> decode(
         const PredictorOutputs & predictor,

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "base64.h"
+#include "../common/base64.h"
 #include "engine/framework/io/json.h"
 
 #include <algorithm>
@@ -36,7 +36,7 @@ public:
             {"id", json::Value::make_string(id)}, {"name", json::Value::make_string(name)},
             {"transcript", json::Value::make_string(transcript)},
             {"createdAt", json::Value::make_number(0)},
-            {"audio", json::Value::make_string(base64_encode(audio))}
+            {"audio", json::Value::make_string(minitts::app::base64_encode(audio))}
         })));
         // Import once, so deleting a preset also survives server restarts.
         std::ofstream imported(marker);
@@ -70,7 +70,7 @@ public:
         const auto name = json::require_string(value, "name");
         const auto transcript = json::require_string(value, "transcript");
         const auto created = json::require_i64(value, "createdAt");
-        const auto audio = base64_decode(json::require_string(value, "audio"));
+        const auto audio = minitts::app::base64_decode(json::require_string(value, "audio"));
         if (name.empty() || name.size() > 256 || transcript.size() > 65536 || created < 0) {
             throw std::invalid_argument("Invalid reference voice metadata");
         }
@@ -83,7 +83,7 @@ public:
             {"id", json::Value::make_string(id)}, {"name", json::Value::make_string(name)},
             {"transcript", json::Value::make_string(transcript)},
             {"createdAt", json::Value::make_number(static_cast<double>(created))},
-            {"audio", json::Value::make_string(base64_encode(audio))}
+            {"audio", json::Value::make_string(minitts::app::base64_encode(audio))}
         }));
         std::lock_guard<std::mutex> lock(mutex_);
         std::filesystem::create_directories(root_);

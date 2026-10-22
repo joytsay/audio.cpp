@@ -108,7 +108,8 @@ TransformerKVCache::TransformerKVCache(
     if (keys.size() != values.size()) {
         throw std::runtime_error("TransformerKVCache key/value layer counts must match");
     }
-    const size_t cache_elems = static_cast<size_t>(cache_steps_ * step_elems_);
+    const size_t cache_elems = options_.lazy_import_scratch
+        ? 0 : static_cast<size_t>(cache_steps_ * step_elems_);
     layers_.reserve(keys.size());
     for (size_t layer = 0; layer < keys.size(); ++layer) {
         validate_cache_tensor(keys[layer], options_);
@@ -159,6 +160,9 @@ void TransformerKVCache::import_state(const TransformerKVState & state) {
             throw std::runtime_error("TransformerKVCache source tensors do not match valid_steps * step_elems");
         }
         if (cache_steps_ > 0) {
+            const size_t cache_elems = static_cast<size_t>(cache_steps_ * step_elems_);
+            cache.import_key_scratch.resize(cache_elems);
+            cache.import_value_scratch.resize(cache_elems);
             std::fill(cache.import_key_scratch.begin(), cache.import_key_scratch.end(), 0.0F);
             std::fill(cache.import_value_scratch.begin(), cache.import_value_scratch.end(), 0.0F);
             if (keep_elems > 0) {
@@ -180,6 +184,39 @@ void TransformerKVCache::import_state(const TransformerKVState & state) {
             write_cache_tensor(cache.value_tensor, cache.import_value_scratch, options_);
         }
     }
+}
+
+void TransformerKVCache::import_prefix(
+    const std::vector<core::TensorValue> & keys,
+    const std::vector<core::TensorValue> & values,
+    int64_t steps) {
+    if (steps <= 0 || steps > cache_steps_ || keys.size() != layers_.size() || values.size() != layers_.size()) {
+        throw std::runtime_error("TransformerKVCache prefix shape exceeds cache or has different layers");
+    }
+    for (size_t layer = 0; layer < layers_.size(); ++layer) {
+        for (const auto & tensors : {std::pair{keys[layer], layers_[layer].key_tensor},
+                                    std::pair{values[layer], layers_[layer].value_tensor}}) {
+            const auto & source = tensors.first;
+            const auto & target = tensors.second;
+            auto expected = target.shape;
+            expected.dims[1] = steps;
+            core::validate_shape(source, expected, "KV prefix");
+            if (source.shape.dims[0] != 1 || source.type != target.type || !ggml_is_contiguous(source.tensor)) {
+                throw std::runtime_error("TransformerKVCache prefix requires unbatched contiguous tensors of matching precision");
+            }
+            // A temporary descriptor limits the copy to the prefix without
+            // adding per-request views to a retained ggml context.
+            ggml_tensor destination = *target.tensor;
+            std::copy(source.tensor->ne, source.tensor->ne + GGML_MAX_DIMS, destination.ne);
+            std::copy(source.tensor->nb, source.tensor->nb + GGML_MAX_DIMS, destination.nb);
+            ggml_backend_tensor_copy(source.tensor, &destination);
+            const size_t copied = ggml_nbytes(source.tensor);
+            const size_t tail = ggml_nbytes(target.tensor) - copied;
+            if (tail != 0) ggml_backend_tensor_memset(target.tensor, 0, copied, tail);
+        }
+    }
+    valid_steps_ = steps;
+    current_end_ = steps;
 }
 
 TransformerKVState TransformerKVCache::export_state() const {

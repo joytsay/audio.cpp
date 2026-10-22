@@ -24,14 +24,14 @@ int main() {
             {"name", json::Value::make_string("中文 voice")},
             {"transcript", json::Value::make_string("你好\nHello")},
             {"createdAt", json::Value::make_number(1234567890000)},
-            {"audio", json::Value::make_string(minitts::server::base64_encode(wav))}
+            {"audio", json::Value::make_string(minitts::app::base64_encode(wav))}
         });
         first.save(json::stringify(record));
         VoiceLibrary restarted(root);
         const auto saved = json::parse(restarted.list()).require("voices").as_array();
         require(saved.size() == 1, "voice must survive server restart and be visible to another client");
         require(saved[0].require("transcript").as_string() == "你好\nHello", "transcript roundtrip");
-        require(minitts::server::base64_decode(saved[0].require("audio").as_string()) == wav, "audio roundtrip");
+        require(minitts::app::base64_decode(saved[0].require("audio").as_string()) == wav, "audio roundtrip");
         first.save(json::stringify(record));
         require(json::parse(first.list()).require("voices").as_array().size() == 1, "import must be idempotent");
         for (const auto & id : {"../outside", "/tmp/outside", "bad/name", "", ".."}) {
@@ -66,7 +66,7 @@ int main() {
         for (const auto & preset : presets) {
             const auto name = preset.require("name").as_string();
             require(preset.require("transcript").as_string() == (name == "lingCLvocals" ? "志玲參考逐字稿" : "王先生參考逐字稿"), "preset transcript mismatch");
-            require(minitts::server::base64_decode(preset.require("audio").as_string()) == wav, "preset WAV mismatch");
+            require(minitts::app::base64_decode(preset.require("audio").as_string()) == wav, "preset WAV mismatch");
         }
         restarted.import_reference("lingCLvocals", source, "must not overwrite");
         require(json::parse(first.list()).require("voices").as_array().size() == 2, "preset import duplicated a voice");

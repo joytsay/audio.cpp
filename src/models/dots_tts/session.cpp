@@ -379,7 +379,7 @@ struct DotsSession::PromptConditioning {
 };
 
 struct DotsSession::SegmentState {
-    DotsLlmState llm;
+    DotsQwen2State llm;
     DotsPatchEncoderState patch;
     DotsFlowDecodeState flow;
     std::vector<float> fm_sequence;
@@ -481,7 +481,11 @@ runtime::RunMode DotsSession::run_mode() const {
 }
 
 void DotsSession::prepare(const runtime::SessionPreparationRequest & request) {
-    runtime::validate_spec_backed_request_options(request.options, *contract_, "DotTTS");
+    auto validation_options = request.options;
+    validation_options.erase("instruct");
+    validation_options.erase("instruction");
+    (void)runtime::find_option(request.options, {"instruction", "instruct"});
+    runtime::validate_spec_backed_request_options(validation_options, *contract_, "DotTTS");
     prepared_defaults_ = make_dots_prepare_defaults(*assets_, request);
     mark_prepared();
 }
@@ -1191,7 +1195,7 @@ runtime::AudioBuffer DotsSession::synthesize_streaming_segment(
     const std::string & text,
     size_t segment_index,
     PromptConditioning & conditioning,
-    DotsAudioVaeStreamState & stream_state,
+    DotsAudioVAEStreamState & stream_state,
     const runtime::StreamEventCallback & sink) {
     const int64_t merge_steps = request.generation.vocoder_merge_steps;
     runtime::AudioBuffer merged{static_cast<int>(audio_vae_.sample_rate()), 1, {}};
@@ -1280,7 +1284,7 @@ void DotsSession::ensure_audio_vae_loaded() {
     if (audio_vae_.is_loaded()) {
         return;
     }
-    audio_vae_ = DotsAudioVaeComponent::load_from_tensor_source(
+    audio_vae_ = DotsAudioVAEComponent::load_from_tensor_source(
         assets_->vocoder_weights,
         options().backend,
         assets_->config.vocoder,
@@ -1303,7 +1307,7 @@ void DotsSession::ensure_llm_loaded() {
     if (llm_.is_loaded()) {
         return;
     }
-    llm_ = DotsLlmComponent::load_from_tensor_source(
+    llm_ = DotsQwen2Component::load_from_tensor_source(
         assets_->core_weights,
         options().backend,
         assets_->config.llm,
@@ -1326,14 +1330,14 @@ void DotsSession::release_conditioning_phase_components() {
         return;
     }
     speaker_encoder_ = engine::modules::CampplusEncoderComponent();
-    audio_vae_ = DotsAudioVaeComponent();
+    audio_vae_ = DotsAudioVAEComponent();
 }
 
 void DotsSession::release_generation_phase_components() {
     if (!mem_saver_) {
         return;
     }
-    llm_ = DotsLlmComponent();
+    llm_ = DotsQwen2Component();
     patch_encoder_ = DotsPatchEncoderComponent();
     flow_ = DotsFlowComponent();
 }
@@ -1342,7 +1346,7 @@ void DotsSession::release_audio_phase_components() {
     if (!mem_saver_) {
         return;
     }
-    audio_vae_ = DotsAudioVaeComponent();
+    audio_vae_ = DotsAudioVAEComponent();
 }
 
 runtime::AudioBuffer DotsSession::synthesize_chunked(
@@ -1376,7 +1380,10 @@ runtime::TaskResult DotsSession::run(const runtime::TaskRequest & request) {
     if (task_.mode != runtime::RunMode::Offline) {
         throw std::runtime_error("DotTTS run requires an offline session");
     }
-    runtime::validate_spec_backed_request_options(request.options, *contract_, "DotTTS");
+    auto validation_options = request.options;
+    validation_options.erase("instruct");
+    validation_options.erase("instruction");
+    runtime::validate_spec_backed_request_options(validation_options, *contract_, "DotTTS");
     const auto start = Clock::now();
     auto parsed = make_dots_request(*assets_, request, prepared_defaults_);
     runtime::TaskResult result;
@@ -1397,7 +1404,10 @@ void DotsSession::start_stream(const runtime::TaskRequest & request) {
     if (task_.mode != runtime::RunMode::Streaming) {
         throw std::runtime_error("DotTTS start_stream requires a streaming session");
     }
-    runtime::validate_spec_backed_request_options(request.options, *contract_, "DotTTS");
+    auto validation_options = request.options;
+    validation_options.erase("instruct");
+    validation_options.erase("instruction");
+    runtime::validate_spec_backed_request_options(validation_options, *contract_, "DotTTS");
     reset();
     const auto start = Clock::now();
     auto parsed = make_dots_request(*assets_, request, prepared_defaults_);

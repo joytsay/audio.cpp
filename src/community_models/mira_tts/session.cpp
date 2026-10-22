@@ -117,8 +117,19 @@ MiraTTSOfflineSession::MiraTTSOfflineSession(
       assets_(require_assets(std::move(assets))),
       contract_(require_contract(std::move(contract))),
       reference_cache_(reference_cache_slots(this->options())) {
+    const auto normalized_options = runtime::apply_option_v1_compatibility(
+        options,
+        {{"backbone_weight_type", "mira_tts.backbone_weight_type"},
+         {"linear_weight_type", "mira_tts.linear_weight_type"},
+         {"conv_weight_type", "mira_tts.conv_weight_type"}},
+        "MiraTTS");
+    auto validation_options = normalized_options;
+    // Older embedded specs classify these session consumers as load options.
+    validation_options.options.erase("mira_tts.backbone_weight_type");
+    validation_options.options.erase("mira_tts.linear_weight_type");
+    validation_options.options.erase("mira_tts.conv_weight_type");
     runtime::validate_spec_backed_session_options(
-        options, *contract_, kFamily, "MiraTTS");
+        validation_options, *contract_, kFamily, "MiraTTS");
     if ((task.mode != runtime::RunMode::Offline &&
          task.mode != runtime::RunMode::Streaming) ||
         (task.task != runtime::VoiceTaskKind::Tts &&
@@ -127,29 +138,29 @@ MiraTTSOfflineSession::MiraTTSOfflineSession(
             "MiraTTS supports offline and streaming TTS/voice cloning only");
     }
     const auto lm_type = runtime::parse_tensor_storage_option(
-        options.options, "backbone_weight_type", assets::TensorStorageType::Native,
+        normalized_options.options, "mira_tts.backbone_weight_type", assets::TensorStorageType::Native,
         {assets::TensorStorageType::Native, assets::TensorStorageType::F32,
          assets::TensorStorageType::F16, assets::TensorStorageType::BF16,
          assets::TensorStorageType::Q8_0});
     const auto linear_type = runtime::parse_tensor_storage_option(
-        options.options, "linear_weight_type", assets::TensorStorageType::Native,
+        normalized_options.options, "mira_tts.linear_weight_type", assets::TensorStorageType::Native,
         {assets::TensorStorageType::Native, assets::TensorStorageType::F32,
          assets::TensorStorageType::F16, assets::TensorStorageType::BF16,
          assets::TensorStorageType::Q8_0});
     const auto conv_type = runtime::parse_tensor_storage_option(
-        options.options, "conv_weight_type", assets::TensorStorageType::F32,
+        normalized_options.options, "mira_tts.conv_weight_type", assets::TensorStorageType::F32,
         {assets::TensorStorageType::Native, assets::TensorStorageType::F32,
          assets::TensorStorageType::F16, assets::TensorStorageType::BF16});
     auto & execution = execution_context();
     prompt_ = std::make_unique<MiraPromptBuilder>(assets_);
-    speaker_encoder_ = std::make_unique<MiraSpeakerEncoder>(
+    speaker_encoder_ = std::make_unique<MiraEcapaPerceiverEncoder>(
         *assets_, execution, kWeightBytes, kGraphBytes, linear_type, conv_type);
-    generator_ = std::make_unique<MiraGenerator>(
+    generator_ = std::make_unique<MiraQwen2Generator>(
         *assets_, execution, kGraphBytes, kGraphBytes, kWeightBytes, lm_type);
-    processor_ = std::make_unique<MiraAcousticProcessor>(
+    processor_ = std::make_unique<MiraConvNeXtAcousticProcessor>(
         *assets_, execution, kWeightBytes, kGraphBytes, linear_type, conv_type);
     // ggml's current CUDA ConvTranspose1d kernel requires F32 weights.
-    decoder_ = std::make_unique<MiraDecoder>(
+    decoder_ = std::make_unique<MiraSnakeConvDecoder>(
         *assets_, execution, kWeightBytes, kGraphBytes,
         assets::TensorStorageType::F32);
 }

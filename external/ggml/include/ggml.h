@@ -456,6 +456,7 @@ extern "C" {
         GGML_MUL_MAT_LOWERING_DEFAULT                    = 0,
         GGML_MUL_MAT_LOWERING_CUDA_NVFP4_F16_ACTIVATION  = 2,
         GGML_MUL_MAT_LOWERING_CUDA_TILE_F16_ACCUM_OUTPUT = 3,
+        GGML_MUL_MAT_LOWERING_VULKAN_F32_INPUTS           = 4,
     };
 
     // model file types
@@ -615,6 +616,10 @@ extern "C" {
         GGML_OP_RMS_NORM_CHANNELS_SILU,
         GGML_OP_RMS_NORM_CHANNELS_ADD_BIAS_SILU,
         GGML_OP_ROPE_INTERLEAVED_PAIRS,
+        // audio8_tts codec per-tap accumulation and fused snake (audio8 PR).
+        GGML_OP_MUL_MAT_ACC,
+        GGML_OP_SNAKE_1D,
+        GGML_OP_FLASH_ATTN_F16_HEAD40,
 
         GGML_OP_COUNT,
     };
@@ -709,6 +714,11 @@ extern "C" {
     enum ggml_ssm_scan_fusion {
         GGML_SSM_SCAN_FUSION_NONE = 0,
         GGML_SSM_SCAN_FUSION_GATE = 1,
+    };
+
+    enum ggml_ssm_conv_fusion {
+        GGML_SSM_CONV_FUSION_NONE = 0,
+        GGML_SSM_CONV_FUSION_CAUSAL_PAD = 1,
     };
 
     enum ggml_rms_norm_channels_lowering {
@@ -1475,6 +1485,8 @@ extern "C" {
             struct ggml_tensor  * a,
             float                 eps);
 
+    GGML_API void ggml_norm_set_cuda_f16(struct ggml_tensor * tensor);
+
     GGML_API struct ggml_tensor * ggml_norm_inplace(
             struct ggml_context * ctx,
             struct ggml_tensor  * a,
@@ -1521,6 +1533,11 @@ extern "C" {
             int                   n_groups,
             float                 eps);
 
+    GGML_API void ggml_group_norm_set_cuda_affine_f16(
+            struct ggml_tensor * tensor,
+            struct ggml_tensor * scale,
+            struct ggml_tensor * bias);
+
     GGML_API struct ggml_tensor * ggml_group_norm_inplace(
             struct ggml_context * ctx,
             struct ggml_tensor  * a,
@@ -1554,6 +1571,27 @@ extern "C" {
             struct ggml_context * ctx,
             struct ggml_tensor  * a,
             struct ggml_tensor  * b);
+
+    // CUDA-only FP16 output variant. Both operands must be FP16.
+    GGML_API struct ggml_tensor * ggml_mul_mat_f16(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * a,
+            struct ggml_tensor  * b);
+
+    // accumulate matrix multiplication in-place: acc += a * b
+    // result is a view of acc (which must have the shape of a * b), so the
+    // accumulation lands directly in acc's memory without a separate add pass
+    GGML_API struct ggml_tensor * ggml_mul_mat_acc(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * a,
+            struct ggml_tensor  * b,
+            struct ggml_tensor  * acc);
+
+    // fused snake activation: dst = a + sin(a * alpha)^2 / alpha, alpha broadcast per channel
+    GGML_API struct ggml_tensor * ggml_snake_1d(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * a,
+            struct ggml_tensor  * alpha);
 
     GGML_API struct ggml_tensor * ggml_mul_mat_pack4(
             struct ggml_context * ctx,
@@ -2334,6 +2372,9 @@ extern "C" {
             int                   d0,  // dilation dimension 0
             int                   d1); // dilation dimension 1
 
+    GGML_API void ggml_conv_2d_direct_set_cudnn(struct ggml_tensor * tensor);
+    GGML_API void ggml_conv_2d_direct_set_cudnn_bias(struct ggml_tensor * tensor, struct ggml_tensor * bias);
+
     GGML_API struct ggml_tensor * ggml_conv_3d_direct(
             struct ggml_context * ctx,
             struct ggml_tensor  * a,   // kernel [KW, KH, KD, IC * OC]
@@ -2573,6 +2614,15 @@ extern "C" {
             float                 max_bias,
             float                 logit_softcap);
 
+    // CUDA-only, noncausal FP16 attention for 40-wide heads. Padding to the
+    // tensor-core tile width is internal to this operation.
+    GGML_API struct ggml_tensor * ggml_flash_attn_f16_head40(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * q,
+            struct ggml_tensor  * k,
+            struct ggml_tensor  * v,
+            float                 scale);
+
     // CUDA-only SageAttention2 op for contiguous HND input tensors:
     // q, k, v: [head_dim, seq, n_head, batch]
     // res:     [head_dim, n_head, seq, batch]
@@ -2726,6 +2776,10 @@ extern "C" {
             struct ggml_context * ctx,
             struct ggml_tensor  * sx,
             struct ggml_tensor  * c);
+
+    GGML_API void ggml_ssm_conv_set_fusion(
+            struct ggml_tensor         * tensor,
+            enum ggml_ssm_conv_fusion   fusion);
 
     GGML_API struct ggml_tensor * ggml_ssm_scan(
             struct ggml_context * ctx,

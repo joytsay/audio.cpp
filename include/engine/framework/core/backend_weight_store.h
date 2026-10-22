@@ -2,12 +2,15 @@
 
 #include "engine/framework/assets/tensor_source.h"
 #include "engine/framework/core/backend.h"
+#include "engine/framework/core/load_progress.h"
 #include "engine/framework/core/module.h"
+#include "engine/framework/debug/trace.h"
 
 #include <ggml-backend.h>
 #include <ggml.h>
 
 #include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <initializer_list>
 #include <memory>
@@ -164,6 +167,19 @@ public:
             throw std::runtime_error("failed to allocate " + name_ + " backend weight buffer");
         }
         ggml_backend_buffer_set_usage(buffer_, GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
+        // The header context is host RAM by construction; the buffer is where
+        // the weights actually landed (device, or a host fallback), by name.
+        debug::timing_log_context_reservation(name_, ctx_.get());
+        debug::timing_log_scalar(
+            name_ + ".buffer_mb",
+            static_cast<double>(ggml_backend_buffer_get_size(buffer_)) / (1024.0 * 1024.0));
+        debug::timing_log_scalar(name_ + ".buffer_name", std::string_view(ggml_backend_buffer_name(buffer_)));
+        uint64_t pending_bytes = 0;
+        for (const auto & upload : pending_) {
+            pending_bytes += ggml_nbytes(upload.tensor);
+        }
+        engine::core::register_weight_bytes(pending_bytes);
+        engine::core::emit_weight_upload_progress(name_);
         for (auto & upload : pending_) {
             if (upload.kind == PendingUploadKind::Tensor) {
                 upload.source->set_backend_tensor(
@@ -178,6 +194,11 @@ public:
                 upload.bytes.clear();
                 upload.bytes.shrink_to_fit();
             }
+            // Per-tensor progress report (llama.cpp pace): the tensor reads and
+            // backend copies below are the long pole of a model load, so each
+            // finished tensor advances the uploaded-bytes curve.
+            engine::core::add_uploaded_weight_bytes(ggml_nbytes(upload.tensor));
+            engine::core::emit_weight_upload_progress(name_);
         }
         pending_.clear();
         pending_.shrink_to_fit();

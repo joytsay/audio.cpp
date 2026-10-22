@@ -6,7 +6,7 @@
 #include "engine/framework/core/module.h"
 #include "engine/framework/debug/profiler.h"
 #include "engine/framework/modules/activation_modules.h"
-#include "engine/framework/modules/attention/feed_forward.h"
+#include "engine/framework/modules/feed_forward_modules.h"
 #include "engine/framework/modules/attention/grouped_query_attention.h"
 #include "engine/framework/modules/conv_modules.h"
 #include "engine/framework/modules/lookup_modules.h"
@@ -16,11 +16,14 @@
 #include "engine/framework/modules/primitive_modules.h"
 #include "engine/framework/modules/streaming_conv_modules.h"
 #include "engine/framework/modules/structural_modules.h"
-#include "engine/framework/modules/transformers/qwen_causal_decoder.h"
+#include "engine/framework/modules/transformers/causal_decoder.h"
 #include "engine/framework/runtime/kv_cache.h"
 #include "engine/framework/runtime/options.h"
 #include "engine/framework/sampling/hf_sampler.h"
 #include "engine/models/moonshine_asr/assets.h"
+#ifdef ENGINE_HAVE_NEON
+#include "engine/models/moonshine_asr/neon_decoder.h"
+#endif
 #include "engine/models/moonshine_asr/weights.h"
 
 #include <ggml-alloc.h>
@@ -588,7 +591,7 @@ public:
             }
             engine::core::prepare_host_graph_plan(execution_context, graph_, plan_);
         }
-        const auto pos_values = engine::modules::qwen_position_ids(memory_frames_);
+        const auto pos_values = engine::modules::decoder_position_ids(memory_frames_);
         engine::core::write_tensor_i32(positions_, pos_values);
         for (const auto & mask : masks_) {
             engine::core::write_tensor_f16(mask.tensor, mask.values);
@@ -755,7 +758,7 @@ public:
         ggml_backend_tensor_set(token_id_, &token, 0, sizeof(token));
         ggml_backend_tensor_set(position_, &position, 0, sizeof(position));
         ggml_backend_tensor_set(cache_slot_, &position, 0, sizeof(position));
-        engine::modules::write_qwen_cached_step_mask(
+        engine::modules::write_decoder_cached_step_mask(
             attention_mask_,
             attention_mask_values_,
             cache_steps_,
@@ -776,10 +779,6 @@ public:
         step_read_ms_ += engine::debug::elapsed_ms(read_start);
         ++step_count_;
         return logits_values_;
-    }
-
-    int64_t vocab_size() const noexcept {
-        return vocab_;
     }
 
     void log_step_timings() const {
@@ -1077,19 +1076,38 @@ runtime::TaskResult transcribe_moonshine_asr(
     std::vector<int32_t> decoded;
     decoded.reserve(static_cast<size_t>(max_tokens));
     const auto decode_start = Clock::now();
-    CachedDecoderGraph decoder_graph(
-        assets,
-        weights,
-        execution_context,
-        max_tokens,
-        memory_frames,
-        config.graph_arena_bytes);
-    decoder_graph.prepare_memory(memory, execution_context);
+    std::optional<CachedDecoderGraph> decoder_graph;
+#ifdef ENGINE_HAVE_NEON
+    if (config.neon_decoder) {
+        config.neon_decoder->prepare_memory(memory, static_cast<int>(max_tokens), execution_context.config().threads);
+    } else
+#endif
+    {
+        decoder_graph.emplace(
+            assets,
+            weights,
+            execution_context,
+            max_tokens,
+            memory_frames,
+            config.graph_arena_bytes);
+        decoder_graph->prepare_memory(memory, execution_context);
+    }
     double decode_step_select_ms = 0.0;
     for (int64_t step = 0; step < max_tokens; ++step) {
-        const auto logits = decoder_graph.run_step(prefix.back(), static_cast<int32_t>(step), execution_context);
+        std::vector<float> graph_logits;
+        const std::vector<float> *logits_ptr;
+#ifdef ENGINE_HAVE_NEON
+        if (config.neon_decoder) {
+            logits_ptr = &config.neon_decoder->run_step(prefix.back(), static_cast<int32_t>(step), execution_context.config().threads);
+        } else
+#endif
+        {
+            graph_logits = decoder_graph->run_step(prefix.back(), static_cast<int32_t>(step), execution_context);
+            logits_ptr = &graph_logits;
+        }
+        const auto &logits = *logits_ptr;
         const auto select_start = Clock::now();
-        if (logits.size() != static_cast<size_t>(decoder_graph.vocab_size())) {
+        if (logits.size() != static_cast<size_t>(assets.config.decoder.vocab_size)) {
             throw std::runtime_error("Moonshine ASR logits shape mismatch");
         }
         const int32_t next = sampling::HfLogitsProcessor::argmax(
@@ -1103,7 +1121,9 @@ runtime::TaskResult transcribe_moonshine_asr(
         decoded.push_back(next);
         prefix.push_back(next);
     }
-    decoder_graph.log_step_timings();
+    if (decoder_graph) {
+        decoder_graph->log_step_timings();
+    }
     debug::timing_log_scalar("moonshine_asr.decode_step_select_ms", decode_step_select_ms);
     debug::timing_log_scalar("moonshine_asr.decode_ms", engine::debug::elapsed_ms(decode_start));
     debug::trace_log_scalar("moonshine_asr.output_tokens", decoded.size());

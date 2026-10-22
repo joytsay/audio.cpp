@@ -41,22 +41,29 @@ struct Granite5LayerWeights {
     bool is_subsample = false;
 };
 
-struct Granite5EncoderWeights {
+struct Granite5ConformerEncoderWeights {
     modules::LinearWeights input_linear;
     std::vector<Granite5LayerWeights> layers;
     modules::LinearWeights out;
     modules::LinearWeights out_mid;
 };
 
-class Granite5EncoderRuntime {
+// One greedy CTC frame. probability is the softmax of the winning class,
+// computed from logits that the encoder already materializes for the argmax.
+struct CtcArgmaxFrame {
+    int32_t id = 0;
+    float probability = 0.f;
+};
+
+class Granite5ConformerEncoderRuntime {
 public:
-    Granite5EncoderRuntime(
+    Granite5ConformerEncoderRuntime(
         std::shared_ptr<const Granite5ASRAssets> assets,
         engine::core::ExecutionContext & execution_context,
         assets::TensorStorageType storage_type,
         size_t graph_arena_bytes = 1024ull * 1024ull * 1024ull);
 
-    std::vector<int32_t> transcribe_features(
+    std::vector<CtcArgmaxFrame> transcribe_features(
         const Granite5FrontendFeatures & features);
 
     const Granite5ASRAssets & assets() const noexcept { return *assets_; }
@@ -65,7 +72,7 @@ private:
     std::shared_ptr<const Granite5ASRAssets> assets_;
     engine::core::ExecutionContext * execution_context_ = nullptr;
     engine::core::BackendWeightStore weight_store_;
-    Granite5EncoderWeights weights_;
+    Granite5ConformerEncoderWeights weights_;
     size_t graph_arena_bytes_;
 };
 

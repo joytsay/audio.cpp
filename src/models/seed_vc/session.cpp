@@ -3,11 +3,11 @@
 #include "engine/models/seed_vc/assets.h"
 
 #include "engine/framework/modules/vocoders/bigvgan_vocoder.h"
-#include "engine/framework/modules/speech_encoders/campplus_encoder.h"
+#include "engine/framework/modules/speaker_encoders/campplus_encoder.h"
 #include "engine/framework/debug/profiler.h"
 #include "engine/framework/debug/trace.h"
 #include "engine/framework/modules/vocoders/hift_vocoder.h"
-#include "engine/framework/modules/speech_encoders/hubert_encoder.h"
+#include "engine/framework/modules/speech_encoders/wav2vec2_encoder.h"
 #include "engine/framework/io/binary.h"
 #include "engine/framework/runtime/options.h"
 #include "engine/framework/runtime/spec_backed_model.h"
@@ -30,6 +30,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -84,7 +85,7 @@ std::unordered_map<std::string, std::string> normalize_request_options(
             {"intelligibility_cfg_rate", "intelligibility_guidance_scale"},
             {"similarity_cfg_rate", "similarity_guidance_scale"},
             {"anonymization_only", "voice_anonymization"},
-            {"noise_file", "noise_path"},
+            {"noise_path", "noise_file"},
             {"semi_tone_shift", "semitone_shift"},
         },
         "Seed-VC",
@@ -96,7 +97,12 @@ std::unordered_map<std::string, std::string> validated_request_options(
     const std::unordered_map<std::string, std::string> & options,
     const engine::model_spec::ModelContract & contract) {
     auto normalized = normalize_request_options(options);
-    runtime::validate_spec_backed_request_options(normalized, contract, "Seed-VC");
+    auto validation_options = normalized;
+    validation_options.erase("noise_file");
+    validation_options.erase("duration_scale");
+    validation_options.erase("length_adjust");
+    (void)runtime::find_option(normalized, {"duration_scale", "length_adjust"});
+    runtime::validate_spec_backed_request_options(validation_options, contract, "Seed-VC");
     return normalized;
 }
 
@@ -132,8 +138,8 @@ struct SeedVcRouteRuntime {
     engine::modules::CampplusEncoderComponent campplus;
     engine::modules::BigVganVocoderComponent bigvgan;
     engine::modules::HiftVocoderComponent hift;
-    engine::modules::HubertEncoderComponent hubert_large;
-    engine::modules::HubertEncoderComponent wav2vec2_xlsr;
+    engine::modules::Wav2Vec2EncoderRuntime hubert_large;
+    engine::modules::Wav2Vec2EncoderRuntime wav2vec2_xlsr;
     SeedVcV1CfmEstimator v1_cfm_estimator;
     SeedVcRmvpeF0Extractor rmvpe_extractor;
     SeedVcWhisperContentEncoder whisper_content;
@@ -324,7 +330,7 @@ void validate_common_generation_options(int num_inference_steps, float length_ad
         throw std::runtime_error("Seed-VC num_inference_steps must be positive");
     }
     if (!(length_adjust > 0.0F)) {
-        throw std::runtime_error("Seed-VC length_adjust must be positive");
+        throw std::runtime_error("Seed-VC duration_scale must be positive");
     }
 }
 
@@ -383,7 +389,7 @@ SeedVcV2RequestConfig parse_v2_config(const std::unordered_map<std::string, std:
         .value_or(config.num_inference_steps);
     config.length_adjust = runtime::parse_finite_float_option(
         options,
-        {"length_adjust"})
+        {"duration_scale", "length_adjust"})
         .value_or(config.length_adjust);
     config.intelligibility_cfg_rate = runtime::parse_finite_float_option(
         options,
@@ -398,7 +404,7 @@ SeedVcV2RequestConfig parse_v2_config(const std::unordered_map<std::string, std:
     }
     config.seed = runtime::parse_u64_option(options, {"seed"})
         .value_or(runtime::random_u64_seed());
-    config.noise_path = runtime::find_option(options, {"noise_path"}).value_or("");
+    config.noise_path = runtime::find_option(options, {"noise_file"}).value_or("");
     validate_common_generation_options(config.num_inference_steps, config.length_adjust);
     return config;
 }
@@ -1103,15 +1109,18 @@ runtime::TaskResult run_v1_singing_voice_conversion(
     return result;
 }
 
-SeedVcV1RequestConfig parse_v1_config(const std::unordered_map<std::string, std::string> & options) {
+SeedVcV1RequestConfig parse_v1_config(
+    const std::unordered_map<std::string, std::string> & options,
+    std::string_view route_path) {
     SeedVcV1RequestConfig config;
+    config.f0_condition = route_path == "v1_svc";
     config.num_inference_steps = runtime::parse_int_option(
         options,
         {"num_inference_steps"})
         .value_or(config.num_inference_steps);
     config.length_adjust = runtime::parse_finite_float_option(
         options,
-        {"length_adjust"})
+        {"duration_scale", "length_adjust"})
         .value_or(config.length_adjust);
     config.inference_guidance_scale = runtime::parse_finite_float_option(
         options,
@@ -1129,7 +1138,7 @@ SeedVcV1RequestConfig parse_v1_config(const std::unordered_map<std::string, std:
         .value_or(config.semitone_shift);
     config.seed = runtime::parse_u64_option(options, {"seed"})
         .value_or(runtime::random_u64_seed());
-    config.noise_path = runtime::find_option(options, {"noise_path"}).value_or("");
+    config.noise_path = runtime::find_option(options, {"noise_file"}).value_or("");
     validate_common_generation_options(config.num_inference_steps, config.length_adjust);
     return config;
 }
@@ -1151,7 +1160,7 @@ SeedVcExecutionPlan make_execution_plan(
     if (plan.path == "v2_vc") {
         plan.v2 = parse_v2_config(options);
     } else if (is_v1_path(plan.path)) {
-        plan.v1 = parse_v1_config(options);
+        plan.v1 = parse_v1_config(options, plan.path);
     }
     return plan;
 }
@@ -1209,10 +1218,10 @@ std::shared_ptr<SeedVcRouteRuntime> open_route_runtime(
             assets.bigvgan_22k_weights,
             backend,
             make_bigvgan_config(assets.config.bigvgan_22k, default_weight_storage_type));
-        engine::modules::HubertEncoderConfig hubert_config;
+        engine::modules::Wav2Vec2EncoderConfig hubert_config;
         hubert_config.output_hidden_layer = assets.config.v2_astral_wide.ssl_output_layer;
         hubert_config.apply_final_layer_norm = false;
-        sources->hubert_large = engine::modules::HubertEncoderComponent::load_from_tensor_source(
+        sources->hubert_large = engine::modules::Wav2Vec2EncoderRuntime::load_from_tensor_source(
             assets.hubert_large_weights,
             backend,
             hubert_config);
@@ -1278,10 +1287,10 @@ std::shared_ptr<SeedVcRouteRuntime> open_route_runtime(
             assets.config.v1_xlsr_hift_dit,
             assets.config.v1_xlsr_hift_wavenet,
             assets.config.v1_xlsr_hift_style_dim);
-        engine::modules::HubertEncoderConfig xlsr_config;
+        engine::modules::Wav2Vec2EncoderConfig xlsr_config;
         xlsr_config.output_hidden_layer = 12;
         xlsr_config.apply_final_layer_norm = true;
-        sources->wav2vec2_xlsr = engine::modules::HubertEncoderComponent::load_from_tensor_source(
+        sources->wav2vec2_xlsr = engine::modules::Wav2Vec2EncoderRuntime::load_from_tensor_source(
             assets.wav2vec2_xlsr_weights,
             backend,
             xlsr_config);

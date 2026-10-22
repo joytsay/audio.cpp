@@ -179,6 +179,22 @@ std::shared_ptr<const EchoTtsAssets> load_echo_tts_assets(
     return assets;
 }
 
+runtime::SessionOptions require_supported_session_options(
+    runtime::SessionOptions options,
+    const std::shared_ptr<const engine::model_spec::ModelContract> &contract) {
+  // Older standalone GGUF packages embed a contract that predates the
+  // echo_tts.mem_saver option; keep them usable while still validating
+  // the value below.
+  auto validation_options = options;
+  if (contract->session_option_keys.find("echo_tts.mem_saver") ==
+      contract->session_option_keys.end()) {
+    validation_options.options.erase("echo_tts.mem_saver");
+  }
+  runtime::validate_spec_backed_session_options(
+      validation_options, *contract, kFamily, "Echo-TTS");
+  return options;
+}
+
 }  // namespace
 
 EchoTtsSession::EchoTtsSession(
@@ -186,16 +202,17 @@ EchoTtsSession::EchoTtsSession(
     runtime::SessionOptions options,
     std::shared_ptr<const EchoTtsAssets> assets,
     std::shared_ptr<const engine::model_spec::ModelContract> contract)
-    : RuntimeSessionBase(std::move(options)),
+    : RuntimeSessionBase(require_supported_session_options(std::move(options), contract)),
       task_(task),
       assets_(std::move(assets)),
       contract_(std::move(contract)) {
     if (contract_ == nullptr) {
         throw std::runtime_error("Echo-TTS session requires a model contract");
     }
-    // Without this a typo in server config is silently ignored.
-    runtime::validate_spec_backed_session_options(
-        RuntimeSessionBase::options(), *contract_, kFamily, "Echo-TTS");
+    if (const auto value = runtime::find_option(
+        RuntimeSessionBase::options().options, {"echo_tts.mem_saver"})) {
+            mem_saver_ = runtime::parse_bool_option(*value, "echo_tts.mem_saver");
+        }
     const auto slots = runtime::parse_int_option(
         RuntimeSessionBase::options().options, {"echo_tts.reference_cache_slots"});
     if (slots.has_value()) {
@@ -209,9 +226,10 @@ EchoTtsSession::EchoTtsSession(
     if (assets_ == nullptr) {
         throw std::runtime_error("Echo-TTS session requires loaded assets");
     }
-    if (task_.task != runtime::VoiceTaskKind::VoiceCloning ||
+    if ((task_.task != runtime::VoiceTaskKind::Tts &&
+         task_.task != runtime::VoiceTaskKind::VoiceCloning) ||
         task_.mode != runtime::RunMode::Offline) {
-        throw std::runtime_error("Echo-TTS only supports offline voice cloning");
+        throw std::runtime_error("Echo-TTS supports offline TTS and voice cloning");
     }
 }
 
@@ -234,6 +252,9 @@ EchoSamplerOptions EchoTtsSession::parse_sampler_options(
         sampler.truncation_factor = *truncation;
     }
     if (const auto kv_scale = runtime::parse_float_option(options, {"speaker_kv_scale"})) {
+        if (*kv_scale == 0.0F) {
+            throw std::runtime_error("speaker_kv_scale must be nonzero");
+        }
         // 1.0 is the documented "disabled" value, not a scale to apply.
         if (*kv_scale != 1.0F) {
             sampler.speaker_kv_scale = *kv_scale;
@@ -278,7 +299,7 @@ EchoSamplerOptions EchoTtsSession::parse_sampler_options(
 void EchoTtsSession::prepare(const runtime::SessionPreparationRequest & request) {
     (void)request;
     if (dit_ == nullptr) {
-        dit_ = std::make_unique<EchoDitRuntime>(
+        dit_ = std::make_unique<EchoDiTRuntime>(
             assets_->config,
             *assets_->dit_weights,
             // Namespace-scoped source: tensor names are already stripped of the
@@ -381,6 +402,9 @@ void EchoTtsSession::encode_speaker(const runtime::AudioBuffer & audio) {
         return;
     }
 
+    if (mem_saver_) {
+        codec_->release_decode_graphs();
+    }
     // Mixed down and resampled once, so chunk boundaries land on exact codec
     // frames rather than on pre-resample sample indices.
     auto mono = engine::audio::mixdown_interleaved_to_mono_average(audio.samples, audio.channels);
@@ -435,6 +459,9 @@ void EchoTtsSession::encode_speaker(const runtime::AudioBuffer & audio) {
     speaker_latent_ = std::move(latents);
     speaker_frames_ = frames;
     reference_cache_.put(identity, EchoPreparedSpeaker{speaker_latent_, speaker_frames_});
+    if (mem_saver_) {
+        codec_->release_encode_graph();
+    }
 }
 
 runtime::AudioBuffer EchoTtsSession::synthesize_chunk(
@@ -555,7 +582,12 @@ runtime::AudioBuffer EchoTtsSession::synthesize_chunk(
 
 runtime::TaskResult EchoTtsSession::run(const runtime::TaskRequest & request) {
     require_prepared("Echo-TTS run");
-    runtime::validate_spec_backed_request_options(request.options, *contract_, "Echo-TTS");
+    auto validation_options = request.options;
+    // Older embedded specs omit this control; the chunk parser validates its value.
+    if (contract_->request_option_keys.find("text_chunk_size") == contract_->request_option_keys.end()) {
+        validation_options.erase("text_chunk_size");
+    }
+    runtime::validate_spec_backed_request_options(validation_options, *contract_, "Echo-TTS");
 
     if (!request.text_input.has_value() || request.text_input->text.empty()) {
         throw std::runtime_error("Echo-TTS requires text input");
