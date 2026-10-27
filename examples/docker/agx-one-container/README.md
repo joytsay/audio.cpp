@@ -18,6 +18,27 @@ nginx or other reverse proxy.
 The commands below assume Jetson AGX Orin (CUDA architecture 8.7), Docker, Compose
 v2, and the NVIDIA Container Runtime are already installed.
 
+## Minimal test against your existing SIP server
+
+To keep phone 520 on the existing OpenSIPS server and replace only the IVR
+worker registered as 521, use the [SIP server test](../sip-server-test/README.md).
+It registers 521 and plays prerecorded lingCL / WangSG greetings for #1 / #2.
+Only the CPU SIP target is built; it does not start another local registrar or
+require a CUDA build.
+
+## Minimal SIP / IVR baseline
+
+For an independent Wi-Fi registration, audio echo and keypad test, start the
+[CPU-only SIP MVP](../sip-mvp/README.md). From this directory:
+
+```bash
+docker compose -p sip-mvp -f ../sip-mvp/compose.yml up -d
+```
+
+It uses local account 520 on UDP 9910, extension 600 for echo, and extension 521
+for a tone-and-keypad IVR menu. No CUDA build is required. Once that works, its
+guide shows how to connect the real native AI worker as extension 522.
+
 ## JetPack compatibility
 
 The supplied profile targets JetPack 6.2.x / L4T R36.4.x on AGX Orin. Both

@@ -1,0 +1,19 @@
+services:
+  sip-test:
+    image: andrius/asterisk:22.11.0_debian-trixie
+    network_mode: host
+    init: true
+    restart: unless-stopped
+    entrypoint: ["asterisk"]
+    command: ["-f", "-vvv"]
+    volumes:
+      - ./pjsip.conf:/etc/asterisk/pjsip.conf:ro
+      - ./extensions.conf:/etc/asterisk/extensions.conf:ro
+      - ./rtp.conf:/etc/asterisk/rtp.conf:ro
+      - ./modules.conf:/etc/asterisk/modules.conf:ro
+      - ./http.conf:/etc/asterisk/http.conf:ro
+      - ./manager.conf:/etc/asterisk/manager.conf:ro
+      - ./stasis.conf:/etc/asterisk/stasis.conf:ro
+    # The base image health check opens a CLI connection on every poll.
+    healthcheck:
+      disable: true

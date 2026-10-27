@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <cstring>
 #include <iostream>
+#include <fstream>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -29,6 +30,40 @@ void interrupt_handler(int) { interrupted = 1; }
 std::string env(const char* key) { const char* value = std::getenv(key); return value ? value : ""; }
 void require(int error, const char* operation) {
     if (error) throw std::runtime_error(std::string(operation) + ": " + std::strerror(error));
+}
+std::string registration_call_id;
+uint32_t registration_cseq = 0;
+uint16_t registration_public_port = 0;
+void trace_sip(bool tx, enum sip_transp, const struct sa * src, const struct sa * dst,
+               const uint8_t * packet, size_t size, void *) noexcept {
+    try {
+        const std::string text(reinterpret_cast<const char *>(packet), size);
+        if (env("SIP_TRACE") == "1") {
+            const auto end = text.find("\r\n");
+            re_printf("SIP %s %J -> %J: %b\n", tx ? "TX" : "RX", src, dst, text.data(), end == std::string::npos ? text.size() : end);
+        }
+        if (env("SIP_CONTACT_HOST").empty()) return;
+        struct Parsed {
+            struct mbuf * buffer = nullptr;
+            struct sip_msg * message = nullptr;
+            ~Parsed() { mem_deref(message); mem_deref(buffer); }
+        } parsed;
+        parsed.buffer = mbuf_alloc(size);
+        if (!parsed.buffer || mbuf_write_mem(parsed.buffer, packet, size)) return;
+        parsed.buffer->pos = 0;
+        if (sip_msg_decode(&parsed.message, parsed.buffer)) return;
+        const auto * message = parsed.message;
+        if (pl_strcasecmp(&message->cseq.met, "REGISTER")) return;
+        const std::string id(message->callid.p, message->callid.l);
+        if (tx && message->req) { registration_call_id = id; registration_cseq = message->cseq.num; }
+        else if (!tx && !message->req && message->scode == 200 && id == registration_call_id && message->cseq.num == registration_cseq) {
+            struct pl port;
+            if (!msg_param_decode(&message->via.params, "rport", &port)) {
+                const auto value = pl_u32(&port);
+                if (value && value <= 65535) registration_public_port = static_cast<uint16_t>(value);
+            }
+        }
+    } catch (...) { /* Observability must never interrupt SIP processing. */ }
 }
 struct Audio {
     int rate = 0, channels = 0;
@@ -83,7 +118,22 @@ std::vector<int16_t> mono(const int16_t* samples, size_t frames, unsigned channe
 }
 class AudioBridge {
 public:
-    explicit AudioBridge(SipPipeline* pipeline) : pipeline_(pipeline) {}
+    explicit AudioBridge(SipPipeline* pipeline, const std::string& path = env("SIP_TEST_RECORD")) : pipeline_(pipeline) {
+        if (!path.empty()) {
+            recording_wav_ = std::filesystem::path(path).extension() == ".wav";
+            recording_.open(path, std::ios::binary | std::ios::trunc);
+            if (!recording_) throw std::runtime_error("cannot create test audio recording");
+            if (recording_wav_) write_recording_header();
+        }
+    }
+    ~AudioBridge() {
+        // SipCall destroys and joins the audio drivers before this member.
+        if (recording_.is_open() && recording_wav_) {
+            write_recording_header();
+            recording_.flush();
+            if (!recording_) std::cerr << "Could not finalize received-audio WAV header.\n";
+        }
+    }
     void play(const std::vector<unsigned char>& wav) {
         auto audio = decode_wav(wav);
         std::vector<int16_t> samples(audio.pcm.size() / 2);
@@ -107,6 +157,25 @@ public:
         if (position_ >= pcm_.size()) { playing_ = false; finished_ = true; }
     }
     void receive(const int16_t* input, size_t frames, unsigned channels, unsigned rate) {
+        if (active_ && recording_.is_open()) {
+            if (recording_wav_) {
+                if (!recording_rate_) { recording_rate_ = rate; recording_channels_ = channels; }
+                if (recording_rate_ != rate || recording_channels_ != channels)
+                    throw std::runtime_error("received audio format changed during WAV recording");
+                const auto bytes = uint64_t(frames) * channels * 2;
+                if (recording_bytes_ + bytes > UINT32_MAX - 36)
+                    throw std::runtime_error("received audio exceeded the WAV size limit");
+                // Exactly the decoder/jitter-buffer output supplied to the player:
+                // retain silence/concealment, channel count and sample rate.
+                for (size_t i = 0; i < frames * channels; ++i) write_sample(input[i]);
+                recording_bytes_ += bytes;
+            } else {
+                // Preserve the existing raw 8 kHz mono test recording format.
+                for (int16_t value : mono(input, frames, channels, rate, 8000)) write_sample(value);
+            }
+            if (!recording_) throw std::runtime_error("cannot write test audio recording");
+        }
+        if (active_ && std::any_of(input, input + frames * channels, [](int16_t value) { return value > 256 || value < -256; })) ++audible_frames_;
         if (!active_ || !listening_ || !pipeline_) return;
         auto pcm = mono(input, frames, channels, rate, 16000);
         std::vector<unsigned char> bytes(pcm.size() * 2);
@@ -120,8 +189,31 @@ public:
     void listen(bool value) { listening_ = value; }
     void fail() noexcept { failed_ = true; }
     bool failed() const { return failed_; }
+    unsigned audible_frames() const { return audible_frames_; }
 private:
+    void write_sample(int16_t value) {
+        recording_.put(static_cast<char>(value & 255));
+        recording_.put(static_cast<char>((unsigned(value) >> 8) & 255));
+    }
+    void write_recording_header() {
+        auto little = [&](uint32_t value, unsigned bytes) {
+            while (bytes--) { recording_.put(static_cast<char>(value & 255)); value >>= 8; }
+        };
+        const unsigned rate = recording_rate_ ? recording_rate_ : 8000;
+        const unsigned channels = recording_channels_ ? recording_channels_ : 1;
+        recording_.seekp(0);
+        recording_.write("RIFF", 4); little(36 + static_cast<uint32_t>(recording_bytes_), 4);
+        recording_.write("WAVEfmt ", 8); little(16, 4); little(1, 2); little(channels, 2);
+        little(rate, 4); little(rate * channels * 2, 4); little(channels * 2, 2); little(16, 2);
+        recording_.write("data", 4); little(static_cast<uint32_t>(recording_bytes_), 4);
+        recording_.seekp(0, std::ios::end);
+    }
     SipPipeline* pipeline_;
+    std::atomic<unsigned> audible_frames_{0};
+    std::ofstream recording_;
+    bool recording_wav_ = false;
+    unsigned recording_rate_ = 0, recording_channels_ = 0;
+    uint64_t recording_bytes_ = 0;
     std::mutex mutex_;
     std::vector<int16_t> pcm_;
     double position_ = 0;
@@ -195,10 +287,10 @@ class SipCall {
 public:
     SipCall(std::string account, std::string proxy, std::string target,
             std::vector<unsigned char> announcement, std::unique_ptr<SipPipeline> pipeline = {},
-            std::vector<unsigned char> alternate = {})
+            std::vector<unsigned char> alternate = {}, bool keep_open = false)
         : account_(std::move(account)), proxy_(std::move(proxy)), target_(std::move(target)),
           announcement_(std::move(announcement)), alternate_(std::move(alternate)),
-          pipeline_(std::move(pipeline)), audio_(pipeline_.get()) {
+          pipeline_(std::move(pipeline)), audio_(pipeline_.get()), keep_open_(keep_open) {
         tmr_init(&timer_);
     }
     ~SipCall() {
@@ -218,6 +310,10 @@ public:
         if (!wait_for_media.empty() && wait_for_media != "0" && wait_for_media != "1")
             throw std::runtime_error("SIP_WAIT_FOR_MEDIA must be 0 or 1");
         wait_for_media_ = wait_for_media != "0";
+        const auto loop = env("SIP_GREETING_LOOP");
+        if (!loop.empty() && loop != "0" && loop != "1")
+            throw std::runtime_error("SIP_GREETING_LOOP must be 0 or 1");
+        greeting_loop_ = target_ == "listen" && loop == "1";
         require(libre_init(), "initialize libre"); libre_ = true;
         std::string config = "sip_transports udp,tcp,tls\naudio_source ivrtts,memory\naudio_player ivrtts,memory\n"
                              "audio_alert ivrtts,memory\nrtp_rxmode main\n";
@@ -237,6 +333,8 @@ public:
         require(ausrc_register(&source_, baresip_ausrcl(), "ivrtts", source_alloc), "register audio source");
         require(auplay_register(&player_, baresip_auplayl(), "ivrtts", player_alloc), "register audio player");
         require(ua_init("audio.cpp ivrTTS", true, true, true), "initialize SIP user agent"); ua_initialized_ = true;
+        registration_call_id.clear(); registration_public_port = 0;
+        if (env("SIP_TRACE") == "1" || !env("SIP_CONTACT_HOST").empty()) sip_set_trace_handler(uag_sip(), trace_sip);
         std::string codec = env("SIP_CODEC"); if (codec.empty()) codec = "PCMU";
         if (codec != "PCMU" && codec != "OPUS") throw std::runtime_error("SIP_CODEC must be PCMU or OPUS");
         std::string path = env("BARESIP_MODULE_PATH");
@@ -255,6 +353,14 @@ public:
         const auto identity = display.empty() ? "<" + account_ + ">;regint=300"
             : "\"" + display + "\" <" + account_ + ">;regint=300";
         require(ua_alloc(&ua_, identity.c_str()), "create SIP account");
+        if (!env("SIP_CONTACT_URI").empty()) {
+            const auto value = env("SIP_CONTACT_URI");
+            if (value.rfind("sip:", 0) != 0 || value.find_first_of("\r\n<> ") != std::string::npos)
+                throw std::runtime_error("invalid SIP_CONTACT_URI");
+            struct pl uri;
+            pl_set_str(&uri, value.c_str());
+            ua_pub_gruu_set(ua_, &uri);
+        }
         auto* account = ua_account(ua_);
         require(account_set_auth_pass(account, env("SIP_SECRET").c_str()), "set SIP password");
         if (!env("SIP_AUTHUSER").empty()) require(account_set_auth_user(account, env("SIP_AUTHUSER").c_str()), "set SIP auth user");
@@ -285,6 +391,15 @@ private:
         auto* call = bevent_get_call(data);
         switch (event) {
         case BEVENT_REGISTER_OK:
+            if (!env("SIP_CONTACT_HOST").empty() && env("SIP_CONTACT_URI").empty()) {
+                const auto host = env("SIP_CONTACT_HOST");
+                if (host.size() > 253 || host.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-") != std::string::npos)
+                    throw std::runtime_error("SIP_CONTACT_HOST must be a hostname without a port");
+                if (!registration_public_port) throw std::runtime_error("registrar did not report a valid rport for SIP_CONTACT_HOST");
+                const auto value = "sip:" + std::string(ua_local_cuser(ua_)) + "@" + host + ":" + std::to_string(registration_public_port);
+                struct pl uri; pl_set_str(&uri, value.c_str()); ua_pub_gruu_set(ua_, &uri);
+                std::cout << "Dialog Contact: " << value << " (learned registrar rport)\n";
+            }
             if (registered_) break;
             registered_ = true;
             std::cout << "SIP registered.\n";
@@ -303,10 +418,12 @@ private:
         case BEVENT_CALL_ESTABLISHED:
             established_ = true; audio_.activate(true);
             media_deadline_ = Clock::now() + std::chrono::seconds(5);
+            test_keys_ = target_ == "listen" ? "" : env("SIP_TEST_DTMF");
+            test_next_ = Clock::now() + std::chrono::seconds(1);
             std::cout << "SIP call established.\n";
             re_printf("%H", stream_debug, audio_strm(call_audio(call_)));
             if (!announcement_.empty()) {
-                if (wait_for_media_ && !media_ready_) {
+                if (!greeting_loop_ && wait_for_media_ && !media_ready_) {
                     waiting_for_media_ = true;
                     std::cout << "Waiting for greeting selection: #1 lingCL, #2 WangSG.\n";
                 } else start_announcement();
@@ -351,6 +468,8 @@ private:
     }
     void start_announcement(bool alternate = false) {
         waiting_for_media_ = false;
+        playing_alternate_ = alternate && !alternate_.empty();
+        if (greeting_loop_) std::cout << "Loop greeting: " << (playing_alternate_ ? "#2 WangSG" : "#1 lingCL") << '\n';
         announcement_playing_ = true;
         draining_ = false;
         audio_.listen(false);
@@ -368,13 +487,38 @@ private:
                 std::cerr << "No incoming RTP after 5 seconds. Check the SDP media address, TURN public mapping, UDP relay ports, and caller DTMF mode (telephone-event or SIP INFO).\n";
                 re_printf("%H", stream_debug, audio_strm(call_audio(call_)));
             }
+            if (established_ && !test_keys_.empty() && Clock::now() >= test_next_) {
+                if (test_key_down_) {
+                    require(call_send_digit(call_, KEYCODE_REL), "release test DTMF");
+                    test_key_down_ = false;
+                    test_next_ = Clock::now() + std::chrono::milliseconds(350);
+                } else if (test_index_ < test_keys_.size()) {
+                    const char digit = test_keys_[test_index_++];
+                    if (digit == ',') test_next_ = Clock::now() + std::chrono::seconds(1);
+                    else {
+                        if (std::string("0123456789*#").find(digit) == std::string::npos) throw std::runtime_error("invalid test DTMF sequence");
+                        require(call_send_digit(call_, digit), "send test DTMF");
+                        std::cout << "Test sent DTMF: " << digit << "\n";
+                        if (digit == '1' || digit == '2') {
+                            report_test_audio();
+                            test_selection_ = digit;
+                            test_selection_frames_ = audio_.audible_frames();
+                        }
+                        test_key_down_ = true;
+                        test_next_ = Clock::now() + std::chrono::milliseconds(150);
+                    }
+                } else {
+                    if (!test_finished_) { test_finished_ = true; test_next_ = Clock::now() + std::chrono::seconds(6); }
+                    else close();
+                }
+            }
             if (audio_.failed()) throw std::runtime_error("SIP audio driver failed");
             if (pipeline_) {
                 auto error = pipeline_->error(); if (!error.empty()) throw std::runtime_error(error);
                 std::vector<unsigned char> reply;
                 if (!announcement_playing_ && pipeline_->take_reply(reply)) { audio_.listen(false); audio_.play(reply); draining_ = false; }
             }
-            if (audio_.finished()) { draining_ = true; playback_end_ = Clock::now() + std::chrono::milliseconds(300); }
+            if (audio_.finished()) { draining_ = true; playback_end_ = Clock::now() + std::chrono::milliseconds(greeting_loop_ ? 3000 : 300); }
             if (draining_ && Clock::now() >= playback_end_) {
                 draining_ = false;
                 announcement_playing_ = false;
@@ -382,7 +526,9 @@ private:
                     std::vector<unsigned char> reply;
                     if (pipeline_->take_reply(reply)) audio_.play(reply);
                     else { pipeline_->resume(); audio_.listen(true); }
-                } else close();
+                } else if (greeting_loop_ && established_ && call_) {
+                    start_announcement(!playing_alternate_);
+                } else if (!keep_open_) close();
             }
         }
         tmr_start(&timer_, 20, tick_handler, this);
@@ -390,9 +536,17 @@ private:
     void fail(const std::string& error) noexcept {
         try { error_ = error; close(); } catch (...) { re_cancel(); }
     }
+    void report_test_audio() {
+        if (!test_selection_) return;
+        std::cout << "Test greeting " << test_selection_ << " audible frames: "
+                  << audio_.audible_frames() - test_selection_frames_ << "\n";
+        test_selection_ = 0;
+    }
     void close() {
         if (closing_) return;
+        report_test_audio();
         closing_ = true; audio_.activate(false);
+        std::cout << "Audible received frames: " << audio_.audible_frames() << "\n";
         if (call_) { ua_hangup(ua_, call_, 0, "Normal clearing"); call_ = nullptr; }
         ua_unregister(ua_);
         // Keep the loop alive briefly for BYE/unregister responses.
@@ -411,6 +565,14 @@ private:
     bool registered_ = false, established_ = false, waiting_ = false, closing_ = false, draining_ = false;
     bool wait_for_media_ = false, waiting_for_media_ = false, media_ready_ = false, announcement_playing_ = false;
     bool greeting_prefix_ = false;
+    bool greeting_loop_ = false, playing_alternate_ = false;
+    std::string test_keys_;
+    size_t test_index_ = 0;
+    char test_selection_ = 0;
+    unsigned test_selection_frames_ = 0;
+    bool test_key_down_ = false, test_finished_ = false;
+    Clock::time_point test_next_;
+    bool keep_open_ = false;
     bool rtp_received_ = false, media_warning_ = false;
     Clock::time_point deadline_, playback_end_, media_deadline_;
 };
@@ -433,7 +595,26 @@ void self_test() {
         auto output = mono(input.data(), input.size(), 1, rate, 16000);
         if (output.size() != 320 || output[0] != 1000) throw std::runtime_error("caller PCM conversion failed");
     }
-    std::cout << "PASS: WAV validation, in-memory playback, 8/48 kHz caller conversion\n";
+    for (const auto rate : {8000u, 48000u}) {
+        const auto path = std::filesystem::temp_directory_path() /
+            ("sip-playout-" + std::to_string(Clock::now().time_since_epoch().count()) + ".wav");
+        struct Remove { std::filesystem::path path; ~Remove() { std::filesystem::remove(path); } } cleanup{path};
+        const int16_t rendered[] = {0, -32768, 32767, 0, 0, 0, -1234, 5678};
+        {
+            AudioBridge recording(nullptr, path.string()); recording.activate(true);
+            recording.receive(rendered, 4, 2, rate);
+        }
+        std::ifstream file(path, std::ios::binary);
+        const std::vector<unsigned char> received((std::istreambuf_iterator<char>(file)), {});
+        const auto capture = decode_wav(received);
+        if (capture.rate != int(rate) || capture.channels != 2 || capture.pcm.size() != sizeof(rendered))
+            throw std::runtime_error("received WAV format/duration self-test failed");
+        for (size_t i = 0; i < sizeof(rendered) / sizeof(rendered[0]); ++i) {
+            const auto value = int16_t(unsigned(capture.pcm[2 * i]) | unsigned(capture.pcm[2 * i + 1]) << 8);
+            if (value != rendered[i]) throw std::runtime_error("received WAV changed decoded samples");
+        }
+    }
+    std::cout << "PASS: WAV validation, in-memory playback, 8/48 kHz caller conversion, exact received WAV capture\n";
 }
 bool sip_uri(const std::string& value) {
     return (value.rfind("sip:", 0) == 0 || value.rfind("sips:", 0) == 0) &&
@@ -448,20 +629,25 @@ int main(int argc, char** argv) {
     std::cout << std::unitbuf;
     try {
         std::vector<std::string> args;
-        std::string settings = ".env.sip"; bool explicit_file = false;
+        std::string settings = ".env.sip", greetings; bool explicit_file = false;
         for (int i = 1; i < argc; ++i) {
             if (std::string(argv[i]) == "--env") {
                 if (++i >= argc || explicit_file) throw std::runtime_error("use --env with one settings file path");
                 settings = argv[i]; explicit_file = true;
+            } else if (std::string(argv[i]) == "--greetings") {
+                if (++i >= argc || !greetings.empty()) throw std::runtime_error("use --greetings with one directory");
+                greetings = argv[i];
             } else args.emplace_back(argv[i]);
         }
         if (args == std::vector<std::string>{"--help"}) {
             std::cout << "Usage: exampleSIP SIP_ACCOUNT SIP_PROXY TARGET_OR_listen TTS_URL MODEL TEXT [VOICE]\n"
                          "Full pipeline: exampleSIP --pipeline SIP_ACCOUNT SIP_PROXY TARGET_OR_listen\n"
+                         "Prerecorded: exampleSIP --greetings DIR SIP_ACCOUNT SIP_PROXY TARGET_OR_listen\n"
                          "TURN client: COTURN_URL, COTURN_USERNAME, COTURN_PASSWORD\n"
                          "SIP_GREETING: opening message; an empty value disables it\n"
                          "Greetings: #1 lingCL, #2 WangSG; repeat either sequence to replay\n"
                          "SIP_WAIT_FOR_MEDIA=1: wait for greeting selection (default 1; 0 starts automatically)\n"
+                         "SIP_GREETING_LOOP=1: play both greetings repeatedly on incoming call connection\n"
                          "SIP_CONTINUOUS=1: answer successive pipeline calls and reuse greetings\n"
                          "Settings file: exampleSIP [--env PATH] (defaults to .env.sip, full pipeline)\n"
                          "Required: SIP_SECRET, LLM_MODEL (pipeline). Optional: SIP_AUTHUSER, SIP_CODEC=PCMU|OPUS,\n"
@@ -472,7 +658,7 @@ int main(int argc, char** argv) {
         }
         if (args == std::vector<std::string>{"--self-test"}) { self_test(); return 0; }
         load_sip_env(settings, explicit_file);
-        if (args.empty() || args == std::vector<std::string>{"--pipeline"}) {
+        if (greetings.empty() && (args.empty() || args == std::vector<std::string>{"--pipeline"})) {
             args = {"--pipeline"};
             for (const char* key : {"SIP_ACCOUNT", "SIP_PROXY", "SIP_TARGET"}) {
                 auto value = env(key); if (value.empty()) throw std::runtime_error(std::string("set ") + key + " in .env.sip");
@@ -480,7 +666,7 @@ int main(int argc, char** argv) {
             }
         }
         bool pipeline = args.size() == 4 && args[0] == "--pipeline";
-        if (!pipeline && args.size() != 6 && args.size() != 7) throw std::runtime_error("use --help for arguments");
+        if ((!greetings.empty() && args.size() != 3) || (greetings.empty() && !pipeline && args.size() != 6 && args.size() != 7)) throw std::runtime_error("use --help for arguments");
         size_t offset = pipeline ? 1 : 0;
         if (!sip_uri(args[offset]) || !sip_uri(args[offset + 1]) ||
             (args[offset + 2] != "listen" && !sip_uri(args[offset + 2]))) throw std::runtime_error("use SIP URIs for account, proxy and target");
@@ -491,6 +677,26 @@ int main(int argc, char** argv) {
         std::signal(SIGINT, interrupt_handler); std::signal(SIGTERM, interrupt_handler);
         require(curl_global_init(CURL_GLOBAL_DEFAULT), "initialize HTTP library");
         struct Cleanup { ~Cleanup() { curl_global_cleanup(); } } cleanup;
+        if (!greetings.empty()) {
+            auto read = [&](const char * name) {
+                const auto path = std::filesystem::path(greetings) / name;
+                std::ifstream file(path, std::ios::binary | std::ios::ate);
+                if (!file || file.tellg() <= 0 || file.tellg() > 64 * 1024 * 1024)
+                    throw std::runtime_error("missing or oversized greeting: " + path.string());
+                std::vector<unsigned char> wav(static_cast<size_t>(file.tellg()));
+                file.seekg(0);
+                if (!file.read(reinterpret_cast<char *>(wav.data()), wav.size())) throw std::runtime_error("cannot read greeting");
+                decode_wav(wav);
+                return wav;
+            };
+            const auto first = read("greeting1.wav"), second = read("greeting2.wav");
+            std::cout << "Prerecorded greetings ready. #1=lingCL, #2=WangSG. No AI requests during calls.\n";
+            do {
+                { SipCall call(args[0], args[1], args[2], first, {}, second, true); call.run(); }
+                if (args[2] != "listen" || env("SIP_CONTINUOUS") != "1" || interrupted) return 0;
+            } while (!interrupted);
+            return 0;
+        }
         if (pipeline) {
             auto config = SipPipelineConfig::from_environment();
             const char* configured_greeting = std::getenv("SIP_GREETING");

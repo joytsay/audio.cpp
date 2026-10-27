@@ -478,7 +478,14 @@ private:
     void response(const std::string& request, const sockaddr_in& peer, const std::string& status,
                   std::string extra = "", std::string body = "") {
         auto to = header(request, "To"); if (to.find(";tag=") == std::string::npos) to += ";tag=mock";
-        send("SIP/2.0 " + status + "\r\nVia: " + header(request, "Via") + "\r\nFrom: " + header(request, "From") +
+        auto via = header(request, "Via");
+        const auto rport = via.find(";rport");
+        if (rport != std::string::npos) {
+            const auto end = via.find(';', rport + 1);
+            via.erase(rport, end == std::string::npos ? std::string::npos : end - rport);
+        }
+        via += ";received=127.0.0.1;rport=" + std::to_string(ntohs(peer.sin_port));
+        send("SIP/2.0 " + status + "\r\nVia: " + via + "\r\nFrom: " + header(request, "From") +
              "\r\nTo: " + to + "\r\nCall-ID: " + header(request, "Call-ID") + "\r\nCSeq: " + header(request, "CSeq") +
              "\r\n" + extra + "Content-Length: " + std::to_string(body.size()) + "\r\n\r\n" + body, peer);
     }
@@ -598,6 +605,31 @@ void test_sip(const std::string& executable) {
         sip.verify();
     }
 #ifdef IVRTTS_TEST_PIPELINE
+    {
+        Server audio; Temp assets;
+        setenv("SIP_CODEC", "PCMU", 1);
+        write_file(assets.path / "greeting1.wav", audio.wav);
+        write_file(assets.path / "greeting2.wav", audio.wav);
+        SipServer sip(false, false, false, false, false, true, true);
+        setenv("SIP_WAIT_FOR_MEDIA", "1", 1);
+        setenv("SIP_CONTACT_HOST", "127.0.0.1", 1);
+        Process client(executable, {"--greetings", assets.path.string(), "sip:1001@127.0.0.1", sip.uri, "sip:1002@127.0.0.1"});
+        client.until("Caller pressed #2; starting greeting (WangSG).");
+        const auto until = Clock::now() + 1500ms;
+        while (Clock::now() < until) client.pump();
+        client.terminate();
+        check(client.finish(4) == 0, "prerecorded greeting worker failed: " + client.output);
+        check(client.output.find("Caller pressed #1; starting greeting (lingCL).") != std::string::npos,
+              "prerecorded #1 did not play: " + client.output);
+        check(client.output.find("learned registrar rport") != std::string::npos,
+              "mapped signaling port was not learned from the matching REGISTER response");
+        check(client.output.find("Generating") == std::string::npos && audio.pipeline_requests().empty(),
+              "prerecorded calls unexpectedly invoked inference");
+        check(sip.voiced_packets > 20, "prerecorded greetings did not produce RTP audio");
+        sip.verify();
+        unsetenv("SIP_CONTACT_HOST");
+        setenv("SIP_WAIT_FOR_MEDIA", "0", 1);
+    }
     for (bool rtp_digits : {false, true}) {
         Server audio;
         SipServer sip(false, false, false, false, false, true, rtp_digits);

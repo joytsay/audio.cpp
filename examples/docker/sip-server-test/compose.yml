@@ -1,0 +1,69 @@
+services:
+  sip-test:
+    image: audio.cpp-sip-greetings:local
+    build:
+      context: ../../..
+      dockerfile: .devops/cuda.Dockerfile
+      target: sip-runtime
+      args:
+        UBUNTU_VERSION: ${UBUNTU_VERSION:-22.04}
+        BUILD_JOBS: ${BUILD_JOBS:-6}
+    network_mode: host
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 10s
+    entrypoint: ["/opt/sip/bin/exampleSIP"]
+    command:
+      - --greetings
+      - /greetings
+      - ${SIP_ACCOUNT:-sip:521@175.180.90.33}
+      - ${SIP_PROXY:-sip:175.180.90.33:9900}
+      - listen
+    environment:
+      SIP_SECRET: ${SIP_SECRET:-123456}
+      SIP_AUTHUSER: ${SIP_AUTHUSER:-521}
+      SIP_CONTACT_HOST: ${SIP_CONTACT_HOST:-175.180.90.33.nip.io}
+      SIP_INTERFACE: ${SIP_INTERFACE:-wlP1p1s0}
+      SIP_LISTEN: ${SIP_LISTEN:-192.168.2.117:15061}
+      SIP_RTP_PORTS: ${SIP_RTP_PORTS:-49160-49200}
+      SIP_CODEC: PCMU
+      SIP_DTMF_MODE: rtp
+      SIP_WAIT_FOR_MEDIA: "1"
+      SIP_GREETING_LOOP: ${SIP_GREETING_LOOP:-1}
+      SIP_CONTINUOUS: "1"
+      SIP_TRACE: "1"
+    volumes:
+      - ./greetings:/greetings:ro
+    healthcheck:
+      disable: true
+
+  # Explicit opt-in automated caller; uses account 520 only during verification.
+  caller:
+    profiles: [verify]
+    image: audio.cpp-sip-greetings:local
+    network_mode: host
+    init: true
+    entrypoint: ["/opt/sip/bin/exampleSIP"]
+    command:
+      - --greetings
+      - /greetings
+      - sip:520@175.180.90.33
+      - ${SIP_PROXY:-sip:175.180.90.33:9900}
+      - ${SIP_ACCOUNT:-sip:521@175.180.90.33}
+    environment:
+      SIP_SECRET: ${SIP_CALLER_SECRET:-123456}
+      SIP_AUTHUSER: "520"
+      SIP_CONTACT_HOST: ${SIP_CONTACT_HOST:-175.180.90.33.nip.io}
+      SIP_INTERFACE: ${SIP_INTERFACE:-wlP1p1s0}
+      SIP_LISTEN: ${SIP_CALLER_LISTEN:-192.168.2.117:15060}
+      SIP_RTP_PORTS: 49202-49240
+      SIP_CODEC: PCMU
+      SIP_DTMF_MODE: rtp
+      SIP_WAIT_FOR_MEDIA: "1"
+      SIP_TRACE: "1"
+      SIP_TEST_DTMF: "#1,,,,,#2"
+      SIP_TEST_RECORD: /tmp/received-520.wav
+    volumes:
+      - ./greetings:/greetings:ro
+    healthcheck:
+      disable: true
