@@ -118,6 +118,23 @@ std::vector<int16_t> mono(const int16_t* samples, size_t frames, unsigned channe
     }
     return result;
 }
+// Filter before decimating to the G.711 clock rate. Work outside audio callbacks.
+std::vector<int16_t> phone_pcm(const std::vector<int16_t>& wide) {
+    if (wide.empty()) return {};
+    auto padded = wide;
+    padded.resize((padded.size() + 5) / 6 * 6, 0);
+    struct auresamp resampler;
+    auresamp_init(&resampler);
+    if (auresamp_setup(&resampler, 48000, 1, 8000, 1))
+        throw std::runtime_error("cannot configure filtered telephone resampler");
+    // libre's FIR uses input-sized scratch space, then decimates in place.
+    std::vector<int16_t> converted(padded.size());
+    size_t count = converted.size();
+    if (auresamp(&resampler, converted.data(), &count, padded.data(), padded.size()))
+        throw std::runtime_error("cannot resample telephone audio");
+    converted.resize(count);
+    return converted;
+}
 class AudioBridge {
 public:
     explicit AudioBridge(SipPipeline* pipeline, const std::string& path = env("SIP_TEST_RECORD")) : pipeline_(pipeline) {
@@ -136,19 +153,27 @@ public:
             if (!recording_) std::cerr << "Could not finalize received-audio WAV header.\n";
         }
     }
-    void play(const std::vector<unsigned char>& wav) {
+    struct Playback { std::vector<int16_t> wide, narrow; };
+    static Playback prepare(const std::vector<unsigned char>& wav) {
         auto audio = decode_wav(wav);
         std::vector<int16_t> samples(audio.pcm.size() / 2);
         for (size_t i = 0; i < samples.size(); ++i)
             samples[i] = int16_t(unsigned(audio.pcm[i * 2]) | unsigned(audio.pcm[i * 2 + 1]) << 8);
-        auto pcm = mono(samples.data(), samples.size() / audio.channels, audio.channels, audio.rate, 48000);
-        if (pcm.empty()) throw std::runtime_error("TTS WAV has no playable samples");
+        Playback prepared;
+        prepared.wide = mono(samples.data(), samples.size() / audio.channels, audio.channels, audio.rate, 48000);
+        if (prepared.wide.empty()) throw std::runtime_error("TTS WAV has no playable samples");
+        prepared.narrow = phone_pcm(prepared.wide);
+        return prepared;
+    }
+    void play(const std::vector<unsigned char>& wav) { play(prepare(wav)); }
+    void play(Playback prepared) {
         std::lock_guard<std::mutex> lock(mutex_);
-        pcm_ = std::move(pcm); position_ = 0; playing_ = true; finished_ = false;
+        pcm_ = std::move(prepared.wide); narrow_pcm_ = std::move(prepared.narrow);
+        position_ = 0; playing_ = true; finished_ = false;
     }
     void stop_playback() {
         std::lock_guard<std::mutex> lock(mutex_);
-        playing_ = false; finished_ = false; pcm_.clear(); position_ = 0;
+        playing_ = false; finished_ = false; pcm_.clear(); narrow_pcm_.clear(); position_ = 0;
     }
     void enable_echo(bool enabled) { echo_enabled_ = enabled; }
     bool echo_active() {
@@ -172,8 +197,10 @@ public:
         echo_.clear(); echo_position_ = 0;
         if (!playing_) return;
         for (size_t i = 0; i < frames && position_ < pcm_.size(); ++i) {
-            size_t a = size_t(position_), b = std::min(a + 1, pcm_.size() - 1);
-            int16_t value = int16_t(std::lround(pcm_[a] * (1 - (position_ - a)) + pcm_[b] * (position_ - a)));
+            const auto& buffer = rate == 8000 ? narrow_pcm_ : pcm_;
+            const double position = rate == 8000 ? position_ / 6 : position_;
+            size_t a = std::min(size_t(position), buffer.size() - 1), b = std::min(a + 1, buffer.size() - 1);
+            int16_t value = int16_t(std::lround(buffer[a] * (1 - (position - a)) + buffer[b] * (position - a)));
             for (unsigned c = 0; c < channels; ++c) output[i * channels + c] = value;
             position_ += 48000.0 / rate;
         }
@@ -253,7 +280,7 @@ private:
     unsigned recording_rate_ = 0, recording_channels_ = 0;
     uint64_t recording_bytes_ = 0;
     std::mutex mutex_;
-    std::vector<int16_t> pcm_;
+    std::vector<int16_t> pcm_, narrow_pcm_;
     double position_ = 0;
     bool echo_enabled_ = false;
     std::deque<int16_t> echo_;
@@ -287,6 +314,19 @@ int start_driver(void** state, unsigned rate, unsigned channels, unsigned ptime,
             auto next = Clock::now(); uint64_t timestamp = 0;
             uint64_t frames_sent = 0, late_frames = 0, max_late_us = 0;
             try {
+                if (read) {
+                    // Baresip's encoder has its own 20 ms clock. Give it three
+                    // silence frames of headroom before the live source clock
+                    // starts, so small scheduling slips do not starve aubuf.
+                    for (unsigned i = 0; i < 3 && driver->running; ++i) {
+                        struct auframe frame;
+                        auframe_init(&frame, AUFMT_S16LE, samples.data(), samples.size(), rate, channels);
+                        frame.timestamp = timestamp;
+                        read(&frame, arg);
+                        timestamp += uint64_t(ptime) * 1000;
+                        ++frames_sent;
+                    }
+                }
                 while (driver->running) {
                     struct auframe frame;
                     auframe_init(&frame, AUFMT_S16LE, samples.data(), samples.size(), rate, channels);
@@ -412,8 +452,8 @@ public:
         const auto display = env("SIP_DISPLAY_NAME");
         if (display.find_first_of("\"\\<>\r\n") != std::string::npos)
             throw std::runtime_error("invalid SIP display name");
-        const auto identity = display.empty() ? "<" + account_ + ">;regint=300"
-            : "\"" + display + "\" <" + account_ + ">;regint=300";
+        const auto identity = display.empty() ? "<" + account_ + ">;regint=300;ptime=20"
+            : "\"" + display + "\" <" + account_ + ">;regint=300;ptime=20";
         require(ua_alloc(&ua_, identity.c_str()), "create SIP account");
         if (!env("SIP_CONTACT_URI").empty()) {
             const auto value = env("SIP_CONTACT_URI");
@@ -557,7 +597,7 @@ private:
                 if (tts_stop_) return;
                 digit = pending_digit_; pending_digit_ = 0; revision = tts_revision_;
             }
-            std::vector<unsigned char> wav; std::string error;
+            std::vector<unsigned char> wav; AudioBridge::Playback prepared; std::string error;
             try {
                 const auto key = std::string("DTMF_") + digit;
                 const auto url = env("AUDIOCPP_URL").empty() ? "http://127.0.0.1:8081" : env("AUDIOCPP_URL");
@@ -568,7 +608,8 @@ private:
                     if (wav.size() + size > 64 * 1024 * 1024) throw std::runtime_error("TTS audio exceeds 64 MiB");
                     wav.insert(wav.end(), bytes, bytes + size);
                 }, ivrTTS::AudioMode::Wav, [this, revision] { return tts_stop_ || tts_revision_ != revision; });
-                decode_wav(wav);
+                // Decode and resample on the TTS thread, never the SIP/RTP event loop.
+                prepared = AudioBridge::prepare(wav);
                 const auto debug_dir = env("SIP_TTS_DEBUG_DIR");
                 if (!debug_dir.empty() && !tts_stop_ && tts_revision_ == revision) {
                     // Save the server's original WAV without resampling or RTP.
@@ -583,12 +624,18 @@ private:
                         if (!file) throw std::runtime_error("cannot write TTS diagnostic WAV");
                         std::filesystem::rename(temporary, path);
                         std::cout << "Original TTS WAV: " << path.string() << '\n';
+                        const auto phone_path = std::filesystem::path(debug_dir) / (key + "-8000.wav");
+                        {
+                            AudioBridge capture(nullptr, phone_path.string()); capture.activate(true);
+                            capture.receive(prepared.narrow.data(), prepared.narrow.size(), 1, 8000);
+                        }
+                        std::cout << "Telephone PCM before G.711: " << phone_path.string() << '\n';
                     } catch (const std::exception& e) { std::cerr << "TTS diagnostic: " << e.what() << '\n'; }
                 }
             } catch (const std::exception& e) { error = e.what(); }
             std::lock_guard<std::mutex> lock(tts_mutex_);
             if (!tts_stop_ && tts_revision_ == revision) {
-                tts_wav_ = std::move(wav); tts_error_ = error; tts_ready_ = true;
+                tts_audio_ = std::move(prepared); tts_error_ = error; tts_ready_ = true;
             }
         }
     }
@@ -598,7 +645,7 @@ private:
         tts_ready_ = false;
         if (!tts_error_.empty()) { std::cerr << "TTS selection failed: " << tts_error_ << '\n'; return; }
         if (!established_ || !call_) return;
-        audio_.play(tts_wav_); tts_wav_.clear(); announcement_playing_ = true; draining_ = false;
+        audio_.play(std::move(tts_audio_)); announcement_playing_ = true; draining_ = false;
         std::cout << "Playing generated TTS greeting.\n";
     }
     void start_announcement(bool alternate = false, bool third = false) {
@@ -713,7 +760,7 @@ private:
     std::mutex tts_mutex_;
     std::condition_variable tts_cv_;
     char pending_digit_ = 0;
-    std::vector<unsigned char> tts_wav_;
+    AudioBridge::Playback tts_audio_;
     std::string tts_error_;
     bool rtp_received_ = false, media_warning_ = false;
     Clock::time_point deadline_, playback_end_, media_deadline_;
@@ -742,8 +789,33 @@ void self_test() {
             throw std::runtime_error("echo or greeting pause self-test failed");
         std::this_thread::sleep_for(std::chrono::milliseconds(1050));
         echo.transmit(output.data(), output.size(), 1, 8000);
-        if (echo.echo_active() || output.front() != 32767 || !echo.finished())
+        if (echo.echo_active() || output.front() <= 0 || !echo.finished())
             throw std::runtime_error("greeting did not resume after caller silence");
+    }
+    {
+        auto render = [&](unsigned hz, bool chunked) {
+            auto tone = wav; tone.resize(44 + 24000 * 2);
+            auto put = [&](size_t at, uint32_t value) { for (unsigned i=0; i<4; ++i) tone[at+i] = value >> (8*i); };
+            put(4, tone.size()-8); put(40, tone.size()-44);
+            for (size_t i=0; i<24000; ++i) {
+                const auto sample = int16_t(12000 * std::sin(2 * 3.141592653589793 * hz * i / 24000));
+                tone[44+2*i] = unsigned(sample) & 255; tone[45+2*i] = (unsigned(sample) >> 8) & 255;
+            }
+            AudioBridge playback(nullptr, ""); playback.activate(true); playback.play(tone);
+            std::vector<int16_t> result(8000);
+            const size_t block = chunked ? 160 : result.size();
+            for (size_t offset=0; offset<result.size(); offset+=block)
+                playback.transmit(result.data()+offset, block, 1, 8000);
+            if (!playback.finished()) throw std::runtime_error("telephone playback duration changed");
+            return result;
+        };
+        const auto low = render(1000, false), high = render(6000, false);
+        auto energy = [](const std::vector<int16_t>& pcm) {
+            double sum=0; for (size_t i=100; i<pcm.size()-100; ++i) sum += double(pcm[i])*pcm[i]; return sum;
+        };
+        if (energy(low) < 1e11 || energy(high) > energy(low)*0.0025)
+            throw std::runtime_error("telephone anti-alias filtering failed");
+        if (low != render(1000, true)) throw std::runtime_error("20ms telephone frames introduced discontinuities");
     }
     for (unsigned rate : {8000u, 48000u}) {
         std::vector<int16_t> input(rate / 50, 1000);

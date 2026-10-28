@@ -233,9 +233,47 @@ The latest request for each key replaces that file. After selecting a greeting:
 docker compose cp sip-test:/tmp/tts-debug ./evidence-tts
 ```
 
-Listen to these original WAVs outside the call. If the original is choppy,
-investigate the TTS model/output. If it is smooth but the call is choppy,
-investigate sample-rate conversion, playback timing and RTP delivery. These
+Each selection also saves `DTMF_1-8000.wav` (and `_2-8000.wav`, `_3-8000.wav`):
+the filtered 8 kHz mono PCM used for G.711 playback, before encoding. The original
+WAV remains unchanged. This conversion uses libre's FIR low-pass filter rather
+than skipping samples; 20 ms playback callbacks preserve the continuous waveform.
+TTS decoding and conversion run on the background worker so the SIP event loop
+only swaps in prepared audio.
+
+Listen to these WAVs outside the call. If the original is choppy,
+investigate the TTS model/output. If the original is smooth but the 8 kHz file
+is choppy, investigate conversion. If both files are smooth but the call is
+choppy, investigate playback timing and RTP delivery. These
 files are not recordings of what the iPhone received. They disappear when the
 container is recreated; copy them first. Set `SIP_TTS_DEBUG_DIR=` in `.env` to
 disable diagnostic captures. Saving errors are logged without ending the call.
+
+## Capture RTP delivery and packet pacing
+
+The sender preloads three silent frames (60 ms at the configured 20 ms packet
+time) into baresip's audio buffer. This gives the source and encoder clocks
+scheduling headroom; it does not conceal downstream network loss.
+
+After rebuilding, start this capture, then call 521, press `#3`, listen and hang up
+within 60 seconds:
+
+```bash
+sudo timeout 60 tcpdump -ni wlP1p1s0 -nn -s0 -U -w /tmp/sip-rtp.pcap \
+  'udp and portrange 49160-49200'
+./analyze-rtp.sh /tmp/sip-rtp.pcap
+```
+
+`evidence-rtp/report.json` lists each source/destination/SSRC, missing sequence
+numbers, duplicates, packet arrival gaps, and missing audio timestamps. The
+8 kHz WAV for the stream **from 192.168.2.117** contains decoded G.711 packets
+captured leaving Ubuntu. Missing audio timestamps are filled with silence;
+this is not the iPhone's jitter-buffer output or concealment algorithm.
+
+If that outgoing WAV stutters, the defect precedes Wi-Fi delivery. If it is
+clean but capture gaps are large, investigate sender scheduling/queues. If both
+the audio and pacing are clean, investigate Wi-Fi/router/gateway delivery and
+the iPhone receive path. A local outgoing capture cannot detect packets lost
+after the capture point. Check tcpdump's kernel-drop count before interpreting
+missing sequences as network loss. The analyzer is C++ and runs from the existing
+SIP image through the shell wrapper; rebuild `sip-test` first. It accepts tcpdump
+PCAP files, not PCAPNG. A native build can run `analyzeRTP CAPTURE.pcap` directly.

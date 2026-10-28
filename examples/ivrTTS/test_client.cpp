@@ -382,6 +382,9 @@ class SipServer {
 public:
     std::string uri;
     std::atomic<bool> authenticated{false}, invited{false}, unregistered{false}, bye{false};
+    std::atomic<unsigned> timestamp_gaps{0};
+    uint32_t last_rtp_timestamp_ = 0;
+    bool have_rtp_timestamp_ = false;
     std::atomic<unsigned> packets{0}, voiced_packets{0}, voiced_before_ready{0}, voiced_before_selection{0};
     std::atomic<bool> ready_sent{false};
     SipServer(bool reject, bool busy, bool incoming, bool opus = false, bool conversation = false, bool wait_for_ready = false, bool rtp_digits = false, unsigned digit_interval = 100)
@@ -451,6 +454,13 @@ public:
                         auto n = recv(rtp_, buffer, sizeof(buffer), 0);
                         if (n > 12 && (buffer[1] & 127) == (opus_ ? 111 : 0)) {
                             ++packets;
+                            if (!opus_) {
+                                uint32_t timestamp = 0;
+                                for (unsigned i=0; i<4; ++i) timestamp = (timestamp << 8) | buffer[4+i];
+                                if (have_rtp_timestamp_ && uint32_t(timestamp - last_rtp_timestamp_) != 160)
+                                    ++timestamp_gaps;
+                                last_rtp_timestamp_ = timestamp; have_rtp_timestamp_ = true;
+                            }
                             if (opus_ || std::any_of(buffer + 12, buffer + n, [](unsigned char sample) { return sample != 0xff; })) ++voiced_packets;
                         }
                     }
@@ -655,6 +665,9 @@ void test_sip(const std::string& executable) {
             const auto capture = read_file(diagnostics.path / (std::string(key) + ".wav"));
             check(std::string(capture.begin(), capture.end()) == audio.wav,
                   "diagnostic changed the original TTS WAV");
+            const auto phone = read_file(diagnostics.path / (std::string(key) + "-8000.wav"));
+            check(phone.size() == 44 + 8000 * 2 && phone[24] == 0x40 && phone[25] == 0x1f,
+                  "missing or malformed 8kHz telephone diagnostic");
         }
         unsetenv("SIP_TTS_DEBUG_DIR");
         for (size_t i = 0; i < requests.size(); ++i) {
@@ -663,6 +676,7 @@ void test_sip(const std::string& executable) {
             const auto key = "DTMF_" + std::to_string(i == 2 ? 1 : i == 3 ? 3 : i + 1);
             check(field(body.get(), "input") == std::getenv(key.c_str()), "DTMF text changed");
         }
+        check(sip.timestamp_gaps == 0, "TTS RTP timestamps contain audio underrun gaps");
         check(client.output.find("Caller pressed #1;") != std::string::npos &&
               client.output.find("Caller pressed #2;") != std::string::npos && sip.voiced_packets > 10,
               "TTS keypad selections did not produce RTP");

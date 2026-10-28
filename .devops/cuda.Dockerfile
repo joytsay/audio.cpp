@@ -224,13 +224,14 @@ COPY examples/docker/coturn/CMakeLists.txt examples/docker/coturn/setupEnv.cpp /
 RUN PKG_CONFIG_PATH=/opt/sip/lib/pkgconfig cmake -S ivrTTS -B ivrTTS/build \
         -DCMAKE_BUILD_TYPE=Release -DIVRTTS_BUILD_SIP=ON -DIVRTTS_BUILD_TUI=OFF \
         -DCMAKE_BUILD_RPATH=/opt/sip/lib && \
-    cmake --build ivrTTS/build --target exampleSIP --parallel "${BUILD_JOBS}" && \
+    cmake --build ivrTTS/build --target exampleSIP analyzeRTP --parallel "${BUILD_JOBS}" && \
     cmake -S coturn-setup -B coturn-setup/build -DCMAKE_BUILD_TYPE=Release && \
     cmake --build coturn-setup/build --parallel "${BUILD_JOBS}" && \
     mkdir -p /opt/sip/bin /opt/sip/share/voices && \
-    cp ivrTTS/build/exampleSIP coturn-setup/build/coturn_setup /opt/sip/bin/ && \
+    cp ivrTTS/build/exampleSIP ivrTTS/build/analyzeRTP coturn-setup/build/coturn_setup /opt/sip/bin/ && \
     cp -a ivrTTS/voices/. /opt/sip/share/voices/ && \
-    /opt/sip/bin/exampleSIP --self-test
+    /opt/sip/bin/exampleSIP --self-test && \
+    /opt/sip/bin/analyzeRTP --self-test
 
 # Small CPU-only image for SIP and the environment setup command. It calls the
 # inference services over HTTP and does not need the NVIDIA runtime.
