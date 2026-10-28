@@ -2,11 +2,10 @@
 
 Your phone remains **520 on OpenSIPS at 175.180.90.33:9900**. This single CPU
 container registers **521 on that same external server**, answers calls and
-plays the bundled greetings on demand: **#1 lingCL** or **#2 WangSG**. It does not run a
-local registrar, TURN, STT, LLM, TTS, or a WebUI.
+plays TTS greetings on demand: **#1 lingCL**, **#2 WangSG**, **#3 lingCL**. It does not run a
+local registrar, TURN, STT, LLM, or a WebUI. It uses the existing audio.cpp TTS server.
 
-The two greetings are prerecorded, so calls and re-registration do not load
-models. After hangup the worker accepts another call and reuses the same audio.
+The selected text is synthesized on each keypad selection, including repeats. After hangup the worker accepts another call.
 
 ## Start on Ubuntu
 
@@ -30,7 +29,7 @@ cached; subsequent source-only changes rebuild just the SIP application.
 Wait for:
 
 ```text
-Prerecorded greetings ready. #1=lingCL, #2=WangSG. No AI requests during calls.
+On-demand TTS enabled. #1=lingCL, #2=WangSG, #3=lingCL. No startup synthesis.
 Dialog Contact: sip:521@175.180.90.33.nip.io:... (learned registrar rport)
 SIP registered.
 Waiting for one incoming call...
@@ -38,12 +37,10 @@ Waiting for one incoming call...
 
 From PortSIP UC on your iPhone, keep your existing **520** account registered
 on **175.180.90.33:9900 (UDP)** and dial **521**. On connection you should hear
-silence until you press **#1 for lingCL** or **#2 for WangSG**. Each selection
+silence until you press **#1 for lingCL** or **#2 for WangSG**, or **#3 for the configured third text**. Each selection
 plays once; there is no automatic alternation. The worker stays available for the next call.
 
-Set `SIP_GREETING_LOOP=0` in `.env` for keypad selection only (the default).
-If an existing `.env` contains `SIP_GREETING_LOOP=1`, change it to `0` and
-recreate the container. Echo mode remains enabled.
+Greetings play only on keypad selection. Echo mode remains enabled.
 
 ## Settings
 
@@ -203,3 +200,42 @@ position. After one second below that level, the selected greeting resumes. This
 recognition model. Use headphones or the iPhone earpiece for this test: speakerphone
 can feed greetings and echoed audio back into the microphone and keep it paused.
 Set `SIP_ECHO_TEST=0` and recreate the worker to disable echo.
+
+## TTS greeting text
+
+Keep the existing `ivr-server` running at `http://127.0.0.1:8081` (or set
+`AUDIOCPP_URL` to your audio.cpp server). Install `zipvoice_distill_gguf` there.
+The CPU SIP container calls that server; it does not load a TTS model itself.
+Add these settings to this directory's `.env` (existing files are not overwritten):
+
+```dotenv
+AUDIOCPP_URL=http://127.0.0.1:8081
+TTS_MODEL=zipvoice
+DTMF_1="歡迎來電期偶科技，請問我可以怎麼服務您？"
+DTMF_2="歡迎來電期偶科技，請問我可以怎麼服務您？"
+DTMF_3="歡迎來到台灣積體電路智慧櫃台"
+```
+
+Recreate `sip-test` after editing text. There is no startup synthesis or greeting
+cache. Each `#1`, `#2`, or `#3` starts a fresh TTS request on a background thread;
+SIP and echo continue while it runs. Playback begins when the generated WAV is
+received. A newer selection stops playback and cancels/discards the older request.
+Hangup cancels generation, and errors are logged without ending the call. `#3` uses lingCL; `#2` uses WangSG. The `--greetings DIR`
+mode and source WAVs remain available for the prerecorded diagnostic caller.
+
+## Diagnose choppy TTS versus echo
+
+The service saves each completed TTS response unchanged to
+`/tmp/tts-debug/DTMF_1.wav` (and `_2.wav`, `_3.wav`) inside the container.
+The latest request for each key replaces that file. After selecting a greeting:
+
+```bash
+docker compose cp sip-test:/tmp/tts-debug ./evidence-tts
+```
+
+Listen to these original WAVs outside the call. If the original is choppy,
+investigate the TTS model/output. If it is smooth but the call is choppy,
+investigate sample-rate conversion, playback timing and RTP delivery. These
+files are not recordings of what the iPhone received. They disappear when the
+container is recreated; copy them first. Set `SIP_TTS_DEBUG_DIR=` in `.env` to
+disable diagnostic captures. Saving errors are logged without ending the call.

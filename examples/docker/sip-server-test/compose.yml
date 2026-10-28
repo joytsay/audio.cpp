@@ -14,12 +14,18 @@ services:
     stop_grace_period: 10s
     entrypoint: ["/opt/sip/bin/exampleSIP"]
     command:
-      - --greetings
-      - /greetings
+      - --tts-greetings
       - ${SIP_ACCOUNT:-sip:521@175.180.90.33}
       - ${SIP_PROXY:-sip:175.180.90.33:9900}
       - listen
     environment:
+      AUDIOCPP_URL: ${AUDIOCPP_URL:-http://127.0.0.1:8081}
+      SIP_TTS_DEBUG_DIR: ${SIP_TTS_DEBUG_DIR:-/tmp/tts-debug}
+      TTS_MODEL: ${TTS_MODEL:-zipvoice}
+      IVRTTS_VOICE_DIR: /opt/sip/share/voices
+      DTMF_1: ${DTMF_1:-歡迎來電期偶科技，請問我可以怎麼服務您？}
+      DTMF_2: ${DTMF_2:-歡迎來電期偶科技，請問我可以怎麼服務您？}
+      DTMF_3: ${DTMF_3:-歡迎來到台灣積體電路智慧櫃台}
       SIP_SECRET: ${SIP_SECRET:-123456}
       SIP_AUTHUSER: ${SIP_AUTHUSER:-521}
       SIP_CONTACT_HOST: ${SIP_CONTACT_HOST:-175.180.90.33.nip.io}
@@ -30,7 +36,6 @@ services:
       SIP_DTMF_MODE: rtp
       SIP_WAIT_FOR_MEDIA: "1"
       SIP_ECHO_TEST: ${SIP_ECHO_TEST:-1}
-      SIP_GREETING_LOOP: ${SIP_GREETING_LOOP:-0}
       SIP_CONTINUOUS: "1"
       SIP_TRACE: "1"
     volumes:

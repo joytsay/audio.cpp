@@ -384,8 +384,8 @@ public:
     std::atomic<bool> authenticated{false}, invited{false}, unregistered{false}, bye{false};
     std::atomic<unsigned> packets{0}, voiced_packets{0}, voiced_before_ready{0}, voiced_before_selection{0};
     std::atomic<bool> ready_sent{false};
-    SipServer(bool reject, bool busy, bool incoming, bool opus = false, bool conversation = false, bool wait_for_ready = false, bool rtp_digits = false)
-        : reject_(reject), busy_(busy), incoming_(incoming), opus_(opus), conversation_(conversation), wait_for_ready_(wait_for_ready), rtp_digits_(rtp_digits) {
+    SipServer(bool reject, bool busy, bool incoming, bool opus = false, bool conversation = false, bool wait_for_ready = false, bool rtp_digits = false, unsigned digit_interval = 100)
+        : reject_(reject), busy_(busy), incoming_(incoming), opus_(opus), conversation_(conversation), wait_for_ready_(wait_for_ready), rtp_digits_(rtp_digits), digit_interval_(digit_interval) {
         auto bind_udp = [](int& fd) {
             fd = socket(AF_INET, SOCK_DGRAM, 0); check(fd >= 0, "cannot open SIP test socket");
             fcntl(fd, F_SETFD, FD_CLOEXEC);
@@ -401,9 +401,9 @@ public:
                 while (!stopped_) {
                     pollfd ready[2]{{sip_, POLLIN, 0}, {rtp_, POLLIN, 0}};
                     poll(ready, 2, 20);
-                    if (wait_for_ready_ && connected_ && greeting_step_ < 6 &&
-                        Clock::now() >= ready_at_ + std::chrono::milliseconds(100 * greeting_step_)) {
-                        const char digits[] = {'#', '1', '#', '2', '#', '1'};
+                    if (wait_for_ready_ && connected_ && greeting_step_ < 8 &&
+                        Clock::now() >= ready_at_ + std::chrono::milliseconds(digit_interval_ * greeting_step_)) {
+                        const char digits[] = {'#', '1', '#', '2', '#', '1', '#', '3'};
                         if (greeting_step_ == 0) voiced_before_ready = voiced_packets.load();
                         if (greeting_step_ == 1) voiced_before_selection = voiced_packets.load();
                         const auto digit = digits[greeting_step_++];
@@ -553,6 +553,7 @@ private:
     int sip_ = -1, rtp_ = -1;
     unsigned port_, media_port_;
     bool reject_, busy_, incoming_, opus_, conversation_, wait_for_ready_, rtp_digits_;
+    unsigned digit_interval_;
     bool connected_ = false, sent_bye_ = false;
     unsigned info_cseq_ = 2, greeting_step_ = 0;
     unsigned audio_frames_ = 0;
@@ -610,7 +611,7 @@ void test_sip(const std::string& executable) {
         setenv("SIP_CODEC", "PCMU", 1);
         write_file(assets.path / "greeting1.wav", audio.wav);
         write_file(assets.path / "greeting2.wav", audio.wav);
-        SipServer sip(false, false, false, false, false, true, true);
+        SipServer sip(false, false, false, false, false, true, true, 500);
         setenv("SIP_WAIT_FOR_MEDIA", "1", 1);
         setenv("SIP_CONTACT_HOST", "127.0.0.1", 1);
         Process client(executable, {"--greetings", assets.path.string(), "sip:1001@127.0.0.1", sip.uri, "sip:1002@127.0.0.1"});
@@ -629,6 +630,44 @@ void test_sip(const std::string& executable) {
         sip.verify();
         unsetenv("SIP_CONTACT_HOST");
         setenv("SIP_WAIT_FOR_MEDIA", "0", 1);
+    }
+    {
+        Server audio; audio.pipeline_mode = true; Temp diagnostics;
+        setenv("SIP_TTS_DEBUG_DIR", diagnostics.path.c_str(), 1);
+        SipServer sip(false, false, false, false, false, true, true, 500);
+        setenv("AUDIOCPP_URL", audio.url.c_str(), 1);
+        setenv("TTS_MODEL", "test", 1);
+        setenv("DTMF_1", "第一段問候", 1);
+        setenv("DTMF_2", "第二段問候", 1);
+        setenv("DTMF_3", "歡迎來到台灣積體電路智慧櫃台", 1);
+        setenv("SIP_WAIT_FOR_MEDIA", "1", 1);
+        Process client(executable, {"--tts-greetings", "sip:1001@127.0.0.1", sip.uri, "sip:1002@127.0.0.1"});
+        client.until("SIP registered.");
+        check(audio.pipeline_requests().empty(), "TTS ran before keypad input");
+        client.until("Caller pressed #3; starting greeting (lingCL).");
+        const auto until = Clock::now() + 500ms;
+        while (Clock::now() < until) client.pump();
+        client.terminate();
+        check(client.finish(4) == 0, "TTS keypad worker failed: " + client.output);
+        const auto requests = audio.pipeline_requests();
+        check(requests.size() == 4, "expected four keypress-triggered TTS generations, including repeated #1");
+        for (const auto key : {"DTMF_1", "DTMF_2", "DTMF_3"}) {
+            const auto capture = read_file(diagnostics.path / (std::string(key) + ".wav"));
+            check(std::string(capture.begin(), capture.end()) == audio.wav,
+                  "diagnostic changed the original TTS WAV");
+        }
+        unsetenv("SIP_TTS_DEBUG_DIR");
+        for (size_t i = 0; i < requests.size(); ++i) {
+            check(requests[i].first == "/v1/audio/speech", "unexpected TTS route");
+            const auto body = parse(requests[i].second);
+            const auto key = "DTMF_" + std::to_string(i == 2 ? 1 : i == 3 ? 3 : i + 1);
+            check(field(body.get(), "input") == std::getenv(key.c_str()), "DTMF text changed");
+        }
+        check(client.output.find("Caller pressed #1;") != std::string::npos &&
+              client.output.find("Caller pressed #2;") != std::string::npos && sip.voiced_packets > 10,
+              "TTS keypad selections did not produce RTP");
+        sip.verify();
+        for (const auto key : {"AUDIOCPP_URL", "TTS_MODEL", "DTMF_1", "DTMF_2", "DTMF_3"}) unsetenv(key);
     }
     for (bool rtp_digits : {false, true}) {
         Server audio;
