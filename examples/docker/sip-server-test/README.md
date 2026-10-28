@@ -2,7 +2,7 @@
 
 Your phone remains **520 on OpenSIPS at 175.180.90.33:9900**. This single CPU
 container registers **521 on that same external server**, answers calls and
-automatically repeats the bundled **#1 lingCL → #2 WangSG** greetings until you hang up. It does not run a
+plays the bundled greetings on demand: **#1 lingCL** or **#2 WangSG**. It does not run a
 local registrar, TURN, STT, LLM, TTS, or a WebUI.
 
 The two greetings are prerecorded, so calls and re-registration do not load
@@ -38,12 +38,12 @@ Waiting for one incoming call...
 
 From PortSIP UC on your iPhone, keep your existing **520** account registered
 on **175.180.90.33:9900 (UDP)** and dial **521**. On connection you should hear
-**#1 lingCL, then #2 WangSG**, repeating with a three-second pause between greetings until you hang up. No keypad input is
-needed. The worker stays available for the next call.
+silence until you press **#1 for lingCL** or **#2 for WangSG**. Each selection
+plays once; there is no automatic alternation. The worker stays available for the next call.
 
-Set `SIP_GREETING_LOOP=0` in `.env` and recreate the container to return to
-keypad selection only. In either mode, `#1` and `#2` can select a greeting;
-with looping enabled the alternating sequence continues afterward.
+Set `SIP_GREETING_LOOP=0` in `.env` for keypad selection only (the default).
+If an existing `.env` contains `SIP_GREETING_LOOP=1`, change it to `0` and
+recreate the container. Echo mode remains enabled.
 
 ## Settings
 
@@ -199,8 +199,7 @@ was validated, but the Docker daemon is unavailable to this workstation user.
 
 `SIP_ECHO_TEST=1` (default) echoes caller microphone audio back over RTP.
 Audio above an RMS level of 600 (PCM16) pauses the greeting at its current
-position. After one second below that level, playback resumes. The three-second
-pause between greetings remains. This is a simple level detector, not a speech
+position. After one second below that level, the selected greeting resumes. This is a simple level detector, not a speech
 recognition model. Use headphones or the iPhone earpiece for this test: speakerphone
 can feed greetings and echoed audio back into the microphone and keep it paused.
 Set `SIP_ECHO_TEST=0` and recreate the worker to disable echo.
