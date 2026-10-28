@@ -15,6 +15,7 @@
 #include <csignal>
 #include <cstdio>
 #include <cstring>
+#include <deque>
 #include <iostream>
 #include <fstream>
 #include <memory>
@@ -144,10 +145,27 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         pcm_ = std::move(pcm); position_ = 0; playing_ = true; finished_ = false;
     }
+    void enable_echo(bool enabled) { echo_enabled_ = enabled; }
+    bool echo_active() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return echo_enabled_ && Clock::now() < speech_until_;
+    }
     void transmit(int16_t* output, size_t frames, unsigned channels, unsigned rate) {
         std::fill(output, output + frames * channels, 0);
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!active_ || !playing_) return;
+        if (!active_) return;
+        if (echo_enabled_ && Clock::now() < speech_until_) {
+            for (size_t i = 0; i < frames; ++i) {
+                const int16_t value = echo_.empty() ? 0 : echo_.front();
+                for (unsigned c = 0; c < channels; ++c) output[i * channels + c] = value;
+                echo_position_ += 48000.0 / rate;
+                while (echo_position_ >= 1 && !echo_.empty()) { echo_.pop_front(); echo_position_ -= 1; }
+                if (echo_.empty()) echo_position_ = 0;
+            }
+            return; // Freeze the greeting cursor while echoing the caller.
+        }
+        echo_.clear(); echo_position_ = 0;
+        if (!playing_) return;
         for (size_t i = 0; i < frames && position_ < pcm_.size(); ++i) {
             size_t a = size_t(position_), b = std::min(a + 1, pcm_.size() - 1);
             int16_t value = int16_t(std::lround(pcm_[a] * (1 - (position_ - a)) + pcm_[b] * (position_ - a)));
@@ -176,6 +194,21 @@ public:
             if (!recording_) throw std::runtime_error("cannot write test audio recording");
         }
         if (active_ && std::any_of(input, input + frames * channels, [](int16_t value) { return value > 256 || value < -256; })) ++audible_frames_;
+        if (active_ && echo_enabled_) {
+            auto echo = mono(input, frames, channels, rate, 48000);
+            double energy = 0;
+            for (const auto sample : echo) energy += double(sample) * sample;
+            const bool speech = !echo.empty() && energy / echo.size() > 600.0 * 600.0;
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (speech) {
+                if (Clock::now() >= speech_until_) std::cout << "Caller voice detected; pausing greetings and echoing audio.\n";
+                speech_until_ = Clock::now() + std::chrono::seconds(1);
+            }
+            if (Clock::now() < speech_until_) {
+                echo_.insert(echo_.end(), echo.begin(), echo.end());
+                while (echo_.size() > 24000) echo_.pop_front();
+            }
+        }
         if (!active_ || !listening_ || !pipeline_) return;
         auto pcm = mono(input, frames, channels, rate, 16000);
         std::vector<unsigned char> bytes(pcm.size() * 2);
@@ -217,6 +250,10 @@ private:
     std::mutex mutex_;
     std::vector<int16_t> pcm_;
     double position_ = 0;
+    bool echo_enabled_ = false;
+    std::deque<int16_t> echo_;
+    double echo_position_ = 0;
+    Clock::time_point speech_until_{};
     bool playing_ = false, finished_ = false;
     std::atomic<bool> active_{false}, failed_{false}, listening_{true};
 };
@@ -314,6 +351,10 @@ public:
         if (!loop.empty() && loop != "0" && loop != "1")
             throw std::runtime_error("SIP_GREETING_LOOP must be 0 or 1");
         greeting_loop_ = target_ == "listen" && loop == "1";
+        const auto echo = env("SIP_ECHO_TEST");
+        if (!echo.empty() && echo != "0" && echo != "1")
+            throw std::runtime_error("SIP_ECHO_TEST must be 0 or 1");
+        audio_.enable_echo(target_ == "listen" && echo == "1");
         require(libre_init(), "initialize libre"); libre_ = true;
         std::string config = "sip_transports udp,tcp,tls\naudio_source ivrtts,memory\naudio_player ivrtts,memory\n"
                              "audio_alert ivrtts,memory\nrtp_rxmode main\n";
@@ -519,6 +560,8 @@ private:
                 if (!announcement_playing_ && pipeline_->take_reply(reply)) { audio_.listen(false); audio_.play(reply); draining_ = false; }
             }
             if (audio_.finished()) { draining_ = true; playback_end_ = Clock::now() + std::chrono::milliseconds(greeting_loop_ ? 3000 : 300); }
+            if (draining_ && audio_.echo_active())
+                playback_end_ = Clock::now() + std::chrono::seconds(3);
             if (draining_ && Clock::now() >= playback_end_) {
                 draining_ = false;
                 announcement_playing_ = false;
@@ -590,6 +633,19 @@ void self_test() {
     AudioBridge test(nullptr); test.play(wav); test.activate(true);
     int16_t samples[320]{}; test.transmit(samples, 320, 1, 16000);
     if (samples[0] != 32767 || !test.finished()) throw std::runtime_error("PCM playback self-test failed");
+    {
+        AudioBridge echo(nullptr, ""); echo.enable_echo(true); echo.activate(true); echo.play(wav);
+        std::vector<int16_t> voice(160, 2000), output(160);
+        echo.receive(voice.data(), voice.size(), 1, 8000);
+        echo.transmit(output.data(), output.size(), 1, 8000);
+        if (!echo.echo_active() || echo.finished() ||
+            !std::all_of(output.begin(), output.end(), [](int16_t sample) { return sample == 2000; }))
+            throw std::runtime_error("echo or greeting pause self-test failed");
+        std::this_thread::sleep_for(std::chrono::milliseconds(1050));
+        echo.transmit(output.data(), output.size(), 1, 8000);
+        if (echo.echo_active() || output.front() != 32767 || !echo.finished())
+            throw std::runtime_error("greeting did not resume after caller silence");
+    }
     for (unsigned rate : {8000u, 48000u}) {
         std::vector<int16_t> input(rate / 50, 1000);
         auto output = mono(input.data(), input.size(), 1, rate, 16000);
@@ -647,6 +703,7 @@ int main(int argc, char** argv) {
                          "SIP_GREETING: opening message; an empty value disables it\n"
                          "Greetings: #1 lingCL, #2 WangSG; repeat either sequence to replay\n"
                          "SIP_WAIT_FOR_MEDIA=1: wait for greeting selection (default 1; 0 starts automatically)\n"
+                         "SIP_ECHO_TEST=1: pause greetings and echo caller audio during microphone activity\n"
                          "SIP_GREETING_LOOP=1: play both greetings repeatedly on incoming call connection\n"
                          "SIP_CONTINUOUS=1: answer successive pipeline calls and reuse greetings\n"
                          "Settings file: exampleSIP [--env PATH] (defaults to .env.sip, full pipeline)\n"

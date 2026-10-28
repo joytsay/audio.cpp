@@ -29,6 +29,7 @@ services:
       SIP_CODEC: PCMU
       SIP_DTMF_MODE: rtp
       SIP_WAIT_FOR_MEDIA: "1"
+      SIP_ECHO_TEST: ${SIP_ECHO_TEST:-1}
       SIP_GREETING_LOOP: ${SIP_GREETING_LOOP:-1}
       SIP_CONTINUOUS: "1"
       SIP_TRACE: "1"

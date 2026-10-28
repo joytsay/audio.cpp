@@ -194,3 +194,13 @@ This validates the external call flow and the shipped native executable mode.
 Ubuntu deployment was not performed because SSH key access to geoadmin was
 denied. Native binaries were exercised directly here; Docker Compose rendering
 was validated, but the Docker daemon is unavailable to this workstation user.
+
+## iPhone microphone echo test
+
+`SIP_ECHO_TEST=1` (default) echoes caller microphone audio back over RTP.
+Audio above an RMS level of 600 (PCM16) pauses the greeting at its current
+position. After one second below that level, playback resumes. The three-second
+pause between greetings remains. This is a simple level detector, not a speech
+recognition model. Use headphones or the iPhone earpiece for this test: speakerphone
+can feed greetings and echoed audio back into the microphone and keep it paused.
+Set `SIP_ECHO_TEST=0` and recreate the worker to disable echo.
