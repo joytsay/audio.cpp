@@ -3736,6 +3736,11 @@ if (ENGINE_BUILD_TESTS OR ENGINE_BUILD_EXTENDED_TESTS OR ENGINE_BUILD_MODEL_TEST
         add_test(NAME sortformer_v2_schedule_test COMMAND sortformer_v2_schedule_test)
     endif()
 
+    if(nemotron_asr IN_LIST AUDIOCPP_LINKED_MODELS)
+        add_engine_unittest(nemotron_asr_context_bias_test tests/nemotron_asr/context_bias_test.cpp)
+        add_test(NAME nemotron_asr_context_bias_test COMMAND nemotron_asr_context_bias_test)
+    endif()
+
     # Links both families: the test reads the file nemotron_3_diar writes.
     if(nemotron_asr IN_LIST AUDIOCPP_LINKED_MODELS AND nemotron_3_diar IN_LIST AUDIOCPP_LINKED_MODELS)
         add_engine_unittest(nemotron_asr_speaker_tagging_test tests/nemotron_asr/speaker_tagging_test.cpp)

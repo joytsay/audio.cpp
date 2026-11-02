@@ -3,6 +3,7 @@
 #include "engine/framework/core/execution_context.h"
 #include "engine/framework/runtime/session.h"
 #include "engine/models/nemotron_asr/assets.h"
+#include "engine/models/nemotron_asr/context_bias.h"
 #include "engine/models/nemotron_asr/encoder.h"
 #include "engine/models/nemotron_asr/weights.h"
 
@@ -17,12 +18,15 @@ namespace engine::models::nemotron_asr {
 struct NemotronDecodeOptions {
     int64_t max_tokens = 0;
     bool keep_language_tags = false;
+    std::vector<std::string> context_phrases;
+    float context_score = 2.0f;
 };
 
 struct NemotronDecodedText {
     std::string text;
     std::vector<int32_t> token_ids;
     std::vector<int32_t> durations;
+    int64_t context_token_changes = 0;
     std::vector<runtime::WordTimestamp> token_timestamps;
 };
 
@@ -35,6 +39,7 @@ struct NemotronPredictorState {
 
 struct NemotronDecoderStreamState {
     NemotronDecodeOptions options;
+    NemotronContextBias context_bias;
     NemotronDecodedText decoded;
     int64_t encoded_frames = 0;
     int64_t symbols_at_frame = 0;
@@ -86,6 +91,8 @@ private:
     std::vector<float> hidden_read_scratch_;
     std::vector<float> cell_read_scratch_;
     int32_t unk_token_id_ = -1;
+    std::vector<std::string> context_token_pieces_;
+    void prepare_context_pieces();
 };
 
 }  // namespace engine::models::nemotron_asr

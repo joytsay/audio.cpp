@@ -189,6 +189,10 @@
     {"name":"top_k","type":"number","label":"Top K","default":50,"minimum":0,"step":1},
     {"name":"repetition_penalty","type":"number","label":"Repetition penalty","default":1.1,"minimum":0,"step":0.05}
   ],
+  "nemotron_asr": [
+    {"name": "context_score", "type": "number", "label": "Terminology strength", "default": 2, "minimum": 0, "maximum": 10, "step": 0.5,
+      "info": "Bias competing speech tokens toward the Context prompt. Zero disables biasing; higher values may introduce incorrect terms."}
+  ],
   "canary_asr": [
     {"name": "target_language", "type": "choice", "label": "Target language", "default": "", "choices": ["", "en", "de", "es", "fr"]},
     {"name": "pnc", "type": "bool", "label": "Punctuation and capitalization", "default": true},

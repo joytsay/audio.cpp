@@ -22,6 +22,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string_view>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -590,22 +591,98 @@ void download_file(
     const std::shared_ptr<std::atomic_bool> & cancelled,
     const std::function<void(uint64_t)> & progress) {
     std::filesystem::create_directories(destination.parent_path());
-    std::ofstream output(destination, std::ios::binary | std::ios::trunc);
-    if (!output) throw std::runtime_error("could not create " + destination.string());
     const auto url = package.download_kind == "modelscope_snapshot"
         ? ms_url(package, remote)
         : hf_url(package, remote);
-    const auto response = http_request(url, false, &output, cancelled, progress, package_auth(package));
-    output.close();
-    if (response.status == 401 || response.status == 403) {
-        throw std::runtime_error(package.repo + "/" + remote +
-            (package.download_kind == "modelscope_snapshot"
-                ? " requires ModelScope access to this repo"
-                : " requires accepted Hugging Face access and a valid HF token"));
-    }
-    if (response.status < 200 || response.status >= 300) {
-        throw std::runtime_error("failed to download " + package.repo + "/" + remote +
-            " (HTTP " + std::to_string(response.status) + ")");
+    const auto parsed = parse_http_url(url);
+    std::string validator;
+    uint64_t offset = 0;
+    constexpr int max_attempts = 5;
+    for (int attempt = 0; attempt < max_attempts; ++attempt) {
+        if (cancelled && cancelled->load()) throw Cancelled();
+        // A fresh connection also obtains a fresh signed CDN redirect on retry.
+        httplib::Client client(http_origin(parsed));
+        configure_client(client, 300);
+        auto headers = request_headers(package_auth(package));
+        if (offset > 0 && !validator.empty()) {
+            headers.emplace("Range", "bytes=" + std::to_string(offset) + "-");
+            headers.emplace("If-Range", validator);
+        } else if (offset > 0) {
+            // Without a strong validator, restarting is safer than joining two
+            // revisions of a model file that happens to have the same length.
+            offset = 0;
+        }
+        std::ofstream output(destination, std::ios::binary |
+            (offset > 0 ? std::ios::app : std::ios::trunc));
+        if (!output) throw std::runtime_error("could not create " + destination.string());
+        bool write_failed = false;
+        bool invalid_range = false;
+        int status = 0;
+        const httplib::ResponseHandler on_response = [&](const httplib::Response & response) {
+            status = response.status;
+            if (status == 206) {
+                const auto range = response.get_header_value("Content-Range");
+                const auto prefix = "bytes " + std::to_string(offset) + "-";
+                if (range.compare(0, prefix.size(), prefix) != 0 ||
+                    (!validator.empty() && response.has_header("ETag") &&
+                     response.get_header_value("ETag") != validator)) {
+                    invalid_range = true;
+                    return false;
+                }
+            } else if (status == 200 && offset > 0) {
+                // The server ignored Range, or If-Range detected a new object.
+                output.close();
+                output.open(destination, std::ios::binary | std::ios::trunc);
+                if (!output) { write_failed = true; return false; }
+                offset = 0;
+            }
+            if (status == 200) {
+                const auto etag = response.get_header_value("ETag");
+                validator = !etag.empty() && etag.compare(0, 2, "W/") != 0 ? etag : "";
+            }
+            return true;
+        };
+        const httplib::ContentReceiver receiver = [&](const char * data, size_t size) {
+            if (cancelled && cancelled->load()) return false;
+            // Do not append redirect or error pages to the model file.
+            if (status != 200 && status != 206) return true;
+            output.write(data, static_cast<std::streamsize>(size));
+            if (!output) { write_failed = true; return false; }
+            offset += size;
+            if (progress) progress(offset);
+            return true;
+        };
+        auto response = client.Get(parsed.path, headers, on_response, receiver,
+            [&](size_t, size_t) { return !(cancelled && cancelled->load()); });
+        output.close();
+        if (cancelled && cancelled->load()) throw Cancelled();
+        if (write_failed || !output) throw std::runtime_error("could not write downloaded model file");
+        if (invalid_range) throw std::runtime_error("model host returned an invalid resumed byte range");
+        if (status == 401 || status == 403) {
+            throw std::runtime_error(package.repo + "/" + remote +
+                (package.download_kind == "modelscope_snapshot"
+                    ? " requires ModelScope access to this repo"
+                    : " requires accepted Hugging Face access and a valid HF token"));
+        }
+        if (response) {
+            if (response->status == 200 || response->status == 206) return;
+            throw std::runtime_error("failed to download " + package.repo + "/" + remote +
+                " (HTTP " + std::to_string(response->status) + ")");
+        }
+        const auto error = response.error();
+        const bool retryable = error == httplib::Error::Read || error == httplib::Error::Connection ||
+            error == httplib::Error::ConnectionClosed || error == httplib::Error::ConnectionTimeout ||
+            error == httplib::Error::Timeout;
+        if (!retryable || attempt + 1 == max_attempts) {
+            throw std::runtime_error("model host request failed: " + httplib::to_string(error) +
+                " (" + remote + ", received " + std::to_string(offset) + " bytes, " +
+                std::to_string(attempt + 1) + " attempts)");
+        }
+        // Bound retry delays and keep Stop responsive.
+        for (int tick = 0; tick < (1 << attempt) * 2; ++tick) {
+            if (cancelled && cancelled->load()) throw Cancelled();
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
     }
 }
 

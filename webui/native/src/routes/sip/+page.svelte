@@ -2,7 +2,6 @@
   import { onMount } from 'svelte';
   import Sip from '../Sip.svelte';
   import logoCloud from '../../../static/logo_cloud.svg?raw';
-  const logoIcon = `data:image/svg+xml,${encodeURIComponent(logoCloud)}`;
   import { UI_THEME_STORAGE_KEY, resolvedTheme, resolveUiTheme } from '$lib/theme';
   import '../../app.css';
 
@@ -17,7 +16,6 @@
 
 <svelte:head>
   <title>SIP · GeoVision IVR</title>
-  <link rel="icon" type="image/svg+xml" sizes="any" href={logoIcon} />
 </svelte:head>
 <header class="topbar">
   <div class="brand"><div class="brand-logo">{@html logoCloud}</div><div><strong>GeoVision IVR</strong><span>Interactive Voice Response</span></div></div>

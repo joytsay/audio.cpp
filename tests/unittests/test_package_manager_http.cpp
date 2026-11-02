@@ -23,6 +23,11 @@ int main() {
     std::set<int> connections;
     int cdn_heads = 0;
     int downloads = 0;
+    int interrupted_gets = 0;
+    int denied_gets = 0;
+    int failed_gets = 0;
+    std::string resumed_range;
+    std::string resumed_validator;
     auto require = [](bool condition, const char *message) {
         if (!condition) throw std::runtime_error(message);
     };
@@ -36,7 +41,9 @@ int main() {
           "package_defaults":{"download":{"kind":"huggingface_snapshot","repo":"org/repo"}},
           "packages":[{"id":"demo","display_name":"Demo","format":"gguf",
             "precision":"f32","target_directory":"Demo",
-            "files":["a.gguf","b.gguf","fallback.gguf"]}]
+            "files":["a.gguf","b.gguf","fallback.gguf","interrupted.gguf"]},
+            {"id":"demo_denied","display_name":"Denied","format":"gguf","precision":"f32","target_directory":"Denied","files":["denied.gguf"]},
+            {"id":"demo_failed","display_name":"Failed","format":"gguf","precision":"f32","target_directory":"Failed","files":["failed.gguf"]}]
         })";
         server.Get(R"(/org/repo/resolve/main/(.*))", [&](const auto &request, auto &response) {
             std::lock_guard<std::mutex> lock(mutex);
@@ -60,6 +67,35 @@ int main() {
             else ++downloads;
             response.set_header("ETag", "\"same-etag\"");
             response.set_header("X-Repo-Commit", "revision");
+            if (request.method != "HEAD" && request.matches[1].str() == "denied.gguf") {
+                ++denied_gets;
+                response.status = 403;
+                response.set_content("denied", "text/plain");
+                return;
+            }
+            if (request.method != "HEAD" && request.matches[1].str() == "failed.gguf") {
+                ++failed_gets;
+                response.set_content_provider(7, "application/octet-stream",
+                    [](size_t offset, size_t, httplib::DataSink & sink) {
+                        if (offset != 0) return false;
+                        return sink.write("pay", 3);
+                    });
+                return;
+            }
+            if (request.method != "HEAD" && request.matches[1].str() == "interrupted.gguf") {
+                ++interrupted_gets;
+                if (interrupted_gets == 1) {
+                    // Advertise seven bytes, send only three, then disconnect.
+                    response.set_content_provider(7, "application/octet-stream",
+                        [](size_t offset, size_t, httplib::DataSink & sink) {
+                            if (offset != 0) return false;
+                            return sink.write("pay", 3);
+                        });
+                    return;
+                }
+                resumed_range = request.get_header_value("Range");
+                resumed_validator = request.get_header_value("If-Range");
+            }
             response.set_content("payload", "application/octet-stream");
         });
         const auto port = server.bind_to_any_port("127.0.0.1");
@@ -73,10 +109,10 @@ int main() {
         worker = std::thread([&] { server.listen_after_bind(); });
         while (!server.is_running()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
         engine::package_manager::PackageManager manager(root, root / "models");
-        const auto inventory = json::parse(manager.inventory(true));
+        const auto inventory = json::parse(manager.inventory(true, "demo"));
         const auto &row = inventory.as_array().at(0);
         require(json::require_string(row, "state") == "ok", "inventory failed");
-        require(row.find("size_bytes")->as_f32() == 21, "redirect body size used instead of file size");
+        require(row.find("size_bytes")->as_f32() == 28, "redirect body size used instead of file size");
         require(json::require_string(row, "remote_revision") == "revision", "revision lost");
         {
             std::lock_guard<std::mutex> lock(mutex);
@@ -86,13 +122,33 @@ int main() {
         manager.install("demo", false, nullptr, nullptr);
         {
             std::lock_guard<std::mutex> lock(mutex);
-            require(downloads == 3, "downloads must still follow redirects");
+            require(downloads == 5, "downloads must still follow redirects");
         }
         require(fs::file_size(root / "models" / "Demo" / "a.gguf") == 7, "bad installed payload");
+        require(interrupted_gets == 2, "interrupted transfer must retry once");
+        require(resumed_range == "bytes=3-", "retry must resume after received bytes");
+        require(resumed_validator == "\"same-etag\"", "retry must validate object identity");
+        std::ifstream resumed(root / "models" / "Demo" / "interrupted.gguf", std::ios::binary);
+        std::string contents((std::istreambuf_iterator<char>(resumed)), {});
+        require(contents == "payload", "resumed payload must not be duplicated or truncated");
         const auto manifest = json::parse_file(root / "models" / "Demo" / ".audiocpp-package-demo.json");
         require(manifest.require("files").require("a.gguf").require("etag").as_string() == "same-etag",
             "Xet metadata must preserve the original CDN ETag for existing manifests");
-        const auto installed = json::parse(manager.inventory(true));
+        bool auth_failed = false;
+        try { manager.install("demo_denied", false, nullptr, nullptr); }
+        catch (const std::exception & error) {
+            auth_failed = std::string(error.what()).find("valid HF token") != std::string::npos;
+        }
+        require(auth_failed && denied_gets == 1, "authentication failures must not retry");
+        require(!fs::exists(root / "models" / "Denied" / "denied.gguf"), "error body must not be installed");
+        bool retry_limit = false;
+        try { manager.install("demo_failed", false, nullptr, nullptr); }
+        catch (const std::exception & error) {
+            retry_limit = std::string(error.what()).find("5 attempts") != std::string::npos;
+        }
+        require(retry_limit && failed_gets == 5, "persistent read errors must stop after five attempts");
+        require(!fs::exists(root / "models" / "Failed" / "failed.gguf"), "partial model must not be installed");
+        const auto installed = json::parse(manager.inventory(true, "demo"));
         require(json::require_string(installed.as_array().at(0), "version_state") == "up_to_date",
             "metadata/manifest comparison changed");
     } catch (const std::exception &error) {

@@ -2,6 +2,7 @@
   import { onDestroy, onMount, tick } from 'svelte';
   import { browserDecodeToWav, encodePcm16Wav } from '$lib/audio';
   import { traditionalAsrText, traditionalChineseText } from '$lib/asr-text';
+  import { recognitionContext } from '$lib/asr-context';
   import { verifiedTransferReply } from '$lib/receptionist-routing';
   import { spokenExtensionText } from '$lib/receptionist-text';
   import { catalog } from '$lib/catalog';
@@ -602,7 +603,7 @@
       const result = await endpointJson<{ text?: string }>(audioBaseUrl, 'audio/transcriptions/details', {
         method: 'POST',
         body: JSON.stringify({ model: speechModel.modelId, audio, language,
-          ...(useHotwords && asrContext.trim() ? { text: asrContext.trim() } : {}) })
+          ...(useHotwords && asrContext.trim() ? { text: recognitionContext(asrContext.trim(), speechModel.family || '') } : {}) })
       }, controller.signal);
       if (generation !== cloneTranscriptGeneration || cloneVoiceFile !== file) return;
       const text = typeof result.text === 'string' ? traditionalAsrText(result.text).trim() : '';
@@ -1124,7 +1125,7 @@
         const speechModel = await ensureAudioModel(sttModel, aborter.signal);
         const stt = await endpointJson<any>(audioBaseUrl, 'audio/transcriptions/details', {
           method: 'POST',
-          body: JSON.stringify({ model: speechModel.modelId, audio: audioPath, language, ...(useHotwords && asrContext.trim() ? { text: asrContext.trim() } : {}) })
+          body: JSON.stringify({ model: speechModel.modelId, audio: audioPath, language, ...(useHotwords && asrContext.trim() ? { text: recognitionContext(asrContext.trim(), speechModel.family || '') } : {}) })
         }, aborter.signal);
         plainTranscript = typeof stt.text === 'string' ? traditionalAsrText(stt.text) : '';
       }

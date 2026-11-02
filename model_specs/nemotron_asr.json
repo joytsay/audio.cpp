@@ -59,6 +59,15 @@
   "options": {
     "request": [
       {
+        "name": "context_score",
+        "type": "float",
+        "description": "Logit bonus for terminology supplied in request text. Commas or newlines separate phrases; whitespace separates legacy word lists. Preserves acoustic blank decisions. Zero disables context biasing.",
+        "required": false,
+        "default": 2.0,
+        "min": 0.0,
+        "max": 10.0
+      },
+      {
         "name": "language",
         "type": "string",
         "description": "ASR prompt language such as en-US, da-DK, or auto; default is the model's default prompt.",

@@ -3,6 +3,7 @@
   import { onDestroy, onMount } from 'svelte';
   import { AudioLines, Code, FileText, FolderOpen, MessageSquare, Mic, Play, SlidersHorizontal, Square, Trash2, User, Users, Video } from '@lucide/svelte';
   import { browserDecodeToWav, concatenateAudioBlobs } from '$lib/audio';
+  import { recognitionContext } from '$lib/asr-context';
   import {
     base64AudioUrl,
     availableVoices,
@@ -545,6 +546,7 @@
   $: modelStudioPanel = modelStudioPanelConfig?.component;
   $: loraParamSpecs = paramSpecs.filter((spec) => spec.group === 'lora');
   $: genericParamSpecs = paramSpecs.filter((spec) => spec.group !== 'lora' &&
+    !(selected?.family === 'nemotron_asr' && spec.name === 'context_score') &&
     !(selected?.family === 'ace_step' && ['lora', 'lora_scale'].includes(spec.name)));
   $: replacesGenericControls = (modelStudioPanelConfig?.replacesGenericControls || noGenericControlReplacements) as GenericControlReplacements;
   $: usesYue2Request = modelStudioPanelConfig?.requestMode === 'yue2';
@@ -1954,7 +1956,7 @@
       model: selected.id,
       audio,
       language,
-      text: context,
+      text: recognitionContext(context, selected.family),
       options: requestOptions()
     });
     const chunkText = String(result.text || '').trim();
@@ -2238,7 +2240,7 @@
           model: selected.id,
           audio,
           language,
-          text: context,
+          text: recognitionContext(context, selected.family),
           options
         };
         const detail = ['owsm', 'crisperwhisper'].includes(selected.family) && options.return_timestamps === true;
@@ -2954,6 +2956,13 @@
         {#if selected.task === 'asr' && !['samsone', 'audio_flamingo', 'index_echo'].includes(selected.family)}
           <label class="studio-section-label" for="context"><FileText size={17} />{tr('request.context')} <span>{tr('request.contextHint')}</span></label>
           <textarea id="context" rows="2" bind:value={context}></textarea>
+          {#if selected.family === 'nemotron_asr'}
+            <label for="context-score">Terminology strength</label>
+            <input id="context-score" type="number" min="0" max="10" step="0.5"
+              value={Number(advancedValues.context_score ?? 2)} disabled={running || restoringHistory}
+              on:change={(event) => advancedValues = { ...advancedValues, context_score: Number(event.currentTarget.value) }} />
+            <p class="hint">Use words or comma-separated phrases. Traditional and Simplified Chinese spellings are both included. Start at 2; try 4–6 for missed terms. Zero disables biasing. Higher values can introduce incorrect words.</p>
+          {/if}
         {/if}
 
         {#if selected.task === 'vdes'}

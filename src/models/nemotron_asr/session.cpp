@@ -338,6 +338,18 @@ NemotronDecodeOptions NemotronASRSessionBase::decode_options_for_request(const r
     if (const auto value = runtime::find_option(request.options, {"keep_language_tags"})) {
         options.keep_language_tags = runtime::parse_bool_option(*value, "keep_language_tags");
     }
+    if (request.text_input.has_value()) {
+        if (request.text_input->text.size() > 16384)
+            throw std::runtime_error("Nemotron ASR context must not exceed 16 KiB");
+        options.context_phrases = context_phrases(request.text_input->text);
+        if (options.context_phrases.size() > 256)
+            throw std::runtime_error("Nemotron ASR context must not exceed 256 phrases");
+    }
+    if (const auto value = runtime::parse_finite_float_option(request.options, {"context_score"})) {
+        if (*value < 0.0f || *value > 10.0f)
+            throw std::runtime_error("Nemotron ASR context_score must be between 0 and 10");
+        options.context_score = *value;
+    }
     return options;
 }
 
@@ -388,6 +400,11 @@ runtime::TaskResult NemotronASROfflineSession::run(const runtime::TaskRequest & 
     const auto frontend = frontend_.extract_waveform(waveform, true);
     const auto encoded = encoder_->encode(frontend, prompt_id, lookahead);
     decoded = decoder_->decode(encoded, decode_options);
+    if (!decode_options.context_phrases.empty()) {
+        std::clog << "[nemotron_asr] context_bias=v2 phrases=" << decode_options.context_phrases.size()
+                  << " score=" << decode_options.context_score
+                  << " changed_tokens=" << decoded.context_token_changes << '\n';
+    }
     if (mem_saver_) {
         const auto release_start = Clock::now();
         encoder_->release_offline_graph();
@@ -476,7 +493,7 @@ void NemotronASRStreamingSession::start_stream(const runtime::TaskRequest & requ
         streaming_language_ = *option;
     }
     runtime::TaskRequest config_request;
-    config_request.text_input = runtime::Transcript{"", streaming_language_};
+    config_request.text_input = runtime::Transcript{request.text_input.has_value() ? request.text_input->text : "", streaming_language_};
     config_request.options = streaming_options_;
     prompt_id_ = prompt_id_for_request(config_request);
     lookahead_ = lookahead_for_options(streaming_options_);
@@ -759,6 +776,11 @@ runtime::TaskResult NemotronASRStreamingSession::finalize() {
     }
     (void) process_available_chunks(true);
     auto decoded = decoder_->stream_result(decoder_stream_state_);
+    if (!decoder_stream_state_.options.context_phrases.empty()) {
+        std::clog << "[nemotron_asr] context_bias=v2 phrases=" << decoder_stream_state_.options.context_phrases.size()
+                  << " score=" << decoder_stream_state_.options.context_score
+                  << " changed_tokens=" << decoded.context_token_changes << '\n';
+    }
     runtime::TaskResult result;
     result.text_output = runtime::Transcript{decoded.text, streaming_language_};
     result.word_timestamps = std::move(decoded.token_timestamps);

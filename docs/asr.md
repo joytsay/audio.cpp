@@ -254,6 +254,8 @@ audiocpp_cli --task asr --family nemotron_asr --model models/nemotron-3.5-asr-st
 | `--language` | language code, `auto` | model default | ASR prompt language such as `en-US`, `da-DK`, or `auto`. |
 | `--mode` | `offline`, `streaming` | `offline` | Full-context or streaming session. |
 | `--request-option lookahead_tokens=<n>` | integer | model default | Chunk-limited encoder right context. |
+| `--text` | terminology list | not set | Context biasing for competing speech tokens. Separate words with spaces, or multiword phrases with commas/newlines. |
+| `--request-option context_score=<n>` | float, 0–10 | `2` | Terminology logit bonus; `0` disables biasing. |
 | `--max-tokens` | integer | model-derived limit | Maximum RNNT generated tokens; `0` uses the model-derived limit. |
 | `--request-option keep_language_tags=true\|false` | bool | `false` | Keep language tag tokens in decoded text. |
 | `--words-out` | JSON path | not set | Write token timestamp output when produced. |
@@ -264,6 +266,22 @@ audiocpp_cli --task asr --family nemotron_asr --model models/nemotron-3.5-asr-st
 | `--request-option speaker_mask=mel\|audio` | enum | `mel` | Masked mode only: mask log-mel features, or zero the audio of inactive frames. |
 | `--request-option speaker_segment_gap_sec=<s>` | float | `1.0` | Start a new segment for a speaker after a longer pause. |
 | `--request-option speaker_segment_max_sec=<s>` | float | `10.0` | Streaming only: split speaker-turn events after this long. |
+
+The WebUI Context prompt and transcription API `text` field supply these terms.
+For example, use `GeoVision, Jane Smith, VFD` for three phrases.
+Matching ignores ASCII letter case, so `X` also biases the model's lowercase
+`x` tokens. Studio includes both Traditional and Simplified Chinese variants
+(e.g. `X光機` and `X光机`) in Nemotron requests. Its Terminology strength control
+sets `context_score`; Additional options JSON can also set `{"context_score": 6}`
+without an extra `options` wrapper. A score of 2 is the default; try 4–6 for
+missed terms, checking for false insertions. Each nonempty-context run logs
+`[nemotron_asr] context_bias=v2` with phrase count, score, and changed-token count. The legacy
+`Technical terms: VFD FAN SN` format also works. The list biases decoding; it
+is not a natural-language instruction or a transcript replacement. Bias history
+is kept across streaming chunks and reset for each utterance. Acoustic blank
+choices remain unchanged, so terms only compete with other speech tokens.
+An empty list or `context_score=0` preserves the original greedy decoder.
+Context is limited to 16 KiB and 256 phrases.
 
 ### Speaker-tagged transcription
 

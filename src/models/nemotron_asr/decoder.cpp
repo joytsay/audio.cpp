@@ -426,6 +426,29 @@ std::string NemotronRnntDecoderRuntime::decode_text(const std::vector<int32_t> &
     return assets_->tokenizer->decode_ids(filtered);
 }
 
+void NemotronRnntDecoderRuntime::prepare_context_pieces() {
+    if (!context_token_pieces_.empty()) return;
+    context_token_pieces_ = assets_->tokenizer->id_to_token();
+    for (size_t id = 0; id < context_token_pieces_.size(); ++id) {
+        auto & piece = context_token_pieces_[id];
+        if (static_cast<int64_t>(id) == assets_->config.blank_token_id ||
+            static_cast<int64_t>(id) == assets_->config.pad_token_id ||
+            static_cast<int32_t>(id) == unk_token_id_ ||
+            (id < assets_->special_token_ids.size() && assets_->special_token_ids[id])) {
+            piece.clear();
+            continue;
+        }
+        const auto & marker = assets_->metaspace_replacement;
+        if (!marker.empty()) {
+            size_t pos = 0;
+            while ((pos = piece.find(marker, pos)) != std::string::npos) {
+                piece.replace(pos, marker.size(), " ");
+                ++pos;
+            }
+        }
+    }
+}
+
 NemotronDecodedText NemotronRnntDecoderRuntime::decode(
     const NemotronEncodedAudio & encoded,
     const NemotronDecodeOptions & options) {
@@ -440,6 +463,8 @@ NemotronDecodedText NemotronRnntDecoderRuntime::decode(
         ? options.max_tokens
         : (encoded.valid_frames * config.max_symbols_per_step + 1);
     auto predictor = initial_predictor_state();
+    NemotronContextBias context_bias(options.context_phrases, options.context_score);
+    if (!options.context_phrases.empty()) prepare_context_pieces();
 
     NemotronDecodedText out;
     out.token_ids.reserve(static_cast<size_t>(std::min<int64_t>(max_tokens + 1, 4096)));
@@ -453,8 +478,13 @@ NemotronDecodedText NemotronRnntDecoderRuntime::decode(
     bool decoder_cache_initialized = false;
     while (frame_index < encoded.valid_frames && static_cast<int64_t>(out.token_ids.size()) - 1 < max_tokens) {
         const float * frame = encoded.values.data() + static_cast<std::ptrdiff_t>(frame_index * encoded.hidden_size);
-        const int32_t token = run_step(input_token, frame, decoder_cache_initialized, predictor);
+        const int32_t acoustic_token = run_step(input_token, frame, decoder_cache_initialized, predictor);
+        const int32_t token = context_bias.select(logits_scratch_, context_token_pieces_,
+            acoustic_token, static_cast<int32_t>(config.blank_token_id));
+        if (token != config.blank_token_id && !options.context_phrases.empty())
+            context_bias.advance(context_token_pieces_.at(static_cast<size_t>(token)));
         decoder_cache_initialized = true;
+        if (token != acoustic_token) ++out.context_token_changes;
         out.token_ids.push_back(token);
         const bool blank = token == static_cast<int32_t>(config.blank_token_id);
         if (!blank) {
@@ -487,6 +517,8 @@ NemotronDecoderStreamState NemotronRnntDecoderRuntime::make_stream_state(
     const auto & config = assets_->config;
     NemotronDecoderStreamState state;
     state.options = options;
+    state.context_bias = NemotronContextBias(options.context_phrases, options.context_score);
+    if (!options.context_phrases.empty()) prepare_context_pieces();
     state.predictor = initial_predictor_state();
     state.input_token = static_cast<int32_t>(config.blank_token_id);
     state.decoded.token_ids.reserve(4096);
@@ -513,9 +545,14 @@ void NemotronRnntDecoderRuntime::decode_stream_chunk(
            static_cast<int64_t>(state.decoded.token_ids.size()) - 1 < max_tokens) {
         const float * frame = encoded.values.data() +
             static_cast<std::ptrdiff_t>(frame_index * encoded.hidden_size);
-        const int32_t token = run_step(
+        const int32_t acoustic_token = run_step(
             state.input_token, frame, state.decoder_cache_initialized, state.predictor);
+        const int32_t token = state.context_bias.select(logits_scratch_, context_token_pieces_,
+            acoustic_token, static_cast<int32_t>(config.blank_token_id));
+        if (token != config.blank_token_id && !state.options.context_phrases.empty())
+            state.context_bias.advance(context_token_pieces_.at(static_cast<size_t>(token)));
         state.decoder_cache_initialized = true;
+        if (token != acoustic_token) ++state.decoded.context_token_changes;
         state.decoded.token_ids.push_back(token);
         const bool blank = token == static_cast<int32_t>(config.blank_token_id);
         if (!blank) {
