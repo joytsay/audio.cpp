@@ -13,6 +13,7 @@
 
 #include "../cli/request.h"
 #include "../common/base64.h"
+#include "../common/build_info.h"
 #include "../streaming/pcm_source.h"
 #include "../streaming/streaming.h"
 
@@ -191,7 +192,10 @@ HttpResponse ParallelServerState::handle_health() const {
         "{\"status\":\"ok\",\"backend\":\"" + std::string(backend_name(config_.backend)) +
         "\",\"models\":" + std::to_string(model_count) +
         ",\"ui\":" + (config_.ui_enabled ? "true" : "false") +
-        ",\"ui_management\":" + (config_.ui_management ? "true" : "false") + "}");
+        ",\"ui_management\":" + (config_.ui_management ? "true" : "false") +
+        ",\"version\":" + json_quote(minitts::app::build_version()) +
+        ",\"git\":" + json_quote(minitts::app::build_git_sha()) +
+        ",\"git_date\":" + json_quote(minitts::app::build_git_date()) + "}");
 }
 
 void ParallelServerState::load_models() {
@@ -317,6 +321,7 @@ void ParallelServerState::validate_replacement_slots(
         }
         engine::runtime::SessionOptions options;
         options.backend.type = config_.backend;
+        options.backend.impl = config_.backend_impl;
         options.backend.device = candidate.config.device.value_or(config_.device);
         options.backend.threads = config_.threads;
         options.options = candidate.config.session_options;
@@ -483,6 +488,36 @@ HttpResponse ParallelServerState::handle_ui_upload(const HttpRequest & request) 
 }
 
 #if defined(AUDIOCPP_HAS_NATIVE_MODEL_MANAGER)
+// Resolves a "package_id" to the installed package's load target before
+// handing the request to handle_model_load, which only ever sees a path.
+// Path-based loads never touch the installer or its mutex.
+HttpResponse ParallelServerState::handle_package_model_load(const std::string & body_text) {
+    if (!config_.ui_management) {
+        return handle_model_load(body_text);
+    }
+    const auto body = engine::io::json::parse(body_text);
+    std::string package_id;
+    if (auto error = ui_model_load_package_id(body, package_id)) {
+        return *error;
+    }
+    if (package_id.empty()) {
+        return handle_model_load(body_text);
+    }
+    std::optional<engine::package_manager::PackageInfo> info;
+    {
+        std::lock_guard<std::mutex> lock(model_installer_mutex_);
+        if (!model_installer_) {
+            return error_response(403, "UI model management is disabled", "forbidden");
+        }
+        info = model_installer_->package_info(package_id);
+    }
+    std::string resolved_body;
+    if (auto error = resolve_ui_package_model_load(body, package_id, info, resolved_body)) {
+        return *error;
+    }
+    return handle_model_load(resolved_body);
+}
+
 HttpResponse ParallelServerState::handle_model_install(const std::string & body_text) {
     if (!config_.ui_management) {
         return error_response(403, "UI model installation is disabled", "forbidden");
@@ -754,6 +789,7 @@ void ParallelServerState::ensure_model_loaded_locked(LoadedModel & model) {
 
     engine::runtime::SessionOptions session_options;
     session_options.backend.type = config_.backend;
+    session_options.backend.impl = config_.backend_impl;
     session_options.backend.device = model.config.device.value_or(config_.device);
     session_options.backend.threads = config_.threads;
     session_options.options = model.config.session_options;

@@ -56,6 +56,8 @@ ggml_tensor * conv1d_pertap_channel_fast(
     ggml_tensor * input_cf,
     const Conv1dConfig & config);
 
+enum class Conv2dLayout { ChannelsFirst, ChannelsLast };
+
 struct Conv2dConfig {
     int64_t in_channels = 0;
     int64_t out_channels = 0;
@@ -96,6 +98,10 @@ public:
         const core::TensorValue & input,
         const Conv2dWeights & weights) const;
 
+    // Explicit activation layout; weight layout is unchanged. ChannelsLast uses BHWC.
+    core::TensorValue build(core::ModuleBuildContext & ctx, const core::TensorValue & input,
+        const Conv2dWeights & weights, Conv2dLayout layout) const;
+
     static const core::ModuleSchema & static_schema() noexcept;
 
 private:
@@ -121,6 +127,20 @@ struct Conv3dConfig {
     bool cuda_fast_lowering = false;
     bool cuda_large_shape_lowering = false;
     bool cuda_tile_f16_accum_output_lowering = false;
+    // Explicit cuDNN lowering: CUDA, F16 weights, F16/F32 input, F32 output by default.
+    // Requires GGML_CUDA_CUDNN_CONV3D in the selected backend. No execution fallback.
+    bool cuda_cudnn = false;
+    // Round after optional F32 channel bias, keeping F32 storage. Requires cuda_cudnn.
+    bool cuda_bf16_round = false;
+    // The convolution result is F16; add optional channel bias in F32, then store F16.
+    // Requires cuda_cudnn; excludes cuda_bf16_round.
+    bool cuda_f16_output = false;
+    // Kernel storage is already O,D,H,W,I; logical weight shape stays unchanged.
+    // The caller owns packing and weight lifetime. Requires cuda_cudnn.
+    bool cuda_prepacked_weights = false;
+    // Replicate depth borders while packing for cuDNN. Right = 2*padding_depth-left.
+    // -1 keeps ordinary zero padding. Requires cuda_cudnn.
+    int cuda_replicate_depth_left = -1;
 };
 
 struct Conv3dWeights {
@@ -281,6 +301,10 @@ public:
         const core::TensorValue & input,
         const Conv2dWeights & weights) const;
 
+    // Explicit activation layout; weight layout is unchanged. ChannelsLast uses BHWC.
+    core::TensorValue build(core::ModuleBuildContext & ctx, const core::TensorValue & input,
+        const Conv2dWeights & weights, Conv2dLayout layout) const;
+
     static const core::ModuleSchema & static_schema() noexcept;
 
 private:
@@ -300,6 +324,7 @@ struct ConvTranspose1dConfig {
 struct ConvTranspose1dWeights {
     core::TensorValue weight;
     std::optional<core::TensorValue> bias;
+    std::optional<core::TensorValue> col2im_matrix = std::nullopt;
 };
 
 bool is_conv_transpose1d_col2im_fast_path_eligible(

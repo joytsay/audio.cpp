@@ -8,6 +8,7 @@ automatically compatible.
 
 | Model | Family | Session options | Adapter format and target |
 |---|---|---|---|
+| Audio Flamingo | `audio_flamingo` | `audio_flamingo.lora`, `audio_flamingo.lora_scale` | Matching PEFT encoder/projector/decoder adapters. SpotSound uses the Audio Flamingo 3 base with `template_name=temporal_grounding`; see the [model guide](models/audio_flamingo.md#spotsound-temporal-grounding). |
 | Qwen3-TTS | `qwen3_tts` | `qwen3_tts.lora`, `qwen3_tts.lora_scale` | PEFT Talker/Subtalker adapters. Custom-voice packages can also include `speaker_embedding.safetensors` and `tts_config.json`. |
 | Qwen3-ASR | `qwen3_asr` | `qwen3_asr.lora`, `qwen3_asr.lora_scale` | PEFT encoder/decoder adapters; both original and Transformers weight layouts are supported. |
 | VoxCPM2 | `voxcpm2` | `voxcpm2.lora`, `voxcpm2.lora_scale` | Native `lora_weights.safetensors` with adjacent `lora_config.json`; generator only, not AudioVAE. |
@@ -43,6 +44,17 @@ Use `--session-option` on the CLI, or the same keys in a server model's
 `session_options`. Adapters are applied once while loading session weights;
 they do not add inference graph operations or modify the base files.
 Pre-v1 GGUF packages still require a current external or compiled model spec.
+
+In Studio, the **LoRA adapter** group provides a server-side adapter path and
+strength for Qwen3-TTS/ASR, VoxCPM1/2, Fish Audio, CosyVoice3, F5-TTS, OuteTTS,
+and VibeVoice. **Browse folder** selects an adapter directory on the server;
+individual checkpoint paths can also be entered. Keep required configuration
+and sidecar files beside the adapter.
+Changing or clearing an adapter reloads the model before the next generation;
+clearing it restores the base model. A blank strength uses the model's adapter
+default. Models configured by the server show these settings read-only; edit
+their `session_options` in the server config. ACE-Step and YuE2 use the same
+group style; YuE2 retains separate AR/NAR adapters and upload controls.
 
 ```bash
 audiocpp_cli --family qwen3_asr --task asr --model base.gguf \

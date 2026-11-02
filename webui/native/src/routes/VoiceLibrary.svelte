@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { Users, Upload, Search, Save, Trash2, Download, FileText, Mic } from '@lucide/svelte';
-  import { listVoices, saveVoice, deleteVoice, type SavedVoice } from '$lib/voices';
+  import { createLocalId, listVoices, saveVoice, deleteVoice, type SavedVoice } from '$lib/library';
   import { browserDecodeToWav } from '$lib/audio';
   import MediaPreview from '$lib/MediaPreview.svelte';
 
@@ -34,7 +34,7 @@
     busy = true; error = '';
     try {
       const audio = await browserDecodeToWav(file);
-      draft = { id: crypto.randomUUID(), name: file.name.replace(/\.[^.]+$/, ''), transcript: '', audio, createdAt: Date.now() };
+      draft = { id: createLocalId(), name: file.name.replace(/\.[^.]+$/, ''), transcript: '', audio, createdAt: Date.now() };
       original = undefined;
     } catch (e) { error = `Cannot import ${file.name}: ${String(e)}`; }
     finally { busy = false; input.value = ''; }
@@ -79,7 +79,7 @@
 
 <section class="voice-library-page">
   <header class="library-head">
-    <div class="library-title"><Users size={25}/><h1>Voices</h1><span>{voices.length} saved · This browser</span></div>
+    <div class="library-title"><Users size={25}/><h1>Voices</h1><span>{voices.length} saved · Shared library</span></div>
     <button disabled={busy} on:click={() => input.click()}><Upload size={16}/>Add voice</button>
     <input hidden bind:this={input} type="file" accept="audio/*" on:change={e => importVoice(e.currentTarget.files?.[0])}/>
   </header>

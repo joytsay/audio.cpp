@@ -143,6 +143,13 @@
         "default": 3
       },
       {
+        "name": "ultimate_clone",
+        "type": "bool",
+        "description": "Use the voice reference itself as the continuation prompt. Requires reference audio and reference_text or prompt_text; cannot be combined with explicit prompt audio.",
+        "required": false,
+        "default": false
+      },
+      {
         "name": "prompt_text",
         "type": "string",
         "description": "Transcript for continuation prompt audio, distinct from the base voice reference.",
@@ -181,6 +188,25 @@
       }
     ],
     "session": [
+      {
+        "name": "audiovae_tile_frames",
+        "type": "int",
+        "description": "Opt-in causal AudioVAE tiling. Maximum new latent frames per tile; zero preserves full decoding.",
+        "required": false,
+        "default": 0,
+        "min": 0
+      },
+      {
+        "name": "perf_mode",
+        "type": "enum",
+        "description": "Opt-in packed attention and MLP projections. May change numerical results; off preserves standard execution.",
+        "required": false,
+        "values": [
+          "off",
+          "cuda_perf"
+        ],
+        "default": "off"
+      },
       {
         "name": "lora",
         "type": "path",
