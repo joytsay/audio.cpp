@@ -1,9 +1,12 @@
 <script lang="ts">
+  import { onDestroy, onMount } from 'svelte';
+  import { pathStatus } from '$lib/api';
   import type { CatalogEntry, InstallPackageChoice } from '$lib/types';
   import { History, ChevronDown } from '@lucide/svelte';
   import type { ModelInstallJob, ModelPackageSize } from '$lib/api';
 
   export let groups: { family: string; label: string; entries: CatalogEntry[] }[];
+  export let modelPathFor: (entry: CatalogEntry) => string;
   export let packageSizes: Record<string, ModelPackageSize>;
   export let installJobs: Record<string, ModelInstallJob>;
   export let packageSizeState: string;
@@ -30,6 +33,44 @@
   let task = '';
   let installation = 'all';
   let choices: Record<string, string> = {};
+
+  type LocalState = 'checking' | 'found' | 'missing' | 'unavailable';
+  let localStates: Record<string, { path: string; state: LocalState }> = {};
+  let localChecking = false;
+  let localGeneration = 0;
+  let checkedLocalSignature = '';
+  let mounted = false;
+  onMount(() => { mounted = true; });
+  $: localPaths = groups.flatMap(group => group.entries).filter(entry => entry.manual_setup)
+    .map(entry => ({ id: entry.id, path: modelPathFor(entry), root: modelsFolder }));
+  $: localSignature = JSON.stringify(localPaths);
+  $: if (mounted && localSignature !== checkedLocalSignature) {
+    checkedLocalSignature = localSignature;
+    void refreshLocalModels(localPaths);
+  }
+
+  async function refreshLocalModels(paths: { id: string; path: string }[]) {
+    const generation = ++localGeneration;
+    localChecking = paths.length > 0;
+    localStates = Object.fromEntries(paths.map(item => [item.id, { path: item.path, state: 'checking' as LocalState }]));
+    const results = await Promise.all(paths.map(async item => {
+      let state: LocalState;
+      try {
+        const result = await pathStatus(item.path);
+        state = result.exists && result.file ? 'found' : 'missing';
+      } catch { state = 'unavailable'; }
+      return [item.id, { path: item.path, state }] as const;
+    }));
+    if (generation !== localGeneration) return;
+    localStates = Object.fromEntries(results);
+    localChecking = false;
+  }
+  const localStateLabel = (state?: LocalState) => state === 'found' ? '✓ Local file found'
+    : state === 'missing' ? 'Local file missing' : state === 'unavailable' ? 'Status unavailable' : 'Checking local file…';
+  function localCount(entries: CatalogEntry[], states: typeof localStates) {
+    return entries.filter(entry => entry.manual_setup && states[entry.id]?.state === 'found').length;
+  }
+  onDestroy(() => { ++localGeneration; });
   const active = (job?: ModelInstallJob) => !!job && ['queued', 'running', 'cancelling'].includes(job.state);
   function packageStatus(choice: InstallPackageChoice, sizes: Record<string, ModelPackageSize>, jobs: Record<string, ModelInstallJob>, sizeState: string) {
     if (sizes[choice.id]?.installed) return 'Installed';
@@ -48,15 +89,19 @@
   }
   $: visibleGroups = groups.map((group) => ({ ...group, entries: group.entries.filter((entry) => {
     const matches = `${group.label} ${entry.display_name} ${entry.family}`.toLowerCase().includes(search.trim().toLowerCase());
-    const installed = installedCount([entry], packageSizes) > 0;
-    const known = !!entry.install_packages?.length && entry.install_packages.every((p) => !!packageSizes[p.id]);
+    const installed = installedCount([entry], packageSizes) > 0 || (entry.manual_setup && localStates[entry.id]?.state === 'found');
+    const localState = localStates[entry.id]?.state;
+    const known = (entry.manual_setup && (localState === 'found' || localState === 'missing')) ||
+      (!!entry.install_packages?.length && entry.install_packages.every((p) => !!packageSizes[p.id]));
     return matches && (!task || workflowForEntry(entry) === task) && (installation === 'all' || (installation === 'installed' ? installed : known && !installed));
   }) })).filter((g) => g.entries.length);
+  $: localFoundCount = localCount(groups.flatMap(group => group.entries), localStates);
   $: activeDownloads = Object.values(installJobs).filter(active);
 </script>
 
 <section class="library" aria-label="Model library">
-  <header class="library-heading"><div><h1>Model Library</h1><span>{groups.reduce((n, g) => n + g.entries.length, 0)} models · {installedCount(groups.flatMap((g) => g.entries), packageSizes)} packages installed</span></div>
+  <header class="library-heading"><div><h1>Model Library</h1><span>{groups.reduce((n, g) => n + g.entries.length, 0)} models · {installedCount(groups.flatMap((g) => g.entries), packageSizes)} packages installed{#if localFoundCount} · {localFoundCount} local file{localFoundCount === 1 ? '' : 's'} found{/if}</span></div>
+    {#if localPaths.length}<button disabled={localChecking} on:click={() => refreshLocalModels(localPaths)}>{localChecking ? 'Checking local models…' : 'Refresh local models'}</button>{/if}
     {#if activeDownloads.length}<span class="download-count">{activeDownloads.length} active downloads</span>{/if}
   </header>
   <details class="folder-settings"><summary>Models folder <span>{modelsFolder || defaultModelsFolder}</span></summary>
@@ -112,7 +157,7 @@
               {#if installed}<details class="manage"><summary aria-label={`Manage ${entry.display_name}`}>Manage</summary><div>{#if packageSizes[choice.id]?.version_state === 'update_available'}<button disabled={busy} on:click={() => installPackage(entry, choice, true)}>Update</button>{/if}<button disabled={busy} on:click={() => removePackage(entry, choice)}>Remove</button></div></details>{/if}
             </div>
             {#if job && !['complete', 'cleaned'].includes(job.state)}<div class="job" class:failed={job.state === 'failed'}><span>{installProgressLabel(job)}</span><progress max="100" value={job.progress_percent >= 0 ? job.progress_percent : undefined}></progress><p>{job.message}</p>{#if active(job)}<button disabled={job.state === 'cancelling'} on:click={() => stopPackageDownload(entry, job)}>Stop download</button>{:else}<button on:click={() => cleanPartialDownload(entry, job)}>Clean partial download</button>{/if}</div>{/if}
-          {:else}<span class="state">Manual setup</span><div class="actions">{#if entry.weights_url}<a href={entry.weights_url} target="_blank" rel="noreferrer">View weights ↗</a>{/if}<button on:click={() => openModel(entry)}>Open in Studio</button></div>{/if}
+          {:else}<div class="package">{#if entry.manual_setup}<span>Local GGUF file</span><code class="local-model-path">{localStates[entry.id]?.path || modelPathFor(entry)}</code>{/if}</div><span class="state" class:installed={entry.manual_setup && localStates[entry.id]?.state === 'found'}>{entry.manual_setup ? localStateLabel(localStates[entry.id]?.state) : 'Manual setup'}</span><div class="actions">{#if entry.setup_url}<a href={entry.setup_url} target="_blank" rel="noreferrer">Setup guide ↗</a>{/if}{#if entry.weights_url}<a href={entry.weights_url} target="_blank" rel="noreferrer">View weights ↗</a>{/if}<button on:click={() => openModel(entry)}>Open in Studio</button></div>{/if}
         </div>
       {/each}
     </section>
@@ -120,6 +165,7 @@
 </section>
 
 <style>
+  .local-model-path { overflow-wrap: anywhere; font-size: 12px; }
   .library { max-width: 1400px; margin: 0 auto; letter-spacing: 0; }
   .library-heading, .family > header { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
   h1 { font-size: 26px; margin: 0 0 8px; } h2 { font-size: 16px; margin: 0; }

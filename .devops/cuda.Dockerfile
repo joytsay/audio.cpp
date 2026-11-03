@@ -134,10 +134,11 @@ RUN --mount=type=cache,target=/app/build,sharing=locked \
         --target audiocpp_cli \
         --target audiocpp_server \
         --target audiocpp_model_manager \
+        --target audiocpp_gguf \
         --target model_perf && \
     mkdir -p /app/lib /app/full && \
     find build -name "*.so*" -exec cp -P {} /app/lib \; && \
-    cp build/bin/audiocpp_cli build/bin/audiocpp_server build/bin/audiocpp_model_manager \
+    cp build/bin/audiocpp_cli build/bin/audiocpp_server build/bin/audiocpp_model_manager build/bin/audiocpp_gguf \
        build/bin/model_perf /app/full/ && \
     cp .devops/entrypoint.sh /app/full/entrypoint.sh && \
     chmod +x /app/full/entrypoint.sh
@@ -294,6 +295,7 @@ COPY --from=build /app/full /app
 COPY model_specs/ /app/model_specs/
 COPY assets/framework/models/ /app/assets/framework/models/
 COPY tools/model_manager_v2.py /app/tools/model_manager_v2.py
+COPY tools/community_models/audio8_asr/convert_audio8_asr.py /app/tools/community_models/audio8_asr/convert_audio8_asr.py
 
 RUN mkdir -p /app/models && chown ubuntu:ubuntu /app/models
 

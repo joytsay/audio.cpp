@@ -49,6 +49,57 @@ audiocpp_cli --task asr --family audio8_asr \
     --model models/Audio8-ASR-0.1B-hf --audio sample.wav
 ```
 
+## Docker / AGX all-in-one
+
+The CUDA image builds and includes `/app/audiocpp_gguf` and the Python wrapper
+at `/app/tools/community_models/audio8_asr/convert_audio8_asr.py`. The wrapper
+uses only the Python standard library; PyTorch, Transformers, and pip packages
+are not required. Images built before these tools were included need one
+rebuild after updating the Dockerfile.
+
+From `examples/docker/agx-one-container` on the host:
+
+```bash
+# Build/recreate the audio service with the converter included.
+docker compose up --build -d voice-ai
+
+# Confirm the converter is installed in the running container.
+docker compose exec voice-ai /app/audiocpp_gguf --help
+
+# Download the original checkpoint and its configuration/tokenizer files.
+docker compose exec voice-ai /app/audiocpp_model_manager install \
+    audio8_asr_0_1b_safetensors \
+    --repository-root /app \
+    --models-dir /app/models
+
+# Convert inside the container; the source-build debug path is not used here.
+docker compose exec voice-ai python3 \
+    /app/tools/community_models/audio8_asr/convert_audio8_asr.py \
+    --checkpoint /app/models/Audio8-ASR-0.1B-hf \
+    --converter /app/audiocpp_gguf \
+    --type q8_0 \
+    --output /app/models/Audio8-ASR-0.1B-GGUF/audio8-asr-0.1b-q8_0.gguf
+```
+
+If the checkpoint is already present, skip its install command. Add
+`--overwrite` to the conversion command only when replacing an existing GGUF.
+The Compose model mount maps `/app/models` to the host repository's
+`audio-models/`, so both the checkpoint and converted model survive container
+recreation. Open **Models → Audio8 ASR 0.1B (local setup) → Open in Studio**;
+keep the WebUI's models folder set to `/app/models` for this layout.
+
+## WebUI
+
+Audio8 ASR appears in **Models** as **Audio8 ASR 0.1B (local setup)** with a
+**Local file missing** status until its converted GGUF exists. Follow **Setup guide**, convert the checkpoint locally
+as shown above, and place `audio8-asr-0.1b-q8_0.gguf` under
+`Audio8-ASR-0.1B-GGUF/` inside the WebUI's selected models folder. Then choose
+**Refresh local models** to check the new file. The card displays **Local file found**
+and appears under the Installed filter once the expected GGUF path exists. Choose
+**Open in Studio** to load it and transcribe audio. File detection checks presence,
+not model integrity; loading is the next validation step. The card deliberately has no Download
+button; the GGUF packages in the model spec describe local load layouts.
+
 ## Parity
 
 `tools/community_models/audio8_asr/audio8_asr_reference.py` runs the Hugging Face
@@ -98,7 +149,7 @@ transcription (Metal buffers + per-window-shape graph pools on top of the
   single-pass reference, each window is peak-normalized independently, so
   relative loudness across a window boundary can shift.
 - **CC-BY-NC-4.0**: non-commercial use only; convert locally, do not
-  redistribute the converted GGUF. There is no release GGUF package and no
-  WebUI catalog entry (the package manager cannot download
-  unsupported-license packages).
+  redistribute the converted GGUF. There is no release GGUF package. The WebUI
+  entry uses **Manual setup**; the package manager does not download GGUF
+  packages marked unsupported.
 - Hotword logit boosting from the reference implementation is not ported.

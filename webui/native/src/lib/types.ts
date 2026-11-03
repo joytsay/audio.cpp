@@ -29,6 +29,8 @@ export interface CatalogEntry {
   mode: string;
   workflow?: string;
   weights_url?: string;
+  setup_url?: string;
+  manual_setup?: boolean;
   arena?: boolean;
   download_id?: string;
   install_packages?: InstallPackageChoice[];

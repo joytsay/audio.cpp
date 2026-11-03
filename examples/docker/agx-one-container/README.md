@@ -155,6 +155,16 @@ docker compose -f examples/docker/agx-one-container/compose.yml up -d --build
 Override `AUDIOCPP_BOOTSTRAP_PACKAGES`, `LLAMA_BOOTSTRAP_MODEL`, or
 `RAG_EMBEDDING_MODEL` in `compose.yml` to change the initial downloads.
 
+### Audio8 ASR local conversion
+
+The image includes `/app/audiocpp_gguf` and the Audio8 ASR Python conversion
+wrapper. Download the original checkpoint with `/app/audiocpp_model_manager`,
+then convert it under `/app/models`; no PyTorch or pip installation is needed.
+Follow the [Audio8 ASR Docker setup](../../../docs/models/audio8_asr.md#docker--agx-all-in-one)
+for the exact Compose commands. Both checkpoint and GGUF are persisted in the
+host repository's `audio-models/` mount. Rebuild `voice-ai` once if an older image
+does not contain the converter.
+
 ### Native build cache
 
 The CUDA Dockerfile retains the audio.cpp and llama.cpp build directories in

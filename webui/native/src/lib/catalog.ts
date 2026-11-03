@@ -247,6 +247,8 @@ function packageModelPath(entry: PackageEntry): string {
 }
 
 function installChoices(entry: CatalogEntry): InstallPackageChoice[] {
+  // Local conversions have spec packages for loading, but no hosted installer.
+  if (entry.manual_setup) return [];
   if (['maya1', 'gigaam_asr', 'samsone', 'sam_audio', 'tone_color_vc', 'moss_ttsd', 'moss_voicegen',
     'kugelaudio', 'crisperwhisper', 'index_echo', 'audio_flamingo', 'owsm', 'owsm_ctc', 'reuse', 'sidon', 'smart_turn'].includes(entry.family)) {
     const stem = (entry.download_id || '').replace(/_(?:q8_0|q4_k|bf16|f16|f32|orig)(?:_codec_f16(?:_decode)?)?$/, '');

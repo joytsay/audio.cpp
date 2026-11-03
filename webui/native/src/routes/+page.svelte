@@ -3344,7 +3344,7 @@
   {:else if tab === 'rag'}
     <Rag />
   {:else if tab === 'models'}
-    <ModelLibrary groups={modelGroups} {packageSizes} {installJobs} {packageSizeState}
+    <ModelLibrary groups={modelGroups} modelPathFor={selectedModelPath} {packageSizes} {installJobs} {packageSizeState}
       bind:modelsFolderInput {modelsFolder} {modelsFolderHistory} {defaultModelsFolder} {applyingModelsFolder} {modelsFolderIsDefault}
       {openFolderBrowser} {applyModelsFolder} {installPackage} {removePackage} {stopPackageDownload}
       {cleanPartialDownload} {formatBytes} {installProgressLabel} {workflowForEntry}
