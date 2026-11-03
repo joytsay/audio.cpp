@@ -21,6 +21,23 @@
   let quant = 'Q4_K_M';
   let ggufFile = 'Qwen2.5-3B-Instruct-Q4_K_M.gguf';
 
+  const modelPresets = [
+    { id: 'qwen25', label: 'Qwen2.5 3B Instruct · Q4_K_M',
+      repo: 'bartowski/Qwen2.5-3B-Instruct-GGUF', quant: 'Q4_K_M', file: 'Qwen2.5-3B-Instruct-Q4_K_M.gguf' },
+    { id: 'lfm25-instruct', label: 'LFM2.5 1.2B Instruct · Q4_K_M',
+      repo: 'bartowski/LiquidAI_LFM2.5-1.2B-Instruct-GGUF', quant: 'Q4_K_M',
+      file: 'LiquidAI_LFM2.5-1.2B-Instruct-Q4_K_M.gguf' }
+  ];
+  $: selectedPreset = modelPresets.find(preset => preset.repo === repo && preset.quant === quant && preset.file === ggufFile)?.id || '';
+  function choosePreset(id: string) {
+    const preset = modelPresets.find(item => item.id === id);
+    if (!preset) return;
+    repo = preset.repo;
+    quant = preset.quant;
+    ggufFile = preset.file;
+    save();
+  }
+
   $: downloadUrl = `https://huggingface.co/${repo.trim() || '<owner/repository>'}/resolve/main/${encodeURIComponent(ggufFile.trim() || '<model.gguf>')}?download=true`;
 
   function save() {
@@ -197,6 +214,9 @@
       repo = saved.repo || repo;
       quant = saved.quant || quant;
       ggufFile = saved.ggufFile || ggufFile;
+      // Replace the former preset without overwriting custom repositories/quants.
+      if (repo === 'bartowski/Vortecks_LFM3-1.7B-Heretic-Abliterated-GGUF' && quant === 'Q4_K_M' &&
+          ggufFile === 'Vortecks_LFM3-1.7B-Heretic-Abliterated-Q4_K_M.gguf') choosePreset('lfm25-instruct');
     } catch { /* use defaults */ }
     refreshModels();
   });
@@ -213,6 +233,13 @@
 <div class="llama-grid">
   <section class="panel page-panel">
     <div class="section-title"><div><span>01 · MODEL</span><h2>Download & load</h2></div></div>
+    <label>Model preset
+      <select aria-label="Model preset" value={selectedPreset} disabled={downloading || loadingModel}
+        on:change={(event) => choosePreset(event.currentTarget.value)}>
+        <option value="" disabled>Custom GGUF</option>
+        {#each modelPresets as preset}<option value={preset.id}>{preset.label}</option>{/each}
+      </select>
+    </label>
     <div class="field-grid">
       <label>Hugging Face repository
         <input bind:value={repo} placeholder="owner/model-GGUF" on:change={save} />
@@ -232,7 +259,7 @@
     <p class="field-help">The model is downloaded into the persistent container volume and loaded by the internal llama.cpp worker.</p>
     <div class="connect-row">
       <label>Loaded model
-        <select bind:value={model} on:change={save}>
+        <select aria-label="Loaded model" bind:value={model} on:change={save}>
           {#if !models.length && model}<option value={model}>{model}</option>{/if}
           {#each models as entry}<option value={entry.id}>{entry.id}</option>{/each}
         </select>

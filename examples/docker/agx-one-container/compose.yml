@@ -16,7 +16,7 @@ services:
         AUDIOCPP_MODEL_SET: full
         AUDIOCPP_CPU_ALL_VARIANTS: "OFF"
         BUILD_JOBS: ${BUILD_JOBS:-2}
-        LLAMA_CPP_REF: ${LLAMA_CPP_REF:-5202104b59ada9005db079eea43882a2b7bf5802}
+        LLAMA_CPP_REF: ${LLAMA_CPP_REF:-2cbca389f515df455412dafa07e2b1359cc72a6d}
         RAGCPP_REF: ${RAGCPP_REF:-748bbd4895e0939857ffcc10276da1c91f20b439}
     runtime: nvidia
     ipc: host

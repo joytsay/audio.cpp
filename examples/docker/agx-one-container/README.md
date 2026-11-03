@@ -165,6 +165,29 @@ for the exact Compose commands. Both checkpoint and GGUF are persisted in the
 host repository's `audio-models/` mount. Rebuild `voice-ai` once if an older image
 does not contain the converter.
 
+### LFM2.5 1.2B Instruct
+
+In the **LLM / llama.cpp** page, select **LFM2.5 1.2B Instruct · Q4_K_M**
+under **Model preset**, then choose **Download in llama.cpp**. This requests
+`bartowski/LiquidAI_LFM2.5-1.2B-Instruct-GGUF:Q4_K_M`; the Direct GGUF
+link points to `LiquidAI_LFM2.5-1.2B-Instruct-Q4_K_M.gguf`. When the
+download finishes, select it under **Loaded model** and choose **Load model**.
+Model files remain in the existing persistent `llama-models/` mount.
+
+The Dockerfile and this Compose profile retain the pinned llama.cpp revision
+`2cbca389f515df455412dafa07e2b1359cc72a6d`, which includes the `lfm2`
+architecture used by LFM2.5 and the
+router download/load/SSE endpoints used by this page. If an existing `.env`
+overrides `LLAMA_CPP_REF`, update it to this revision too, then rebuild:
+
+```bash
+docker compose up --build -d voice-ai
+```
+
+The default Qwen bootstrap model is retained. LFM2.5 weights are downloaded only
+when requested from the page. Actual AGX loading and generation must be checked
+after rebuilding the worker.
+
 ### Native build cache
 
 The CUDA Dockerfile retains the audio.cpp and llama.cpp build directories in
