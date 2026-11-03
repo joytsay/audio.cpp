@@ -21,7 +21,7 @@
   import {
     endpointJson,
     endpointBlob,
-    type OpenAIModel,
+    routerEndpoint,
     chatText,
     type ChatMessage,
   } from "$lib/openai";
@@ -30,6 +30,9 @@
     discoverDemoLlmModels,
     preferredDemoModel,
     type DemoAudioModel,
+    type DemoLlmModel,
+    LFM_DEMO_REF,
+    isDemoLfmModel,
   } from "$lib/demo-models";
   type Event = {
     time: string;
@@ -73,7 +76,7 @@
     run = "",
     error = "";
   let audioModels: DemoAudioModel[] = [],
-    llmModels: OpenAIModel[] = [];
+    llmModels: DemoLlmModel[] = [];
   let vadKey = "",
     asrKey = "",
     ttsKey = "",
@@ -84,6 +87,13 @@
     useTts = true;
   let manualRecording = false,
     manualParts: Float32Array[] = [];
+  let llmDownloading = false,
+    llmPolling = false,
+    llmDownloadStatus = "";
+  let llmDownloadTimer: ReturnType<typeof setTimeout> | undefined;
+  let llmDownloadEvents: EventSource | null = null;
+  $: selectedLlm = llmModels.find((m) => m.id === llm);
+  $: llmNeedsDownload = !!selectedLlm?.requiresDownload;
   let discovering = false,
     modelError = "";
   $: vadModels = audioModels.filter((m) => m.task === "vad");
@@ -94,7 +104,7 @@
   $: selectedTts = audioModels.find((m) => m.key === ttsKey);
   $: canCall = !!(
     (!useAsr || (selectedAsr && (!useVad || selectedVad))) &&
-    (!useLlm || llm) &&
+    (!useLlm || (selectedLlm && !llmNeedsDownload)) &&
     (!useTts || (selectedTts && greeting.trim())) &&
     ((!useLlm && !useTts) || filesReady)
   );
@@ -153,8 +163,9 @@
       llmModels = result[1].value;
       if (!llmModels.some((m) => m.id === llm))
         llm =
-          llmModels.find((m) => /LFM2[._-]?5.*1[._-]?2B.*Q4_K_M/i.test(m.id))
+          llmModels.find((m) => !m.requiresDownload && isDemoLfmModel(m.id))
             ?.id ||
+          llmModels.find((m) => !m.requiresDownload)?.id ||
           llmModels[0]?.id ||
           "";
     } else {
@@ -163,6 +174,88 @@
       modelError += ` LLM models: ${result[1].reason}`;
     }
     discovering = false;
+  }
+  function stopLlmDownloadWatch() {
+    clearTimeout(llmDownloadTimer);
+    llmDownloadEvents?.close();
+    llmDownloadEvents = null;
+  }
+  async function pollLlmDownload() {
+    if (!llmDownloading || llmPolling) return;
+    clearTimeout(llmDownloadTimer);
+    llmPolling = true;
+    try {
+      const discovered = await discoverDemoLlmModels(llmBase());
+      if (!llmDownloading) return;
+      llmModels = discovered;
+      const ready = discovered.find(
+        (m) => !m.requiresDownload && isDemoLfmModel(m.id),
+      );
+      if (ready) {
+        if (
+          !connected &&
+          !starting &&
+          (llm === LFM_DEMO_REF || !discovered.some((m) => m.id === llm))
+        )
+          llm = ready.id;
+        llmDownloading = false;
+        llmDownloadStatus = "LFM2.5 Q4_K_M downloaded and ready";
+        stopLlmDownloadWatch();
+      }
+    } catch (cause) {
+      llmDownloadStatus = `Download requested; waiting for llama.cpp: ${cause instanceof Error ? cause.message : cause}`;
+    } finally {
+      llmPolling = false;
+      if (llmDownloading && mounted)
+        llmDownloadTimer = setTimeout(() => void pollLlmDownload(), 3000);
+    }
+  }
+  async function downloadLfmModel() {
+    if (llmDownloading || connected || starting) return;
+    llmDownloading = true;
+    llmDownloadStatus = "Downloading LFM2.5 Q4_K_M…";
+    stopLlmDownloadWatch();
+    const handleEvent = (event: MessageEvent) => {
+      try {
+        const payload = JSON.parse(event.data),
+          type = payload.event || event.type;
+        if (type === "download_failed") {
+          llmDownloading = false;
+          llmDownloadStatus = `Download failed: ${payload.data?.message || payload.message || event.data}`;
+          stopLlmDownloadWatch();
+        } else if (type === "download_finished") void pollLlmDownload();
+      } catch {
+        /* Ignore unrelated router status messages. */
+      }
+    };
+    llmDownloadEvents = new EventSource(
+      routerEndpoint(llmBase(), "models/sse"),
+    );
+    llmDownloadEvents.onmessage = handleEvent;
+    llmDownloadEvents.addEventListener("download_finished", (e) =>
+      handleEvent(e as MessageEvent),
+    );
+    llmDownloadEvents.addEventListener("download_failed", (e) =>
+      handleEvent(e as MessageEvent),
+    );
+    llmDownloadEvents.onerror = () => {
+      llmDownloadEvents?.close();
+      llmDownloadEvents = null;
+    };
+    try {
+      const response = await fetch(routerEndpoint(llmBase(), "models"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: LFM_DEMO_REF }),
+      });
+      if (!response.ok)
+        throw new Error(`${response.status} ${await response.text()}`);
+      await pollLlmDownload();
+    } catch (cause) {
+      llmDownloading = false;
+      llmDownloadStatus = `Download failed: ${cause instanceof Error ? cause.message : cause}`;
+      stopLlmDownloadWatch();
+    }
   }
   let prompt =
     "你是現場維修保養的語音助理。請用繁體中文簡短回答，準確保留工單、設備代碼及數字。";
@@ -538,8 +631,6 @@
           body.reference_text = referenceText;
         } else {
           body.voice = voice;
-          if (supportsReference && referenceText.trim())
-            body.reference_text = referenceText.trim();
         }
         const output = await endpointBlob("", "audio/speech", body, signal);
         if (generation !== epoch) return;
@@ -669,7 +760,7 @@
       voiceFile?.name,
       voiceFile?.size,
       voiceFile?.lastModified,
-      referenceText,
+      voiceFile ? referenceText : undefined,
       greeting,
     ]);
   }
@@ -751,8 +842,6 @@
           body.reference_text = referenceText;
         } else {
           body.voice = voice;
-          if (supportsReference && referenceText.trim())
-            body.reference_text = referenceText.trim();
         }
         const audio = await endpointBlob(
           "",
@@ -1141,6 +1230,11 @@
     source = null;
     gain = null;
     connected = false;
+    if (!llmModels.some((m) => m.id === llm))
+      llm =
+        llmModels.find((m) => !m.requiresDownload)?.id ||
+        llmModels[0]?.id ||
+        "";
     starting = false;
     busy = false;
     detecting = false;
@@ -1187,6 +1281,8 @@
       else delete document.documentElement.dataset.theme;
     }
     mounted = false;
+    llmDownloading = false;
+    stopLlmDownloadWatch();
     clearTimeout(greetingTimer);
     greetingAborter?.abort();
     cloneAborter?.abort();
@@ -1202,6 +1298,24 @@
     <div class="brand">
       <span class="gv">{@html logo}</span><span>GeoVision IVR</span>
     </div>
+    <section
+      class="stage-settings greeting-settings"
+      aria-label="Call greeting settings"
+    >
+      <div class="stage-heading"><h2>Call greeting</h2></div>
+      <fieldset disabled={connected || starting || cloneRecording || cloneBusy}>
+        <label
+          >Call greeting<textarea rows="3" bind:value={greeting}
+          ></textarea></label
+        >
+        <button
+          disabled={savingGreeting || !greeting.trim() || !ttsKey}
+          on:click={saveGreetingCsv}
+          >{savingGreeting ? "Saving…" : "Update greetings.csv"}</button
+        >
+        <small>{greetingStatus}</small>
+      </fieldset>
+    </section>
     <div class="section-label">MODEL SETTINGS</div>
     <button
       disabled={connected ||
@@ -1213,7 +1327,7 @@
       >{discovering ? "Refreshing…" : "Refresh models"}</button
     >
     {#if modelError}<p class="error" role="alert">{modelError}</p>{/if}
-    {#if useLlm && !discovering && !llmModels.length && !modelError}<p
+    {#if useLlm && !discovering && !llmModels.some((m) => !m.requiresDownload) && !modelError}<p
         class="error"
       >
         No downloaded LLM models found. Download a model in the LLM page, then
@@ -1352,7 +1466,9 @@
           >LLM<select aria-label="LLM" bind:value={llm}
             ><option value="" disabled>No downloaded LLM models</option
             >{#each llmModels as model}<option value={model.id}
-                >{model.id}</option
+                >{model.label || model.id}{model.requiresDownload
+                  ? " · download required"
+                  : ""}</option
               >{/each}</select
           ></label
         >
@@ -1363,6 +1479,14 @@
         <button disabled={savingPrompt} on:click={savePromptCsv}
           >{savingPrompt ? "Saving…" : "Save prompt.csv"}</button
         >
+        {#if llmNeedsDownload}<button
+            disabled={llmDownloading}
+            on:click={downloadLfmModel}
+            >{llmDownloading
+              ? "Downloading…"
+              : "Download LFM2.5 Q4_K_M"}</button
+          >{/if}
+        {#if llmDownloadStatus}<p role="status">{llmDownloadStatus}</p>{/if}
       </fieldset>
       {#if !useLlm}<small
           >LLM skipped. Input text passes directly to the output.</small
@@ -1426,18 +1550,11 @@
               rows="2"
               bind:value={referenceText}
               placeholder="Exact words in reference audio"></textarea></label
+          ><small
+            >Reference transcript applies to custom audio. Built-in voices use
+            their own matching transcript.</small
           >
         {/if}
-        <label
-          >Call greeting<textarea rows="3" bind:value={greeting}
-          ></textarea></label
-        >
-        <button
-          disabled={savingGreeting || !greeting.trim() || !ttsKey}
-          on:click={saveGreetingCsv}
-          >{savingGreeting ? "Saving…" : "Update greetings.csv"}</button
-        >
-        <small>{greetingStatus}</small>
       </fieldset>
       {#if supportsReference}<div class="clone-recording">
           {#if cloneRecording}<button on:click={() => cloneRecorder?.stop()}
@@ -1625,8 +1742,8 @@
         </div>
       </section>
       <section class="scenario-dock" aria-label="Demo scenarios">
-        <details class="scenario-panel" open>
-          <summary>Demo scenarios</summary>
+        <div class="scenario-title"><strong>Demo scenarios</strong></div>
+        <div class="scenario-panel">
           <label
             >Scenario<select
               aria-label="Scenario"
@@ -1719,7 +1836,7 @@
               >Stop scenario</button
             >{/if}
           <small role="status">{scenarioStatus}</small>
-        </details>
+        </div>
       </section>
     </div>
   </main>
@@ -2019,24 +2136,43 @@
   }
   .bottom-panels {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(320px, 0.9fr);
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
     height: clamp(260px, 33vh, 380px);
     flex-shrink: 0;
     border-top: 1px solid var(--line);
     min-width: 0;
   }
+  .events-title,
+  .scenario-title {
+    height: 54px;
+    flex-shrink: 0;
+    box-sizing: border-box;
+  }
+  .scenario-title {
+    min-height: 52px;
+    padding: 13px 16px;
+    display: flex;
+    align-items: center;
+    border-bottom: 1px solid var(--line);
+    font-size: 13px;
+  }
   .scenario-dock {
     min-width: 0;
     min-height: 0;
-    overflow: auto;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
     border-left: 1px solid var(--line);
     background: var(--control-bg);
   }
   .scenario-panel {
+    min-height: 0;
+    flex: 1;
+    overflow: auto;
     padding: 12px 16px;
     font-size: 11px;
   }
-  .scenario-panel summary {
+  .scenario-panel .scenario-script > summary {
     cursor: pointer;
     color: var(--text-label);
     font-weight: 600;

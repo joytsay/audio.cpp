@@ -57,7 +57,17 @@ const { chromium } = require("playwright");
     let json = {};
     if (url.pathname.endsWith("models-root"))
       json = { models_root: "/app/models" };
-    else if (url.pathname === "/llm/models")
+    else if (
+      url.pathname === "/llm/models" &&
+      route.request().method() === "POST"
+    ) {
+      assert.equal(
+        body.model,
+        "bartowski/LiquidAI_LFM2.5-1.2B-Instruct-GGUF:Q4_K_M",
+      );
+      noLlmModels = false;
+      json = { success: true };
+    } else if (url.pathname === "/llm/models")
       json = {
         data: noLlmModels
           ? []
@@ -70,6 +80,36 @@ const { chromium } = require("playwright");
     else if (url.pathname === "/v1/models")
       json = {
         data: [
+          {
+            id: "configured-silero",
+            family: "silero_vad",
+            task: "vad",
+            path: "/app/assets/framework/models/silero_vad/",
+            loaded: true,
+          },
+          {
+            id: "demo-silero-vad",
+            family: "silero_vad",
+            task: "vad",
+            mode: "offline",
+            path: "assets/framework/models/silero_vad",
+            loaded: true,
+          },
+          {
+            id: "configured-zipvoice",
+            family: "zipvoice",
+            task: "tts",
+            path: "/app/models/ZipVoice-Distill-GGUF/",
+            loaded: true,
+          },
+          {
+            id: "demo-zipvoice",
+            family: "zipvoice",
+            task: "clon",
+            mode: "offline",
+            path: "/app/models/ZipVoice-Distill-GGUF/zipvoice-distill-orig.gguf",
+            loaded: true,
+          },
           {
             id: "other-vad",
             family: "silero_vad",
@@ -210,17 +250,56 @@ const { chromium } = require("playwright");
     await page.getByLabel("Reference transcript", { exact: true }).inputValue(),
     "你好我是語音助手 請問您需要什麼服務 如果需要轉接請按分機號碼",
   );
+  assert.equal(
+    await page
+      .getByLabel("VAD", { exact: true })
+      .locator("option:not([disabled])")
+      .count(),
+    2,
+    "Registered Silero aliases must be deduplicated",
+  );
+  assert.equal(
+    await page
+      .getByLabel("TTS", { exact: true })
+      .locator("option:not([disabled])")
+      .count(),
+    2,
+    "Registered ZipVoice aliases must be deduplicated",
+  );
+  const greetingBox = await page
+    .getByRole("region", { name: "Call greeting settings", exact: true })
+    .boundingBox();
+  const vadBox = await page
+    .getByRole("region", { name: "VAD settings", exact: true })
+    .boundingBox();
+  assert.ok(
+    greetingBox.y < vadBox.y,
+    "Call greeting must precede model settings",
+  );
   await page.getByLabel("ASR hotwords / context").fill("X光機");
   await page.getByLabel("System prompt").fill("請簡短回覆。");
   await page.getByRole("button", { name: "Save prompt.csv" }).click();
   await page.getByText("Saved prompt.csv", { exact: true }).waitFor();
   assert.equal(promptCsv, "請簡短回覆。");
-  await page.getByLabel("Call greeting").fill("您好，請說明維修項目。");
+  await page
+    .getByLabel("Call greeting", { exact: true })
+    .fill("您好，請說明維修項目。");
   await page.getByRole("button", { name: "Update greetings.csv" }).click();
   await page
     .getByText("Greeting ready · instant playback", { exact: true })
     .waitFor();
   assert.equal(greetingsCsv, 'greeting\n"您好，請說明維修項目。"\n');
+  const greetingRequest = requests.find(
+    (r) =>
+      r.path === "/v1/audio/speech" &&
+      r.body.input === "您好，請說明維修項目。",
+  );
+  assert.equal(
+    greetingRequest.body.reference_text,
+    undefined,
+    "Built-in greeting must not override its reference transcript",
+  );
+  assert.equal(greetingRequest.body.voice_ref, undefined);
   const greetingRequests = requests.filter(
     (r) =>
       r.path === "/v1/audio/speech" &&
@@ -379,6 +458,28 @@ const { chromium } = require("playwright");
     await page.getByRole("button", { name: "Start call" }).isDisabled(),
     true,
   );
+  assert.ok(
+    (
+      await page
+        .getByLabel("LLM", { exact: true })
+        .locator("option")
+        .allTextContents()
+    ).some(
+      (label) =>
+        label.includes("LiquidAI_LFM2.5-1.2B-Instruct-Q4_K_M.gguf") &&
+        label.includes("download required"),
+    ),
+  );
+  await page
+    .getByRole("button", { name: "Download LFM2.5 Q4_K_M", exact: true })
+    .click();
+  await page
+    .getByText("LFM2.5 Q4_K_M downloaded and ready", { exact: true })
+    .waitFor();
+  assert.equal(
+    await page.getByLabel("LLM", { exact: true }).inputValue(),
+    llmId,
+  );
   for (const stage of ["VAD", "ASR", "LLM", "TTS"]) {
     await page
       .getByRole("switch", { name: `Enable ${stage}`, exact: true })
@@ -494,12 +595,16 @@ const { chromium } = require("playwright");
   );
   await page.getByRole("button", { name: "Hang up" }).click();
   assert.deepEqual(errors, []);
-  if (!((await page.locator(".scenario-panel").getAttribute("open")) !== null))
-    await page.locator(".scenario-panel > summary").click();
+  assert.equal(await page.locator("details.scenario-panel").count(), 0);
+  await page
+    .locator(".scenario-title")
+    .getByText("Demo scenarios", { exact: true })
+    .waitFor();
   const eventBox = await page.locator(".events").boundingBox(),
     scenarioBox = await page.locator(".scenario-dock").boundingBox();
   assert.ok(scenarioBox.x >= eventBox.x + eventBox.width - 1);
   assert.ok(Math.abs(scenarioBox.y - eventBox.y) < 2);
+  assert.ok(Math.abs(scenarioBox.width - eventBox.width) < 2);
   await page
     .getByLabel("Scenario", { exact: true })
     .selectOption("maintenance");
@@ -606,7 +711,7 @@ const { chromium } = require("playwright");
     false,
   );
   console.log(
-    "PASS downloaded-model dropdowns, actual LLM IDs, unlinked branding, CSV saves, cached greeting, ASR hotwords, clone recording/transcript, voice/text calls, history, runtime measurements, stage switches/bypasses/manual turns, audio scenario, three-turn maintenance simulation, distinct technician/assistant voices, mobile layout",
+    "PASS downloaded-model dropdowns, actual LLM IDs, unlinked branding, CSV saves, cached greeting, ASR hotwords, clone recording/transcript, voice/text calls, history, runtime measurements, stage switches/bypasses/manual turns, deduplicated model aliases, LFM download, greeting text/reference isolation, fixed equal-width scenarios panel, audio scenario, three-turn maintenance simulation, distinct technician/assistant voices, mobile layout",
   );
   await browser.close();
 })().catch((e) => {

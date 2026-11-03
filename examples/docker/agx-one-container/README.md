@@ -172,7 +172,12 @@ GGUFs, and available registered models. **Refresh models** discovers new
 downloads. The defaults prefer Silero VAD, Audio8 ASR 0.1B Q8_0, LFM2.5 1.2B
 Instruct Q4_K_M, and ZipVoice when installed. The LLM dropdown uses the actual
 IDs from the same-origin `/llm` router, including local filenames and aliases.
-The demo does not download models.
+Audio packages must be installed first. The LLM dropdown always includes
+`LiquidAI_LFM2.5-1.2B-Instruct-Q4_K_M.gguf`. If missing, select it and press
+**Download LFM2.5 Q4_K_M**. The demo requests the download through llama.cpp,
+monitors completion, and uses the real router ID once available. Calls cannot
+use this preset until it is downloaded. Audio dropdowns merge registered aliases
+and equivalent folder/file paths; distinct quantizations remain separate.
 
 The sidebar groups controls into **VAD**, **ASR**, **LLM**, and **TTS** sections,
 each with an On/Off switch. System prompt and its save button are in **LLM**.
@@ -186,8 +191,9 @@ Turn stages off before starting a call:
 Only enabled stages require a selected model. With ASR off, custom reference
 voice transcripts must be entered manually.
 
-Use **Demo scenarios** beside the Events table to choose (the panels stack on
-narrow screens):
+Use **Demo scenarios** beside the Events table to choose. The two panels have
+fixed matching headers and share the width equally; they stack on narrow
+screens:
 
 - **Scenario 1 · audio examples:** select a WAV/MP3/FLAC file or one of the five
   reception examples (中央監控站2、中控室、員工檢查哨、大廳、車輛檢查哨), then
@@ -216,14 +222,17 @@ The ASR hotwords/context field is sent with both turn and reference
 transcription requests. Whether it affects recognition depends on the ASR
 model's context support; Audio8 ASR currently uses a fixed transcription prompt.
 
-The greeting is read from the host's `greetings.csv` (one `greeting` column and
+**Call greeting** is the first settings section below the brand. It reads the
+host's `greetings.csv` (one `greeting` column and
 one quoted row). **Update greetings.csv** saves it through `/v1/ui/greetings`.
 The system prompt is read from `prompt.csv`; **Save prompt.csv** writes edits
 back to that file. Both CSVs are mounted into the container so edits persist.
 Greeting audio is prepared ahead of the call and reused until its text, model,
 voice, or reference changes. It plays once after connecting, without waiting
 for an LLM response. Wait for **Greeting ready · instant playback** for the
-fastest call start.
+fastest call start. Reference transcripts apply only to custom uploaded or
+recorded audio. Built-in voices use the matching transcript from the server's
+voice library, rather than the example custom-reference transcript.
 
 Press **Start call** to enable the microphone. Silero VAD checks successive
 audio windows and submits a turn after a silent window or 15 seconds of speech.

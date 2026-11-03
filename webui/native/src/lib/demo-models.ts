@@ -17,6 +17,33 @@ export interface DemoAudioModel {
   default_voice?: string;
 }
 
+export const LFM_DEMO_FILENAME = "LiquidAI_LFM2.5-1.2B-Instruct-Q4_K_M.gguf";
+export const LFM_DEMO_REF =
+  "bartowski/LiquidAI_LFM2.5-1.2B-Instruct-GGUF:Q4_K_M";
+export interface DemoLlmModel extends OpenAIModel {
+  label?: string;
+  requiresDownload?: boolean;
+}
+export const isDemoLfmModel = (id: string) =>
+  /LFM2[._-]?5.*1[._-]?2B.*Q4_K_M/i.test(id);
+
+function modelIdentityPath(path: string, modelsRoot: string): string {
+  let normalized = path
+    .replace(/\\/g, "/")
+    .replace(/\/+/g, "/")
+    .replace(/\/$/, "");
+  if (normalized.startsWith("models/"))
+    normalized = modelsRoot.replace(/\/$/, "") + "/" + normalized.slice(7);
+  const assets = normalized.match(/(?:^|\/)(assets\/framework\/models\/.+)$/);
+  return assets ? assets[1] : normalized;
+}
+const taskGroup = (task: string) =>
+  ["tts", "clon"].includes(task)
+    ? "tts"
+    : ["asr", "stt"].includes(task)
+      ? "asr"
+      : task;
+
 export async function discoverDemoAudioModels(): Promise<DemoAudioModel[]> {
   const [root, inventory, registered] = await Promise.all([
     getModelsRoot(),
@@ -36,13 +63,13 @@ export async function discoverDemoAudioModels(): Promise<DemoAudioModel[]> {
     load_options = entry.load_options,
     session_options = entry.session_options,
   ) => {
+    const identity = modelIdentityPath(path, root.models_root);
     if (
       result.some(
         (m) =>
-          m.path === path &&
           m.family === entry.family &&
-          m.task === entry.task &&
-          m.mode === entry.mode,
+          taskGroup(m.task) === taskGroup(entry.task) &&
+          modelIdentityPath(m.path, root.models_root) === identity,
       )
     )
       return;
@@ -113,6 +140,29 @@ export async function discoverDemoAudioModels(): Promise<DemoAudioModel[]> {
         (e.family === model.family && e.task === model.task),
     );
     if (model.loaded || (await pathStatus(model.path)).exists) {
+      const identity = modelIdentityPath(model.path, root.models_root);
+      // A server may register both a package folder and its resolved GGUF, or
+      // register the same model repeatedly under UI/demo aliases.
+      if (
+        result.some((m) => {
+          if (
+            m.family !== model.family ||
+            taskGroup(m.task) !== taskGroup(model.task)
+          )
+            return false;
+          const known = modelIdentityPath(m.path, root.models_root);
+          return (
+            known === identity ||
+            (!/\.gguf$/i.test(identity) &&
+              /\.gguf$/i.test(known) &&
+              known.startsWith(identity + "/")) ||
+            (!/\.gguf$/i.test(known) &&
+              /\.gguf$/i.test(identity) &&
+              identity.startsWith(known + "/"))
+          );
+        })
+      )
+        continue;
       add(
         {
           ...entry,
@@ -122,7 +172,9 @@ export async function discoverDemoAudioModels(): Promise<DemoAudioModel[]> {
         },
         model.path,
         `registered:${model.id}`,
-        entry?.display_name_en || entry?.display_name || model.id,
+        entry?.id === model.id
+          ? entry.display_name_en || entry.display_name
+          : `${entry?.display_name_en || entry?.display_name || model.family} · ${model.id}`,
       );
     }
   }
@@ -131,11 +183,23 @@ export async function discoverDemoAudioModels(): Promise<DemoAudioModel[]> {
 
 export async function discoverDemoLlmModels(
   base: string,
-): Promise<OpenAIModel[]> {
-  // Router IDs, including local filenames/aliases, are the identifiers accepted by inference.
-  return (await endpointRouterModels(base)).filter(
-    (m) => m.id && !/embedding|rerank/i.test(m.id),
-  );
+): Promise<DemoLlmModel[]> {
+  const result: DemoLlmModel[] = (await endpointRouterModels(base))
+    .filter((m) => m.id && !/embedding|rerank/i.test(m.id))
+    .filter(
+      (m, index, all) => all.findIndex((other) => other.id === m.id) === index,
+    )
+    .map((m) => ({
+      ...m,
+      label: isDemoLfmModel(m.id) ? LFM_DEMO_FILENAME : m.id,
+    }));
+  if (!result.some((m) => isDemoLfmModel(m.id)))
+    result.unshift({
+      id: LFM_DEMO_REF,
+      label: LFM_DEMO_FILENAME,
+      requiresDownload: true,
+    });
+  return result;
 }
 
 export function preferredDemoModel(
