@@ -155,6 +155,31 @@ docker compose -f examples/docker/agx-one-container/compose.yml up -d --build
 Override `AUDIOCPP_BOOTSTRAP_PACKAGES`, `LLAMA_BOOTSTRAP_MODEL`, or
 `RAG_EMBEDDING_MODEL` in `compose.yml` to change the initial downloads.
 
+### HTTPS voice demo
+
+Open `https://192.168.5.151:8083/#/demo` (or your configured HTTPS host and
+port). Trust the HTTPS certificate and allow microphone access. The Svelte
+console includes model settings, separate measured microphone and playback
+waveforms, text messages, mute, call/hangup, and the last 300 events across
+calls in this browser. **Clear events** removes that history.
+
+The demo uses bundled Silero VAD, locally converted Audio8 ASR 0.1B Q8_0,
+LiquidAI LFM2.5 1.2B Instruct Q4_K_M through the same-origin `/llm` proxy,
+and ZipVoice. Install these models first; the demo does not download them.
+Paths are relative to the server's selected models folder. The LLM field
+accepts its llama.cpp router ID; an installed matching LFM2.5 model is selected
+automatically when available. ZipVoice uses the mounted Ling/Wang reference
+voices, or an uploaded reference audio file with its exact transcript.
+
+Press **Start call** to enable the microphone. Silero VAD checks successive
+audio windows and submits a turn after a silent window or 15 seconds of speech.
+The pipeline runs ASR → LLM → TTS sequentially. Browser echo cancellation is
+enabled; listening pauses during processing/playback and resumes afterward.
+Hangup cancels requests and stops microphone capture and playback.
+
+After updating the sources, run `docker compose up --build -d voice-ai`.
+The existing `https` service already routes this page on port 8083.
+
 ### Audio8 ASR local conversion
 
 The image includes `/app/audiocpp_gguf` and the Audio8 ASR Python conversion

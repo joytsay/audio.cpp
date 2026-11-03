@@ -2743,6 +2743,7 @@
     <button class:active={tab === 'llama'} on:click={() => openPage('llama')}>LLM</button>
     <button class:active={tab === 'rag'} on:click={() => openPage('rag')}>RAG</button>
     <a class="nav-link" href="#/pipeline">Pipeline</a>
+    <a class="nav-link" href="#/demo">Demo</a>
     {#if server?.ui_management !== false}
       <button class:active={tab === 'models'} on:click={openModelsPage}>{tr('nav.models')}</button>
     {/if}
