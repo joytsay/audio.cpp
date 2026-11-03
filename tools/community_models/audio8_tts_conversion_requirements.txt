@@ -1,0 +1,6 @@
+# Conversion and checkpoint download tools for the Ubuntu 22.04 / Python 3.10 image.
+numpy==2.2.6
+safetensors==0.6.2
+huggingface_hub==1.2.3
+# HF 1.2.3 imports click directly; newer typer releases no longer pull it in.
+click==8.1.8

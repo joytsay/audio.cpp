@@ -22,6 +22,56 @@ stages directly on ggml with no Python dependency.
 | GGUF examples | `Audio8-TTS-Preview-0.6b-GGUF/audio8-tts-preview-0.6b-q8_0.gguf` (1.4G), `Audio8-TTS-Preview-0.1B-GGUF/audio8-tts-preview-0.1b-q8_0.gguf` (812M) |
 | External ggml SSM | `external/ggml` already provides `ggml_ssm_conv/scan` for `cpu/cuda/metal/vulkan/opencl/sycl/cann` — no fork needed |
 
+## WebUI: Audio8 TTS Preview 0.1B
+
+The Model Library lists local-setup **BF16** and **Q8_0** variants separately
+from the downloadable 0.6B package. Convert the 0.1B checkpoint and codec using
+`convert_audio8_tts_codec.py` and `convert_audio8_tts.py`; use
+`--name audio8-tts-preview-0.1b` and `--type bf16` or `--type q8_0`.
+Place the output under the selected models folder at:
+
+- `Audio8-TTS-Preview-0.1B-GGUF/audio8-tts-preview-0.1b-bf16.gguf`
+- `Audio8-TTS-Preview-0.1B-GGUF/audio8-tts-preview-0.1b-q8_0.gguf`
+
+Choose **Refresh local models** after conversion. The corresponding card shows
+**Local file found** and appears under **Installed**. Choose **Open in Studio**
+for TTS or voice cloning through the `audio8_tts` runtime. These cards do not
+request the 0.6B download package. File presence does not verify successful
+synthesis; test the converted 0.1B model on the target machine.
+
+## Docker / AGX all-in-one
+
+From `examples/docker/agx-one-container`, rebuild the image once. The build
+installs the conversion dependencies and HF CLI in `/app/tts-convert-venv`
+and copies both conversion scripts automatically.
+
+```bash
+docker compose up --build -d voice-ai
+
+# Optional: authenticate for higher Hugging Face download limits.
+docker compose exec voice-ai /app/tts-convert-venv/bin/hf auth login
+
+docker compose exec voice-ai /app/tts-convert-venv/bin/hf download \
+  Edge0/Audio8-TTS-Preview-0.1b \
+  --local-dir /app/models/Audio8-TTS-Preview-0.1B-hf
+
+docker compose exec voice-ai /app/tts-convert-venv/bin/python \
+  /app/tools/community_models/convert_audio8_tts_codec.py \
+  /app/models/Audio8-TTS-Preview-0.1B-hf/codec.pth \
+  /app/models/Audio8-TTS-Preview-0.1B-hf/codec.safetensors
+
+docker compose exec voice-ai /app/tts-convert-venv/bin/python \
+  /app/tools/community_models/convert_audio8_tts.py \
+  --model-dir /app/models/Audio8-TTS-Preview-0.1B-hf \
+  --converter /app/audiocpp_gguf \
+  --output-dir /app/models/Audio8-TTS-Preview-0.1B-GGUF \
+  --name audio8-tts-preview-0.1b --type bf16
+```
+
+Use `--type q8_0` instead for the Q8_0 variant. Checkpoints and GGUF files
+persist in the mounted `audio-models/` directory. Authentication and model
+downloads run after the build; tokens are not stored in the image.
+
 ## Source
 
 Upstream project and checkpoints:

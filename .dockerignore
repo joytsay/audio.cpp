@@ -9,6 +9,9 @@ tools/*
 !tools/model_manager_v2.py
 !tools/community_models/
 tools/community_models/*
+!tools/community_models/audio8_tts_conversion_requirements.txt
+!tools/community_models/convert_audio8_tts.py
+!tools/community_models/convert_audio8_tts_codec.py
 !tools/community_models/audio8_asr/
 tools/community_models/audio8_asr/*
 !tools/community_models/audio8_asr/convert_audio8_asr.py

@@ -87,6 +87,16 @@
   function installedCount(entries: CatalogEntry[], sizes: Record<string, ModelPackageSize>) {
     return new Set(entries.flatMap((e) => (e.install_packages || []).filter((p) => sizes[p.id]?.installed).map((p) => p.id))).size;
   }
+  function groupStatus(entries: CatalogEntry[], sizes: Record<string, ModelPackageSize>, states: typeof localStates) {
+    const packages = installedCount(entries, sizes);
+    const local = localCount(entries, states);
+    const parts = [];
+    if (packages) parts.push(`${packages} package${packages === 1 ? '' : 's'} installed`);
+    if (local) parts.push(`${local} local file${local === 1 ? '' : 's'} found`);
+    if (parts.length) return parts.join(' · ');
+    if (entries.every(entry => !entry.install_packages?.length)) return 'Manual setup';
+    return entries.some(entry => entry.install_packages?.some(choice => !sizes[choice.id])) ? 'Status pending' : 'Not installed';
+  }
   $: visibleGroups = groups.map((group) => ({ ...group, entries: group.entries.filter((entry) => {
     const matches = `${group.label} ${entry.display_name} ${entry.family}`.toLowerCase().includes(search.trim().toLowerCase());
     const installed = installedCount([entry], packageSizes) > 0 || (entry.manual_setup && localStates[entry.id]?.state === 'found');
@@ -139,7 +149,7 @@
   {/if}
   {#each visibleGroups as group (group.family)}
     <section class="family">
-      {#if group.entries.length > 1}<header><h2>{group.label}</h2><span class:installed={installedCount(group.entries, packageSizes) > 0}>{installedCount(group.entries, packageSizes) ? `${installedCount(group.entries, packageSizes)} package${installedCount(group.entries, packageSizes) === 1 ? '' : 's'} installed` : group.entries.every((e) => !e.install_packages?.length) ? 'Manual setup' : group.entries.some((e) => e.install_packages?.some((p) => !packageSizes[p.id])) ? 'Status pending' : 'Not installed'}</span></header>{/if}
+      {#if group.entries.length > 1}<header><h2>{group.label}</h2><span class:installed={installedCount(group.entries, packageSizes) > 0 || localCount(group.entries, localStates) > 0}>{groupStatus(group.entries, packageSizes, localStates)}</span></header>{/if}
       {#each group.entries as entry (entry.id)}
         {@const packageCount = new Set((entry.install_packages || []).map((p) => p.id)).size}
         {@const choice = selectedChoice(entry, choices, packageSizes)}

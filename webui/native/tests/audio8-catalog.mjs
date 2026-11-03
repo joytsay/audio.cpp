@@ -11,6 +11,7 @@ try {
   const page = await browser.newPage();
   const errors = [];
   let localFileExists = false;
+  let localTtsBf16Exists = false;
   let pathApiUnavailable = false;
   let activeRoot = '/fixture/models';
   const checkedPaths = [];
@@ -35,7 +36,11 @@ try {
         checkedPaths.push(body.path);
         if (pathApiUnavailable) return route.fulfill({ status: 503, json: { error: { message: 'Fixture path service unavailable' } } });
       }
-      const exists = !isAudio8 || localFileExists && String(body.path).startsWith('/fixture/models/');
+      const isTtsBf16 = String(body.path).includes('audio8-tts-preview-0.1b-bf16.gguf');
+      const isTtsQ8 = String(body.path).includes('audio8-tts-preview-0.1b-q8_0.gguf');
+      const insideRoot = String(body.path).startsWith('/fixture/models/');
+      const exists = isAudio8 ? localFileExists && insideRoot
+        : isTtsBf16 ? localTtsBf16Exists && insideRoot : !isTtsQ8;
       json = { exists, file: exists, directory: false };
     }
     return route.fulfill({ json });
@@ -44,9 +49,16 @@ try {
   await page.getByRole('button', { name: 'Models', exact: true }).click();
   await page.getByLabel('Search models', { exact: true }).fill('Audio8');
   const asr = page.locator('.model-row').filter({ hasText: 'Audio8 ASR 0.1B' });
-  const tts = page.locator('.model-row').filter({ hasText: 'Audio8 TTS Preview' });
+  const tts = page.locator('.model-row').filter({ hasText: 'Audio8 TTS Preview 0.6B' });
+  const ttsBf16 = page.locator('.model-row').filter({ hasText: 'Audio8 TTS Preview 0.1B (BF16' });
+  const ttsQ8 = page.locator('.model-row').filter({ hasText: 'Audio8 TTS Preview 0.1B (Q8_0' });
   await asr.waitFor();
   await tts.waitFor();
+  await ttsBf16.getByText('Local file missing', { exact: true }).waitFor();
+  assert.equal(await ttsBf16.locator('.local-model-path').innerText(), '/fixture/models/Audio8-TTS-Preview-0.1B-GGUF/audio8-tts-preview-0.1b-bf16.gguf');
+  await ttsQ8.getByText('Local file missing', { exact: true }).waitFor();
+  assert.equal(await ttsBf16.getByRole('button', { name: 'Download', exact: true }).count(), 0);
+  assert.equal(await ttsQ8.getByRole('button', { name: 'Download', exact: true }).count(), 0);
   await asr.getByText('Local file missing', { exact: true }).waitFor();
   assert.ok(checkedPaths.includes('/fixture/models/Audio8-ASR-0.1B-GGUF/audio8-asr-0.1b-q8_0.gguf'));
   assert.equal(await asr.getByRole('button', { name: 'Download', exact: true }).count(), 0);
@@ -56,11 +68,16 @@ try {
   await installation.selectOption('missing');
   await asr.waitFor();
   await installation.selectOption('all');
+  localTtsBf16Exists = true;
   localFileExists = true; // Simulate conversion finishing while the page stays open.
   await page.getByRole('button', { name: 'Refresh local models', exact: true }).click();
   await asr.getByText('✓ Local file found', { exact: true }).waitFor();
+  await ttsBf16.getByText('✓ Local file found', { exact: true }).waitFor();
+  assert.match(await ttsBf16.locator('xpath=..').locator('header').innerText(), /1 local file found/);
   await installation.selectOption('installed');
   await asr.waitFor();
+  await ttsBf16.waitFor();
+  assert.equal(await ttsQ8.count(), 0);
   assert.equal(await tts.count(), 0);
   await installation.selectOption('missing');
   await tts.waitFor();
@@ -84,8 +101,14 @@ try {
   const selected = await page.locator('#model option:checked').innerText();
   assert.match(selected, /Audio8 ASR 0.1B/);
   await page.getByText('offline transcription', { exact: false }).first().waitFor();
+  await page.getByRole('button', { name: 'Models', exact: true }).click();
+  await page.getByLabel('Search models', { exact: true }).fill('Audio8');
+  await ttsBf16.getByText('✓ Local file found', { exact: true }).waitFor();
+  await ttsBf16.getByRole('button', { name: 'Open in Studio', exact: true }).click();
+  await page.waitForFunction(() => document.querySelector('#model')?.value === 'audio8-tts-0.1b-bf16');
+  assert.match(await page.locator('#model option:checked').innerText(), /Audio8 TTS Preview 0.1B/);
   assert.deepEqual(errors, []);
-  console.log('PASS: local file detection, conversion refresh, installed/missing filters, API failure, models-root changes, and Studio selection; TTS downloads unchanged');
+  console.log('PASS: local file detection, conversion refresh, installed/missing filters, API failure, models-root changes, and Studio selection; 0.1B BF16/Q8 local entries and Studio selection; 0.6B download unchanged');
 } finally {
   await browser.close();
 }

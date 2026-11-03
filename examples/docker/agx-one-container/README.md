@@ -165,6 +165,15 @@ for the exact Compose commands. Both checkpoint and GGUF are persisted in the
 host repository's `audio-models/` mount. Rebuild `voice-ai` once if an older image
 does not contain the converter.
 
+### Audio8 TTS local conversion
+
+`docker compose up --build -d voice-ai` includes both Audio8 TTS conversion
+scripts and installs NumPy, safetensors, and the Hugging Face CLI in
+`/app/tts-convert-venv`. No manual `pip install` or `docker cp` is needed.
+Follow the [Audio8 TTS Docker setup](../../../docs/models/audio8_tts.md#docker--agx-all-in-one)
+to authenticate, download, and convert the checkpoint. Model files persist in
+the host repository's `audio-models/` mount.
+
 ### LFM2.5 1.2B Instruct
 
 In the **LLM / llama.cpp** page, select **LFM2.5 1.2B Instruct · Q4_K_M**

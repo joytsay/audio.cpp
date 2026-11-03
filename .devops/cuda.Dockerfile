@@ -291,11 +291,30 @@ WORKDIR /app
 # ── FULL: All binaries + entrypoint.sh multiplexer ────────────────────────────
 FROM base AS full
 
+# Keep conversion dependencies cached independently of native binary changes.
+COPY tools/community_models/audio8_tts_conversion_requirements.txt /tmp/audio8_tts_conversion_requirements.txt
+RUN --mount=type=cache,target=/root/.cache/pip \
+    apt-get update && \
+    apt-get install -y --no-install-recommends python3-venv && \
+    python3 -m venv /app/tts-convert-venv && \
+    /app/tts-convert-venv/bin/python -m pip install \
+        -r /tmp/audio8_tts_conversion_requirements.txt && \
+    /app/tts-convert-venv/bin/python -c "import numpy, safetensors" && \
+    /app/tts-convert-venv/bin/hf --help >/dev/null && \
+    rm -f /tmp/audio8_tts_conversion_requirements.txt && \
+    rm -rf /var/lib/apt/lists/*
+
 COPY --from=build /app/full /app
 COPY model_specs/ /app/model_specs/
 COPY assets/framework/models/ /app/assets/framework/models/
 COPY tools/model_manager_v2.py /app/tools/model_manager_v2.py
 COPY tools/community_models/audio8_asr/convert_audio8_asr.py /app/tools/community_models/audio8_asr/convert_audio8_asr.py
+COPY tools/community_models/convert_audio8_tts.py /app/tools/community_models/convert_audio8_tts.py
+COPY tools/community_models/convert_audio8_tts_codec.py /app/tools/community_models/convert_audio8_tts_codec.py
+
+RUN /app/tts-convert-venv/bin/python /app/tools/community_models/convert_audio8_tts.py --help >/dev/null && \
+    /app/tts-convert-venv/bin/python /app/tools/community_models/convert_audio8_tts_codec.py --help >/dev/null && \
+    test -x /app/audiocpp_gguf
 
 RUN mkdir -p /app/models && chown ubuntu:ubuntu /app/models
 

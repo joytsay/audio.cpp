@@ -371,6 +371,7 @@
   }
 
   const familyLabels: Record<string, string> = {
+    audio8_tts: 'Audio8 TTS',
     fish_drama3: 'Fish Audio Drama 3',
     kugelaudio: 'KugelAudio', crisperwhisper: 'CrisperWhisper', index_echo: 'Index-Echo S2TT',
     audio_flamingo: 'Audio Flamingo', owsm: 'OWSM', owsm_ctc: 'OWSM-CTC',
