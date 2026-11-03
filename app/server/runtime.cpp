@@ -221,6 +221,8 @@ HttpResponse ServerState::handle_request(const HttpRequest & request, bool use_f
             if (extra.method == "POST" && extra.path == "/v1/ui/prompt") return handle_prompt_save(extra.body);
             if (extra.method == "GET" && extra.path == "/v1/ui/hotword") return handle_prompt_get("hotword.csv");
             if (extra.method == "POST" && extra.path == "/v1/ui/hotword") return handle_prompt_save(extra.body, "hotword.csv");
+            if (extra.method == "GET" && extra.path == "/v1/ui/greetings") return handle_prompt_get("greetings.csv");
+            if (extra.method == "POST" && extra.path == "/v1/ui/greetings") return handle_prompt_save(extra.body, "greetings.csv");
             if (extra.method == "GET" && extra.path == "/v1/rag/info") return handle_rag_info();
             if (extra.method == "POST") {
                 if (extra.path == "/v1/rag/initialize") return handle_rag_request(extra.body, "initialize");

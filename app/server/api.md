@@ -393,6 +393,21 @@ proxy_buffering off;
 
 A browser cannot drive it: `fetch()` request streaming requires HTTP/2 and is half-duplex by specification — the whole request is sent before the response is processed. It is intended for native clients — `curl`, an `ffmpeg` pipe, or a backend service. A WebSocket transport would suit browsers and intermediaries better and could be added alongside this without changing it.
 
+## Demo CSV settings
+
+`GET /v1/ui/greetings` reads `greetings.csv`; `POST /v1/ui/greetings` saves it.
+`GET /v1/ui/prompt` and `POST /v1/ui/prompt` provide the same operations for
+`prompt.csv`. Reads return `{ "path": "greetings.csv", "content": "..." }`;
+writes accept `{ "content": "..." }` and return the saved content. Writes
+require UI management, an existing regular file, and at most 2 MiB of content.
+Files resolve under the server's repository/resource root. Docker bind mounts
+persist edits to the host.
+
+The demo interprets `greetings.csv` as a single-column CSV headed `greeting`,
+with one nonempty row. Quote the field and double embedded quotes when the
+greeting contains commas, quotes, or newlines. The API stores the supplied
+content verbatim; CSV validation happens in the demo editor.
+
 ## `GET /v1/audio/voices?model=<id>`
 
 Lists cached voice IDs, configured model preset names, and shared `voice_dir`

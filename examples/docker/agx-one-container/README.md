@@ -159,17 +159,38 @@ Override `AUDIOCPP_BOOTSTRAP_PACKAGES`, `LLAMA_BOOTSTRAP_MODEL`, or
 
 Open `https://192.168.5.151:8083/#/demo` (or your configured HTTPS host and
 port). Trust the HTTPS certificate and allow microphone access. The Svelte
-console includes model settings, separate measured microphone and playback
+console uses the same dark-blue palette as Pipeline and Models, with an
+unlinked **GeoVision IVR** brand. It includes model settings, separate measured microphone and playback
 waveforms, text messages, mute, call/hangup, and the last 300 events across
 calls in this browser. **Clear events** removes that history.
+The **Runtime** column shows each operation's elapsed wall time in milliseconds,
+including request setup and transfer. Turn totals include reply playback;
+instant events and older history without timing show `—`.
 
-The demo uses bundled Silero VAD, locally converted Audio8 ASR 0.1B Q8_0,
-LiquidAI LFM2.5 1.2B Instruct Q4_K_M through the same-origin `/llm` proxy,
-and ZipVoice. Install these models first; the demo does not download them.
-Paths are relative to the server's selected models folder. The LLM field
-accepts its llama.cpp router ID; an installed matching LFM2.5 model is selected
-automatically when available. ZipVoice uses the mounted Ling/Wang reference
-voices, or an uploaded reference audio file with its exact transcript.
+The VAD, ASR, LLM, and TTS dropdowns list installed packages, existing local
+GGUFs, and available registered models. **Refresh models** discovers new
+downloads. The defaults prefer Silero VAD, Audio8 ASR 0.1B Q8_0, LFM2.5 1.2B
+Instruct Q4_K_M, and ZipVoice when installed. The LLM dropdown uses the actual
+IDs from the same-origin `/llm` router, including local filenames and aliases.
+The demo does not download models.
+
+ZipVoice uses the mounted Ling/Wang voices or a custom reference. **Record
+clone voice** opens the microphone; **Stop recording** transcribes it with the
+selected ASR. Uploads are also transcribed automatically. Review the editable
+transcript before calling. Its initial value is
+`你好我是語音助手 請問您需要什麼服務 如果需要轉接請按分機號碼`.
+The ASR hotwords/context field is sent with both turn and reference
+transcription requests. Whether it affects recognition depends on the ASR
+model's context support; Audio8 ASR currently uses a fixed transcription prompt.
+
+The greeting is read from the host's `greetings.csv` (one `greeting` column and
+one quoted row). **Update greetings.csv** saves it through `/v1/ui/greetings`.
+The system prompt is read from `prompt.csv`; **Save prompt.csv** writes edits
+back to that file. Both CSVs are mounted into the container so edits persist.
+Greeting audio is prepared ahead of the call and reused until its text, model,
+voice, or reference changes. It plays once after connecting, without waiting
+for an LLM response. Wait for **Greeting ready · instant playback** for the
+fastest call start.
 
 Press **Start call** to enable the microphone. Silero VAD checks successive
 audio windows and submits a turn after a silent window or 15 seconds of speech.

@@ -4,15 +4,29 @@
   import logo from "../../../static/logo_cloud.svg?raw";
   import "../../app.css";
   import { browserDecodeToWav, encodePcm16Wav } from "$lib/audio";
+  import { readGreetingCsv, writeGreetingCsv } from "$lib/greetings";
+  import { recognitionContext } from "$lib/asr-context";
   import { uploadWav } from "$lib/api";
   import {
     endpointJson,
     endpointBlob,
-    endpointRouterModels,
+    type OpenAIModel,
     chatText,
     type ChatMessage,
   } from "$lib/openai";
-  type Event = { time: string; run: string; type: string; summary: string };
+  import {
+    discoverDemoAudioModels,
+    discoverDemoLlmModels,
+    preferredDemoModel,
+    type DemoAudioModel,
+  } from "$lib/demo-models";
+  type Event = {
+    time: string;
+    run: string;
+    type: string;
+    summary: string;
+    runtimeMs?: number | null;
+  };
   let events: Event[] = [],
     messages: ChatMessage[] = [];
   let connected = false,
@@ -24,18 +38,121 @@
     input = "",
     run = "",
     error = "";
-  let root = "/app/models",
-    asrPath = "Audio8-ASR-0.1B-GGUF/audio8-asr-0.1b-q8_0.gguf";
-  let ttsPath = "ZipVoice-Distill-GGUF",
-    llm = "bartowski/LiquidAI_LFM2.5-1.2B-Instruct-GGUF:Q4_K_M";
+  let audioModels: DemoAudioModel[] = [],
+    llmModels: OpenAIModel[] = [];
+  let vadKey = "",
+    asrKey = "",
+    ttsKey = "",
+    llm = "";
+  let discovering = false,
+    modelError = "";
+  $: vadModels = audioModels.filter((m) => m.task === "vad");
+  $: asrModels = audioModels.filter((m) => ["asr", "stt"].includes(m.task));
+  $: ttsModels = audioModels.filter((m) => ["tts", "clon"].includes(m.task));
+  $: selectedVad = audioModels.find((m) => m.key === vadKey);
+  $: selectedAsr = audioModels.find((m) => m.key === asrKey);
+  $: selectedTts = audioModels.find((m) => m.key === ttsKey);
+  $: canCall = !!(
+    selectedVad &&
+    selectedAsr &&
+    selectedTts &&
+    llm &&
+    filesReady &&
+    greeting.trim()
+  );
+  async function refreshModels() {
+    discovering = true;
+    modelError = "";
+    const result = await Promise.allSettled([
+      discoverDemoAudioModels(),
+      discoverDemoLlmModels(llmBase()),
+    ]);
+    if (result[0].status === "fulfilled") {
+      audioModels = result[0].value;
+      vadKey = preferredDemoModel(
+        audioModels.filter((m) => m.task === "vad"),
+        vadKey,
+        "silero-vad",
+      );
+      asrKey = preferredDemoModel(
+        audioModels.filter((m) => ["asr", "stt"].includes(m.task)),
+        asrKey,
+        "audio8-asr",
+      );
+      ttsKey = preferredDemoModel(
+        audioModels.filter((m) => ["tts", "clon"].includes(m.task)),
+        ttsKey,
+        "zipvoice",
+      );
+    } else {
+      audioModels = [];
+      modelError = `Audio models: ${result[0].reason}`;
+    }
+    if (result[1].status === "fulfilled") {
+      llmModels = result[1].value;
+      if (!llmModels.some((m) => m.id === llm))
+        llm =
+          llmModels.find((m) => /LFM2[._-]?5.*1[._-]?2B.*Q4_K_M/i.test(m.id))
+            ?.id ||
+          llmModels[0]?.id ||
+          "";
+    } else {
+      llmModels = [];
+      llm = "";
+      modelError += ` LLM models: ${result[1].reason}`;
+    }
+    discovering = false;
+  }
   let prompt =
     "你是現場維修保養的語音助理。請用繁體中文簡短回答，準確保留工單、設備代碼及數字。";
+  const defaultReferenceText =
+    "你好我是語音助手 請問您需要什麼服務 如果需要轉接請按分機號碼";
   let threshold = 0.5,
     windowMs = 650,
     voiceFile: File | null = null,
-    referenceText = "",
+    referenceText = defaultReferenceText,
     referencePath = "";
+  let hotwords = "";
+  let greeting = "您好，這裡是 GeoVision IVR，請問需要什麼協助？";
+  let filesReady = false,
+    savingGreeting = false,
+    savingPrompt = false,
+    fileStatus = "";
+  let previousTheme: string | undefined;
+  let mounted = false,
+    greetingStatus = "",
+    greetingPreparing = false;
+  let greetingTimer: ReturnType<typeof setTimeout> | undefined;
+  let greetingAborter: AbortController | null = null;
+  let greetingPromise: Promise<Blob | null> | null = null;
+  let preparedGreeting: Blob | null = null,
+    preparedKey = "",
+    preparingKey = "";
+  let cloneRecorder: MediaRecorder | null = null,
+    cloneStream: MediaStream | null = null;
+  let cloneRecording = false,
+    cloneBusy = false,
+    cloneStatus = "";
+  let cloneAborter: AbortController | null = null;
   let voice = "lingCLvocals";
+  $: voiceChoices = selectedTts?.builtin_voices?.length
+    ? selectedTts.builtin_voices
+    : ["lingCLvocals", "wangSG9s"];
+  $: if (!voiceChoices.includes(voice))
+    voice = selectedTts?.default_voice || voiceChoices[0];
+  $: supportsReference =
+    selectedTts?.task === "clon" ||
+    ["audio8_tts", "voxcpm1", "qwen3_tts"].includes(selectedTts?.family || "");
+  $: scheduleGreeting(
+    mounted && filesReady,
+    connected || starting,
+    ttsKey,
+    voice,
+    voiceFile,
+    referenceText,
+    greeting,
+    cloneRecording || cloneBusy,
+  );
   let inputBars = Array(36).fill(2),
     outputBars = Array(36).fill(2);
   let stream: MediaStream | null = null,
@@ -55,19 +172,28 @@
     preRoll: Float32Array | null = null;
   const historyKey = "geovision.demo.events.v1";
   const llmBase = () => new URL("/llm/v1/", location.href).toString();
-  function record(type: string, summary: string) {
+  function record(
+    type: string,
+    summary: string,
+    runtimeMs: number | null = null,
+  ) {
     events = [
-      { time: new Date().toISOString(), run, type, summary },
+      { time: new Date().toISOString(), run, type, summary, runtimeMs },
       ...events,
     ].slice(0, 300);
     try {
       localStorage.setItem(historyKey, JSON.stringify(events));
     } catch {}
   }
-  function fail(cause: unknown) {
+  function runtimeLabel(value: number | null | undefined) {
+    return typeof value === "number" && Number.isFinite(value) && value >= 0
+      ? `${value.toFixed(2)} ms`
+      : "—";
+  }
+  function fail(cause: unknown, runtimeMs: number | null = null) {
     error = cause instanceof Error ? cause.message : String(cause);
     status = "Error";
-    record("ERROR", error);
+    record("ERROR", error, runtimeMs);
   }
   function reset() {
     windows = [];
@@ -100,37 +226,42 @@
     }
     return encodePcm16Wav(buffer);
   }
-  async function load(
-    id: string,
-    family: string,
-    path: string,
-    task: string,
-    signal: AbortSignal,
-  ) {
-    status = `Loading ${family}…`;
+  async function load(key: string, signal: AbortSignal, announce = true) {
+    const model = audioModels.find((m) => m.key === key);
+    if (!model)
+      throw new Error(
+        "The selected model is no longer available. Refresh models.",
+      );
+    const id = `demo-${model.id}`;
+    if (announce) status = `Loading ${model.label}…`;
     await endpointJson(
       "",
       "models/load",
       {
         method: "POST",
-        body: JSON.stringify({ id, family, path, task, mode: "offline" }),
+        body: JSON.stringify({
+          id,
+          family: model.family,
+          path: model.path,
+          task: model.task,
+          mode: "offline",
+          load_options: model.load_options || {},
+          session_options: model.session_options || {},
+        }),
       },
       signal,
     );
+    return id;
   }
   async function detect(samples: Float32Array, generation: number) {
     const ctx = context,
       signal = controller?.signal;
     if (!ctx || !signal || detecting || busy || speaking || muted) return;
     detecting = true;
+    const started = performance.now();
     try {
-      await load(
-        "demo-vad",
-        "silero_vad",
-        "/app/assets/framework/models/silero_vad",
-        "vad",
-        signal,
-      );
+      // VAD runs for every capture window; keep the listening status stable.
+      const vadId = await load(vadKey, signal, false);
       const audio = await uploadWav(
         await browserDecodeToWav(
           new File([wav([samples], ctx)], "vad.wav"),
@@ -145,12 +276,15 @@
         {
           method: "POST",
           body: JSON.stringify({
-            model: "demo-vad",
+            model: vadId,
             audio,
-            options: {
-              threshold: String(threshold),
-              min_speech_duration_ms: "100",
-            },
+            options:
+              selectedVad?.family === "silero_vad"
+                ? {
+                    threshold: String(threshold),
+                    min_speech_duration_ms: "100",
+                  }
+                : {},
           }),
         },
         signal,
@@ -159,6 +293,12 @@
       const speech = (result.segments || result.speech_segments || []).some(
         (s: any) => s.end_sample > s.start_sample,
       );
+      if (speech || utterance.length)
+        record(
+          "VAD_COMPLETED",
+          speech ? "Speech detected" : "End of speech",
+          performance.now() - started,
+        );
       if (speech) {
         if (!utterance.length) {
           record("USER_STATE_CHANGED", "listening → speaking");
@@ -178,7 +318,7 @@
       } else status = speech ? "Listening · speech detected" : "Listening";
     } catch (cause) {
       if (epoch === generation && !signal.aborted) {
-        fail(cause);
+        fail(cause, performance.now() - started);
         hangup(false);
       }
     } finally {
@@ -191,15 +331,11 @@
     busy = true;
     error = "";
     reset();
+    const turnStarted = performance.now();
+    let operationStarted = turnStarted;
     try {
       if (audio) {
-        await load(
-          "demo-audio8-asr",
-          "audio8_asr",
-          `${root}/${asrPath}`,
-          "asr",
-          signal,
-        );
+        const asrId = await load(asrKey, signal);
         const path = await uploadWav(
           await browserDecodeToWav(new File([audio], "turn.wav"), 16000, 1),
           signal,
@@ -210,22 +346,42 @@
           "audio/transcriptions/details",
           {
             method: "POST",
-            body: JSON.stringify({ model: "demo-audio8-asr", audio: path }),
+            body: JSON.stringify({
+              model: asrId,
+              audio: path,
+              ...(hotwords.trim()
+                ? {
+                    text: recognitionContext(
+                      hotwords.trim(),
+                      selectedAsr?.family || "",
+                    ),
+                  }
+                : {}),
+            }),
           },
           signal,
         );
         text = result.text?.trim();
         if (!text) {
-          record("ASR_EMPTY", "No speech recognized");
+          record(
+            "ASR_EMPTY",
+            "No speech recognized",
+            performance.now() - operationStarted,
+          );
           return;
         }
-        record("USER_INPUT_TRANSCRIBED", text);
+        record(
+          "USER_INPUT_TRANSCRIBED",
+          text,
+          performance.now() - operationStarted,
+        );
       }
       if (generation !== epoch) return;
       messages = [...messages, { role: "user", content: text }];
       record("CONVERSATION_ITEM_ADDED", `USER · ${text}`);
       status = "Thinking";
       record("AGENT_STATE_CHANGED", "listening → thinking");
+      operationStarted = performance.now();
       const response = await endpointJson<any>(
         llmBase(),
         "chat/completions",
@@ -245,57 +401,346 @@
       if (!reply)
         throw new Error("The language model returned an empty reply.");
       if (generation !== epoch) return;
+      record("LLM_COMPLETED", llm, performance.now() - operationStarted);
       messages = [...messages, { role: "assistant", content: reply }];
       record("CONVERSATION_ITEM_ADDED", `ASSISTANT · ${reply}`);
-      await load(
-        "demo-zipvoice",
-        "zipvoice",
-        `${root}/${ttsPath}`,
-        "clon",
-        signal,
-      );
+      operationStarted = performance.now();
+      const ttsId = await load(ttsKey, signal);
       status = "Synthesizing";
       const body: Record<string, unknown> = {
-        model: "demo-zipvoice",
+        model: ttsId,
         input: reply,
         response_format: "wav",
       };
-      if (referencePath) {
+      if (referencePath && supportsReference) {
         body.voice_ref = referencePath;
         body.reference_text = referenceText;
-      } else body.voice = voice;
-      const output = await endpointBlob("", "audio/speech", body, signal);
-      if (generation !== epoch || !context) return;
-      const buffer = await context.decodeAudioData(await output.arrayBuffer());
-      if (generation !== epoch || !context) return;
-      const node = context.createBufferSource();
-      node.buffer = buffer;
-      analyser = context.createAnalyser();
-      analyser.fftSize = 512;
-      node.connect(analyser);
-      analyser.connect(context.destination);
-      player = node;
-      speaking = true;
-      status = "Speaking";
-      record("AGENT_STATE_CHANGED", "thinking → speaking");
-      await new Promise<void>((resolve) => {
-        node.onended = () => resolve();
-        node.start();
-      });
-      if (generation === epoch) {
-        speaking = false;
-        player = null;
-        analyser = null;
-        record("AGENT_STATE_CHANGED", "speaking → listening");
+      } else {
+        body.voice = voice;
+        if (supportsReference && referenceText.trim())
+          body.reference_text = referenceText.trim();
       }
+      const output = await endpointBlob("", "audio/speech", body, signal);
+      if (generation !== epoch) return;
+      record(
+        "TTS_COMPLETED",
+        selectedTts?.label || "Speech synthesized",
+        performance.now() - operationStarted,
+      );
+      operationStarted = performance.now();
+      const playbackMs = await playAudio(output, generation);
+      if (generation !== epoch) return;
+      record("PLAYBACK_COMPLETED", "Assistant reply played", playbackMs);
+      record(
+        "TURN_COMPLETED",
+        audio ? "Voice turn complete" : "Text turn complete",
+        performance.now() - turnStarted,
+      );
     } catch (cause) {
-      if (generation === epoch && !signal.aborted) fail(cause);
+      if (generation === epoch && !signal.aborted)
+        fail(cause, performance.now() - operationStarted);
     } finally {
       if (generation === epoch) {
         busy = false;
         reset();
         if (!error) status = muted ? "Microphone muted" : "Listening";
       }
+    }
+  }
+  async function loadCsvFiles() {
+    try {
+      const [savedGreeting, savedPrompt] = await Promise.all([
+        endpointJson<{ content: string }>("", "ui/greetings"),
+        endpointJson<{ content: string }>("", "ui/prompt"),
+      ]);
+      greeting = readGreetingCsv(savedGreeting.content);
+      prompt = savedPrompt.content;
+      filesReady = true;
+      fileStatus = "Loaded greetings.csv and prompt.csv";
+    } catch (cause) {
+      fileStatus = `CSV load failed: ${cause instanceof Error ? cause.message : cause}`;
+    }
+  }
+  async function saveGreetingCsv() {
+    savingGreeting = true;
+    try {
+      const content = writeGreetingCsv(greeting);
+      const saved = await endpointJson<{ content: string }>(
+        "",
+        "ui/greetings",
+        { method: "POST", body: JSON.stringify({ content }) },
+      );
+      greeting = readGreetingCsv(saved.content);
+      fileStatus = "Saved greetings.csv";
+      await prepareGreeting();
+    } catch (cause) {
+      fileStatus = `Greeting save failed: ${cause instanceof Error ? cause.message : cause}`;
+    } finally {
+      savingGreeting = false;
+    }
+  }
+  async function savePromptCsv() {
+    savingPrompt = true;
+    try {
+      await endpointJson("", "ui/prompt", {
+        method: "POST",
+        body: JSON.stringify({ content: prompt }),
+      });
+      fileStatus = "Saved prompt.csv";
+    } catch (cause) {
+      fileStatus = `Prompt save failed: ${cause instanceof Error ? cause.message : cause}`;
+    } finally {
+      savingPrompt = false;
+    }
+  }
+  async function playAudio(
+    output: Blob,
+    generation: number,
+  ): Promise<number | null> {
+    const started = performance.now();
+    if (generation !== epoch || !context) return null;
+    const buffer = await context.decodeAudioData(await output.arrayBuffer());
+    if (generation !== epoch || !context) return null;
+    const node = context.createBufferSource();
+    node.buffer = buffer;
+    analyser = context.createAnalyser();
+    analyser.fftSize = 512;
+    node.connect(analyser);
+    analyser.connect(context.destination);
+    player = node;
+    speaking = true;
+    status = "Speaking";
+    record("AGENT_STATE_CHANGED", "thinking → speaking");
+    await new Promise<void>((resolve) => {
+      node.onended = () => resolve();
+      node.start();
+    });
+    if (generation === epoch) {
+      node.disconnect();
+      analyser?.disconnect();
+      speaking = false;
+      player = null;
+      analyser = null;
+      record("AGENT_STATE_CHANGED", "speaking → listening");
+      return performance.now() - started;
+    }
+    return null;
+  }
+  function greetingFingerprint() {
+    return JSON.stringify([
+      ttsKey,
+      voice,
+      voiceFile?.name,
+      voiceFile?.size,
+      voiceFile?.lastModified,
+      referenceText,
+      greeting,
+    ]);
+  }
+  function scheduleGreeting(
+    ready: boolean,
+    inCall: boolean,
+    _tts: string,
+    _voice: string,
+    _file: File | null,
+    _text: string,
+    _greeting: string,
+    cloning: boolean,
+  ) {
+    clearTimeout(greetingTimer);
+    if (!ready || inCall) return;
+    if (cloning) {
+      greetingAborter?.abort();
+      return;
+    }
+    if (
+      !ttsKey ||
+      !greeting.trim() ||
+      (voiceFile && supportsReference && !referenceText.trim())
+    )
+      return;
+    const key = greetingFingerprint();
+    if (
+      key === preparedKey ||
+      (key === preparingKey &&
+        greetingPreparing &&
+        !greetingAborter?.signal.aborted)
+    )
+      return;
+    greetingAborter?.abort();
+    greetingTimer = setTimeout(() => {
+      void prepareGreeting();
+    }, 500);
+  }
+  async function prepareGreeting(): Promise<Blob | null> {
+    const key = greetingFingerprint();
+    if (!greeting.trim()) return null;
+    if (preparedKey === key && preparedGreeting) return preparedGreeting;
+    if (
+      preparingKey === key &&
+      greetingPreparing &&
+      !greetingAborter?.signal.aborted &&
+      greetingPromise
+    )
+      return greetingPromise;
+    greetingAborter?.abort();
+    const aborter = new AbortController();
+    greetingAborter = aborter;
+    preparingKey = key;
+    greetingPreparing = true;
+    greetingStatus = "Preparing greeting…";
+    greetingPromise = (async () => {
+      try {
+        const id = await load(ttsKey, aborter.signal);
+        const body: Record<string, unknown> = {
+          model: id,
+          input: greeting,
+          response_format: "wav",
+        };
+        if (voiceFile && supportsReference) {
+          if (!referenceText.trim())
+            throw new Error("Enter the reference transcript first.");
+          body.voice_ref = await uploadWav(
+            await browserDecodeToWav(voiceFile, 24000, 1),
+            aborter.signal,
+          );
+          body.reference_text = referenceText;
+        } else {
+          body.voice = voice;
+          if (supportsReference && referenceText.trim())
+            body.reference_text = referenceText.trim();
+        }
+        const audio = await endpointBlob(
+          "",
+          "audio/speech",
+          body,
+          aborter.signal,
+        );
+        if (!aborter.signal.aborted && greetingFingerprint() === key) {
+          preparedGreeting = audio;
+          preparedKey = key;
+          greetingStatus = "Greeting ready · instant playback";
+        }
+        return aborter.signal.aborted ? null : audio;
+      } catch (cause) {
+        if (!aborter.signal.aborted)
+          greetingStatus = `Greeting unavailable: ${cause instanceof Error ? cause.message : cause}`;
+        return null;
+      } finally {
+        if (greetingAborter === aborter) {
+          greetingPreparing = false;
+          if (!connected && !starting && !cloneBusy)
+            status = "Ready to connect";
+        }
+      }
+    })();
+    return greetingPromise;
+  }
+  async function transcribeReference(file: File) {
+    cloneAborter?.abort();
+    greetingAborter?.abort();
+    clearTimeout(greetingTimer);
+    const aborter = new AbortController();
+    cloneAborter = aborter;
+    cloneBusy = true;
+    cloneStatus = "Transcribing reference voice…";
+    try {
+      const id = await load(asrKey, aborter.signal);
+      const audio = await uploadWav(
+        await browserDecodeToWav(file, 16000, 1),
+        aborter.signal,
+      );
+      const result = await endpointJson<{ text: string }>(
+        "",
+        "audio/transcriptions/details",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            model: id,
+            audio,
+            ...(hotwords.trim()
+              ? {
+                  text: recognitionContext(
+                    hotwords.trim(),
+                    selectedAsr?.family || "",
+                  ),
+                }
+              : {}),
+          }),
+        },
+        aborter.signal,
+      );
+      if (!aborter.signal.aborted && voiceFile === file) {
+        referenceText = result.text?.trim() || "";
+        cloneStatus = referenceText
+          ? "Transcript ready · review before calling"
+          : "No speech recognized. Enter the transcript manually.";
+      }
+    } catch (cause) {
+      if (!aborter.signal.aborted)
+        cloneStatus = `Reference transcription failed: ${cause instanceof Error ? cause.message : cause}`;
+    } finally {
+      if (cloneAborter === aborter) {
+        cloneBusy = false;
+        if (!connected) status = "Ready to connect";
+      }
+    }
+  }
+  function chooseReference(file: File | null) {
+    cloneAborter?.abort();
+    voiceFile = file;
+    referencePath = "";
+    referenceText = file ? "" : defaultReferenceText;
+    cloneStatus = "";
+    if (file && asrKey) void transcribeReference(file);
+  }
+  async function startCloneRecording() {
+    if (connected || starting || cloneRecording || cloneBusy) return;
+    greetingAborter?.abort();
+    clearTimeout(greetingTimer);
+    cloneBusy = true;
+    try {
+      if (!navigator.mediaDevices || typeof MediaRecorder === "undefined")
+        throw new Error("Use trusted HTTPS to record a reference voice.");
+      const acquired = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      });
+      if (!mounted) {
+        acquired.getTracks().forEach((t) => t.stop());
+        return;
+      }
+      cloneStream = acquired;
+      const recorder = new MediaRecorder(acquired);
+      cloneRecorder = recorder;
+      const chunks: Blob[] = [];
+      recorder.ondataavailable = (e) => {
+        if (e.data.size) chunks.push(e.data);
+      };
+      recorder.onstop = () => {
+        acquired.getTracks().forEach((t) => t.stop());
+        cloneStream = null;
+        cloneRecorder = null;
+        cloneRecording = false;
+        if (mounted)
+          chooseReference(
+            new File(chunks, "reference.webm", { type: recorder.mimeType }),
+          );
+      };
+      recorder.onerror = () => {
+        cloneStatus = "Reference recording failed.";
+        recorder.stop();
+      };
+      recorder.start();
+      cloneRecording = true;
+      cloneStatus = "Recording · press Stop when finished";
+    } catch (cause) {
+      cloneStatus = cause instanceof Error ? cause.message : String(cause);
+    } finally {
+      cloneBusy = false;
     }
   }
   function send() {
@@ -305,7 +750,8 @@
     void respond(text);
   }
   async function call() {
-    if (connected || starting) return;
+    if (connected || starting || !canCall || cloneRecording || cloneBusy)
+      return;
     const generation = ++epoch;
     starting = true;
     error = "";
@@ -332,23 +778,11 @@
         return;
       }
       stream = acquired;
-      root = (
-        await endpointJson<{ models_root: string }>(
-          "",
-          "ui/models-root",
-          {},
-          controller.signal,
-        )
-      ).models_root.replace(/\/$/, "");
-      const available = await endpointRouterModels(
-        llmBase(),
-        controller.signal,
-      );
-      const match = available.find((m) =>
-        /LFM2\.5-1\.2B-Instruct.*Q4_K_M/i.test(m.id),
-      );
-      if (match && /LFM2\.5-1\.2B-Instruct/i.test(llm)) llm = match.id;
-      if (voiceFile) {
+      if (!canCall)
+        throw new Error(
+          "Choose an installed model for each stage before calling.",
+        );
+      if (voiceFile && supportsReference) {
         if (!referenceText.trim())
           throw new Error("Enter the matching reference voice transcript.");
         referencePath = await uploadWav(
@@ -371,6 +805,7 @@
         "SESSION_STARTED",
         "Microphone connected · echo cancellation enabled",
       );
+      busy = !!greeting.trim();
       processor.onaudioprocess = (e) => {
         const samples = new Float32Array(e.inputBuffer.getChannelData(0));
         inputBars = muted ? Array(36).fill(2) : bars(samples);
@@ -407,6 +842,19 @@
         animation = requestAnimationFrame(draw);
       };
       draw();
+      if (greeting.trim()) {
+        record("GREETING_REQUESTED", greeting);
+        const audio = await prepareGreeting();
+        if (generation !== epoch) return;
+        if (!audio)
+          throw new Error(greetingStatus || "Greeting synthesis failed.");
+        messages = [{ role: "assistant", content: greeting }];
+        const playbackMs = await playAudio(audio, generation);
+        if (generation !== epoch) return;
+        record("GREETING_PLAYED", greeting, playbackMs);
+        busy = false;
+        status = "Listening";
+      }
     } catch (cause) {
       if (generation === epoch) {
         fail(cause);
@@ -418,6 +866,7 @@
   }
   function hangup(log = true) {
     epoch++;
+    greetingAborter?.abort();
     controller?.abort();
     controller = null;
     if (player) {
@@ -454,10 +903,16 @@
   function toggleMute() {
     muted = !muted;
     reset();
+    if (!busy) status = muted ? "Microphone muted" : "Listening";
     stream?.getAudioTracks().forEach((t) => (t.enabled = !muted));
     record("MICROPHONE", muted ? "Muted" : "Unmuted");
   }
   onMount(() => {
+    previousTheme = document.documentElement.dataset.theme;
+    document.documentElement.dataset.theme = "dark";
+    mounted = true;
+    void refreshModels();
+    void loadCsvFiles();
     try {
       const saved = JSON.parse(localStorage.getItem(historyKey) || "[]");
       if (Array.isArray(saved))
@@ -469,20 +924,57 @@
           .slice(0, 300);
     } catch {}
   });
-  onDestroy(() => hangup(false));
+  onDestroy(() => {
+    if (document.documentElement.dataset.theme === "dark") {
+      if (previousTheme) document.documentElement.dataset.theme = previousTheme;
+      else delete document.documentElement.dataset.theme;
+    }
+    mounted = false;
+    clearTimeout(greetingTimer);
+    greetingAborter?.abort();
+    cloneAborter?.abort();
+    if (cloneRecorder?.state === "recording") cloneRecorder.stop();
+    cloneStream?.getTracks().forEach((t) => t.stop());
+    hangup(false);
+  });
 </script>
 
 <svelte:head><title>GeoVision · Voice Demo</title></svelte:head>
 <div class="demo">
   <aside>
-    <a class="brand" href="#/?studio"
-      ><span class="gv">{@html logo}</span><span
-        >GeoVision<small>VOICE CONSOLE</small></span
-      ></a
-    >
+    <div class="brand">
+      <span class="gv">{@html logo}</span><span>GeoVision IVR</span>
+    </div>
     <div class="section-label">MODEL SETTINGS</div>
-    <fieldset disabled={connected || starting}>
-      <label>VAD<select><option>Silero VAD</option></select></label>
+    <button
+      disabled={connected ||
+        starting ||
+        discovering ||
+        cloneRecording ||
+        cloneBusy}
+      on:click={refreshModels}
+      >{discovering ? "Refreshing…" : "Refresh models"}</button
+    >
+    {#if modelError}<p class="error" role="alert">{modelError}</p>{/if}
+    {#if !discovering && !llmModels.length && !modelError}<p class="error">
+        No downloaded LLM models found. Download a model in the LLM page, then
+        refresh models.
+      </p>{/if}
+    <fieldset
+      disabled={connected ||
+        starting ||
+        discovering ||
+        cloneRecording ||
+        cloneBusy}
+    >
+      <label
+        >VAD<select aria-label="VAD" bind:value={vadKey}
+          ><option value="" disabled>No installed VAD models</option
+          >{#each vadModels as model}<option value={model.key}
+              >{model.label}</option
+            >{/each}</select
+        ></label
+      >
       <label
         >Speech threshold<input
           type="number"
@@ -502,41 +994,91 @@
         /></label
       >
       <label
-        >ASR<select><option>Audio8 ASR 0.1B (local setup)</option></select
+        >ASR<select aria-label="ASR" bind:value={asrKey}
+          ><option value="" disabled>No installed ASR models</option
+          >{#each asrModels as model}<option value={model.key}
+              >{model.label}</option
+            >{/each}</select
         ></label
-      >
-      <label>ASR file<input bind:value={asrPath} /></label>
-      <label>LLM<input aria-label="LLM model" bind:value={llm} /></label><small
-        >LiquidAI LFM2.5 1.2B Instruct · Q4_K_M</small
       >
       <label
-        >TTS<select><option>ZipVoice (zh/en zero-shot cloning)</option></select
+        >ASR hotwords / context<textarea
+          rows="3"
+          bind:value={hotwords}
+          placeholder="X光機、設備代碼、人名…"></textarea></label
+      >
+      {#if selectedAsr?.family === "audio8_asr"}<small
+          >Audio8 ASR currently uses a fixed transcription prompt; context
+          biasing requires a model that supports it.</small
+        >{/if}
+      <label
+        >LLM<select aria-label="LLM" bind:value={llm}
+          ><option value="" disabled>No downloaded LLM models</option
+          >{#each llmModels as model}<option value={model.id}>{model.id}</option
+            >{/each}</select
         ></label
       >
-      <label>TTS folder<input bind:value={ttsPath} /></label>
+      <label
+        >TTS<select aria-label="TTS" bind:value={ttsKey}
+          ><option value="" disabled>No installed TTS models</option
+          >{#each ttsModels as model}<option value={model.key}
+              >{model.label}</option
+            >{/each}</select
+        ></label
+      >
       <label
         >Built-in voice<select bind:value={voice}>
-          <option value="lingCLvocals">Ling · Chinese</option>
-          <option value="wangSG9s">Wang · Chinese</option>
+          {#each voiceChoices as id}<option value={id}
+              >{id === "lingCLvocals"
+                ? "Ling · Chinese"
+                : id === "wangSG9s"
+                  ? "Wang · Chinese"
+                  : id}</option
+            >{/each}
         </select></label
       >
-      <label
-        >Custom reference voice (optional)<input
-          type="file"
-          accept="audio/*"
-          on:change={(e) => (voiceFile = e.currentTarget.files?.[0] || null)}
-        /></label
-      >
-      <label
-        >Reference transcript<textarea
-          rows="2"
-          bind:value={referenceText}
-          placeholder="Exact words in reference audio"></textarea></label
-      >
-      <label
+      {#if supportsReference}<label
+          >Custom reference voice (optional)<input
+            type="file"
+            accept="audio/*"
+            on:change={(e) =>
+              chooseReference(e.currentTarget.files?.[0] || null)}
+          /></label
+        >
+        <label
+          >Reference transcript<textarea
+            rows="2"
+            bind:value={referenceText}
+            placeholder="Exact words in reference audio"></textarea></label
+        >
+      {/if}<label
         >System prompt<textarea rows="4" bind:value={prompt}></textarea></label
+      ><button disabled={savingPrompt} on:click={savePromptCsv}
+        >{savingPrompt ? "Saving…" : "Save prompt.csv"}</button
       >
+      <label
+        >Call greeting<textarea rows="3" bind:value={greeting}
+        ></textarea></label
+      >
+      <button
+        disabled={savingGreeting || !greeting.trim() || !ttsKey}
+        on:click={saveGreetingCsv}
+        >{savingGreeting ? "Saving…" : "Update greetings.csv"}</button
+      >
+      <small>{greetingStatus}</small>
+      <p role="status">{fileStatus}</p>
     </fieldset>
+    {#if supportsReference}<div class="clone-recording">
+        {#if cloneRecording}<button on:click={() => cloneRecorder?.stop()}
+            ><MicOff size={16} /> Stop recording</button
+          >
+        {:else}<button
+            disabled={connected || starting || cloneBusy || !asrKey}
+            on:click={startCloneRecording}
+            ><Mic size={16} /> Record clone voice</button
+          >{/if}
+        {#if cloneStatus}<p role="status">{cloneStatus}</p>{/if}
+      </div>{/if}
     <div class="sidebar-foot">
       HTTPS microphone<br />Echo cancellation enabled<br />Listening pauses
       during replies
@@ -601,12 +1143,17 @@
               >{#if muted}<MicOff size={18} />{:else}<Mic
                   size={18}
                 />{/if}</button
-            ><span role="status">{status}</span
+            ><span class="call-status" role="status">{status}</span
             >{#if connected || starting}<button
                 class="hangup"
                 on:click={() => hangup()}><PhoneOff size={16} /> Hang up</button
-              >{:else}<button class="call" on:click={call}
-                ><Phone size={16} /> Start call</button
+              >{:else}<button
+                class="call"
+                disabled={!canCall ||
+                  discovering ||
+                  cloneRecording ||
+                  cloneBusy}
+                on:click={call}><Phone size={16} /> Start call</button
               >{/if}
           </div>
           {#if error}<p class="error" role="alert">{error}</p>{/if}
@@ -620,13 +1167,13 @@
           <dt>Audio</dt>
           <dd>Microphone + speaker</dd>
           <dt>Turn detection</dt>
-          <dd>Silero VAD</dd>
+          <dd>{selectedVad?.label || "—"}</dd>
           <dt>ASR</dt>
-          <dd>Audio8 0.1B</dd>
+          <dd>{selectedAsr?.label || "—"}</dd>
           <dt>LLM</dt>
-          <dd>LFM2.5 1.2B Q4_K_M</dd>
+          <dd>{llm || "—"}</dd>
           <dt>TTS</dt>
-          <dd>ZipVoice</dd>
+          <dd>{selectedTts?.label || "—"}</dd>
           <dt>Session</dt>
           <dd>{run || "—"}</dd>
         </dl>
@@ -649,14 +1196,14 @@
         <table>
           <thead
             ><tr
-              ><th>TIMESTAMP</th><th>SESSION</th><th>EVENT TYPE</th><th
-                >SUMMARY</th
-              ></tr
+              ><th>TIMESTAMP</th><th
+                title="Elapsed wall time for this operation">RUNTIME</th
+              ><th>EVENT TYPE</th><th>SUMMARY</th></tr
             ></thead
           ><tbody
             >{#each events as event}<tr
                 ><td>{new Date(event.time).toLocaleTimeString()}</td><td
-                  >{event.run}</td
+                  class="runtime">{runtimeLabel(event.runtimeMs)}</td
                 ><td
                   ><span
                     class:error-tag={event.type === "ERROR"}
@@ -677,18 +1224,17 @@
 <style>
   :global(body:has(.demo)) {
     margin: 0;
-    background: #090c10;
-    color: #e5e9ee;
+    background: var(--bg);
+    color: var(--text);
   }
   .demo {
-    --line: #242b34;
     display: grid;
     grid-template-columns: 290px 1fr;
     min-height: 100vh;
     font-family: Inter, system-ui, sans-serif;
     font-size: 13px;
-    background: #090c10;
-    color: #e5e9ee;
+    background: var(--bg);
+    color: var(--text);
   }
   .demo * {
     box-sizing: border-box;
@@ -704,24 +1250,23 @@
     align-items: center;
     gap: 12px;
     color: #fff;
-    text-decoration: none;
+    white-space: nowrap;
     font-size: 20px;
     font-weight: 650;
     margin-bottom: 35px;
   }
-  .brand small {
-    display: block;
-    color: #7d8998;
-    font-size: 9px;
-    letter-spacing: 2px;
-    margin-top: 3px;
+  .brand > span:last-child {
+    font: inherit;
+    text-transform: none;
+    letter-spacing: normal;
+    color: inherit;
   }
   .gv {
     width: 34px;
     height: 34px;
   }
   .section-label {
-    color: #83909f;
+    color: var(--muted);
     font-size: 10px;
     letter-spacing: 1.6px;
     margin: 16px 0;
@@ -734,7 +1279,7 @@
   }
   .demo label {
     display: block;
-    color: #b3bdc9;
+    color: var(--text-label);
     font-size: 11px;
     margin: 17px 0 5px;
   }
@@ -743,10 +1288,10 @@
   .demo textarea {
     display: block;
     width: 100%;
-    background: #11171e;
-    border: 1px solid #303b47;
+    background: var(--control-bg);
+    border: 1px solid var(--control-border);
     border-radius: 6px;
-    color: #e5e9ee;
+    color: var(--text);
     padding: 9px;
     margin-top: 7px;
     font: inherit;
@@ -757,7 +1302,7 @@
   }
   .demo small,
   .sidebar-foot {
-    color: #8995a4;
+    color: var(--muted);
     font-size: 11px;
     line-height: 1.7;
   }
@@ -789,14 +1334,14 @@
   }
   .badge {
     margin-left: 20px;
-    color: #8995a4;
+    color: var(--muted);
     font-size: 9px;
     letter-spacing: 1.5px;
   }
   .connection {
     font-size: 10px;
     letter-spacing: 1px;
-    color: #8b98a6;
+    color: var(--muted);
     display: flex;
     align-items: center;
     gap: 7px;
@@ -836,7 +1381,7 @@
   }
   .wave-label {
     text-align: center;
-    color: #7d8998;
+    color: var(--muted);
     font-size: 9px;
     letter-spacing: 1px;
   }
@@ -872,12 +1417,12 @@
   .empty {
     margin: auto;
     text-align: center;
-    color: #7d8998;
+    color: var(--muted);
   }
   .empty h1 {
     font-size: 21px;
     font-weight: 500;
-    color: #e0e7ef;
+    color: var(--text-strong);
   }
   .empty p {
     font-size: 13px;
@@ -885,13 +1430,13 @@
   .transcript article {
     max-width: 88%;
     padding: 12px 16px;
-    background: #111921;
+    background: var(--panel);
     border-radius: 10px;
     align-self: flex-start;
   }
   .transcript article.user {
     align-self: flex-end;
-    background: #1b2932;
+    background: var(--panel-2);
   }
   .transcript article small {
     font-size: 9px;
@@ -924,10 +1469,10 @@
     gap: 7px;
     align-items: center;
     justify-content: center;
-    border: 1px solid #303b47;
+    border: 1px solid var(--control-border);
     border-radius: 6px;
-    background: #18212b;
-    color: #e5e9ee;
+    background: var(--button-bg);
+    color: var(--text);
     padding: 9px 12px;
     font: inherit;
     cursor: pointer;
@@ -950,7 +1495,7 @@
     padding-top: 10px;
   }
   .controls span {
-    color: #91a1af;
+    color: var(--muted);
     font-size: 11px;
     flex: 1;
   }
@@ -976,7 +1521,7 @@
     font-size: 11px;
   }
   .details dt {
-    color: #7d8998;
+    color: var(--muted);
     margin-top: 22px;
   }
   .details dd {
@@ -984,7 +1529,7 @@
     overflow-wrap: anywhere;
   }
   .details p {
-    color: #7d8998;
+    color: var(--muted);
     font-size: 11px;
     line-height: 1.7;
     margin-top: 30px;
@@ -1005,7 +1550,7 @@
   }
   .events-title strong span {
     margin-left: 9px;
-    color: #7d8998;
+    color: var(--muted);
   }
   .events-title button {
     font-size: 11px;
@@ -1021,24 +1566,29 @@
     text-align: left;
     font-size: 11px;
     table-layout: fixed;
+    min-width: 640px;
   }
   .events th {
     position: sticky;
     top: 0;
-    background: #11151b;
-    color: #8894a2;
+    background: var(--panel);
+    color: var(--muted);
     font-size: 9px;
     letter-spacing: 1px;
     padding: 11px 20px;
   }
   .events td {
     padding: 10px 20px;
-    border-top: 1px solid #1b222b;
-    color: #aeb9c7;
+    border-top: 1px solid var(--line);
+    color: var(--text-subtle);
     overflow-wrap: anywhere;
   }
   .events th:first-child {
     width: 110px;
+  }
+  .events td.runtime {
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
   }
   .events th:nth-child(2) {
     width: 110px;
@@ -1064,7 +1614,7 @@
   }
   .no-events {
     padding: 15px 23px;
-    color: #7d8998;
+    color: var(--muted);
     font-size: 12px;
   }
   @media (max-width: 1050px) {
@@ -1110,10 +1660,6 @@
     }
     .session {
       padding: 12px;
-    }
-    .events th:nth-child(2),
-    .events td:nth-child(2) {
-      display: none;
     }
     .events th:nth-child(3) {
       width: 170px;

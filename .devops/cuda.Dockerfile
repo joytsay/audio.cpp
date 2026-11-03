@@ -31,6 +31,7 @@ COPY model_specs/ ./model_specs/
 COPY knowledge/ ./knowledge/
 COPY prompt.csv ./prompt.csv
 COPY hotword.csv ./hotword.csv
+COPY greetings.csv ./greetings.csv
 RUN npm --prefix webui/native run build
 
 # ── RAG.CPP: Static RAG / GraphRAG worker ────────────────────────────────────
@@ -340,10 +341,11 @@ COPY .devops/all-in-one-server.json /app/all-in-one-server.json
 COPY knowledge/ /app/knowledge/
 COPY prompt.csv /app/prompt.csv
 COPY hotword.csv /app/hotword.csv
+COPY greetings.csv /app/greetings.csv
 
 RUN chmod +x /app/all-in-one-entrypoint.sh && \
     mkdir -p /app/models /app/llama-models /app/rag-data /app/sip-data && \
-    chown -R ubuntu:ubuntu /app/sip-data /app/models /app/llama-models /app/rag-data /app/knowledge /app/prompt.csv /app/hotword.csv
+    chown -R ubuntu:ubuntu /app/sip-data /app/models /app/llama-models /app/rag-data /app/knowledge /app/prompt.csv /app/hotword.csv /app/greetings.csv
 
 USER ubuntu
 

@@ -5,6 +5,7 @@
 #include "engine/framework/io/json.h"
 
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <stdexcept>
 
@@ -42,6 +43,32 @@ int main() {
             const auto permissions = std::filesystem::status(saved).permissions();
             if ((permissions & (std::filesystem::perms::group_all | std::filesystem::perms::others_all)) != std::filesystem::perms::none)
                 throw std::runtime_error("SIP credentials are not private");
+        }
+        {
+            const auto root = std::filesystem::temp_directory_path() /
+                ("greetings-csv-test-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+            struct Cleanup { std::filesystem::path path; ~Cleanup() { std::filesystem::remove_all(path); } } cleanup{root};
+            std::filesystem::create_directories(root / "model_specs");
+            { std::ofstream initial(root / "greetings.csv"); initial << "greeting\nHello\n"; }
+            minitts::server::ServerConfig csv_config;
+            csv_config.backend = engine::core::BackendType::Cpu;
+            csv_config.ui_management = true;
+            minitts::server::ServerState csv_state(csv_config, root);
+            for (bool forwarded : {false, true}) {
+                minitts::server::HttpRequest request;
+                request.method = "POST";
+                request.path = "/v1/ui/greetings";
+                request.body = R"({"content":"greeting\nWelcome to GeoVision IVR\n"})";
+                const auto saved = forwarded ? csv_state.forward_to_core(request) : csv_state.handle(request);
+                if (saved.status != 200) throw std::runtime_error("greeting CSV save failed: " + saved.body);
+                request.method = "GET";
+                const auto loaded = forwarded ? csv_state.forward_to_core(request) : csv_state.handle(request);
+                if (loaded.status != 200 || engine::io::json::parse(loaded.body).require("content").as_string() !=
+                    "greeting\nWelcome to GeoVision IVR\n") throw std::runtime_error("greeting CSV roundtrip failed");
+                std::ifstream persisted(root / "greetings.csv");
+                if (std::string(std::istreambuf_iterator<char>(persisted), {}) != "greeting\nWelcome to GeoVision IVR\n")
+                    throw std::runtime_error("greeting CSV was not persisted");
+            }
         }
         minitts::server::ServerConfig config;
         config.backend = engine::core::BackendType::Cpu;
@@ -110,7 +137,7 @@ int main() {
         minitts::server::ServerState live(live_config, std::filesystem::current_path());
         // The shared dispatcher must retain dev's routes and their UI guards.
         for (bool forwarded : {false, true}) {
-            for (const std::string path : {"/v1/ui/voices", "/v1/ui/knowledge", "/v1/ui/prompt", "/v1/ui/hotword"}) {
+            for (const std::string path : {"/v1/ui/voices", "/v1/ui/knowledge", "/v1/ui/prompt", "/v1/ui/hotword", "/v1/ui/greetings"}) {
                 minitts::server::HttpRequest request;
                 request.method = "POST";
                 request.path = path;

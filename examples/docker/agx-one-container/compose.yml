@@ -51,6 +51,7 @@ services:
       - audiocpp-sip-data:/app/sip-data
       - ../../../voices:/app/voices
       - ../../../prompt.csv:/app/prompt.csv
+      - ../../../greetings.csv:/app/greetings.csv
       - ../../../hotword.csv:/app/hotword.csv
       # Runtime-only routing changes must not require recompiling the native binaries.
       - ../../../.devops/all-in-one-entrypoint.sh:/app/all-in-one-entrypoint.sh:ro
