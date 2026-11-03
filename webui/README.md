@@ -84,6 +84,35 @@ voice for reuse. Cancel recording preserves the previous reference. Recording a 
 continuous conversation listening; restart listening in the composer when ready.
 Conversation history lasts until New conversation or page navigation.
 
+Pipeline also includes **情境 2：現場維修保養後的語音回報**. Expand the scenario and
+choose **開始文字模擬**, then **Send text** for the first maintenance report. Use
+**填入本輪測試文字** after each reply to submit the paired spare-part notes and the
+final startup-test confirmation. **預期確認內容** shows the requested reference
+reply; the actual conversation still uses the configured LLM and carries all
+previous turns. You can edit the message, or select a script and record/upload
+its audio to exercise ASR. Edited or recognized messages do not automatically
+advance the reference script; select the next script manually.
+
+The demo loads a temporary maintenance prompt and terminology list. It starts
+with speech playback off; select **播放 AI 語音** to use the configured TTS and
+reference voice. Displayed identifiers, serial numbers, dates, and capacitance
+values retain their digits; only TTS input is converted to spoken Chinese.
+**離開情境** or **New conversation** restores the prior prompt and preferences.
+This is a conversation simulation and does not save a work order.
+
+Regression checks:
+
+```bash
+node --experimental-strip-types webui/native/tests/maintenance-scenario.mjs
+UI_BROWSER_TOOLS=/path/to/browser-tools UI_BROWSER_EXECUTABLE=/usr/bin/chromium \
+  node --experimental-strip-types webui/native/tests/maintenance-pipeline.mjs
+```
+
+The browser check expects the WebUI at `http://127.0.0.1:4173/#/pipeline` (override
+with `UI_BASE_URL`) and a Playwright installation in `UI_BROWSER_TOOLS`. Its HTTP
+fixtures verify conversation history, exact displayed data, separate TTS input,
+restoration of settings, and retry behavior without real model weights.
+
 Uploaded request files use a per-process temporary directory and are deleted when the server exits.
 Saved voices remain in the current browser profile and are only uploaded when selected for a request.
 

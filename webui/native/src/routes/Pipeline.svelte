@@ -5,6 +5,7 @@
   import { recognitionContext } from '$lib/asr-context';
   import { verifiedTransferReply } from '$lib/receptionist-routing';
   import { spokenExtensionText } from '$lib/receptionist-text';
+  import { maintenanceScenarioSteps, maintenanceScenarioPrompt, maintenanceScenarioHotwords, maintenanceSpeechText } from '$lib/maintenance-scenario';
   import { catalog } from '$lib/catalog';
   import MediaPreview from '$lib/MediaPreview.svelte';
   import { apiEndpoint, chatText, endpointBlob, endpointJson, endpointModels, endpointRouterModels, formatChatMessages, routerEndpoint, siblingWorkerEndpoint, type ChatMessage, type OpenAIModel } from '$lib/openai';
@@ -180,6 +181,14 @@
     resetMicrophoneBuffers();
     turns = [];
     chatHistory = [];
+    maintenanceScenarioActive = false;
+    maintenanceScenarioStep = 0;
+    if (maintenancePreviousSettings) {
+      ({ systemPrompt, promptMode, useLlm, useTts, temperature, maxTokens, asrContext, useHotwords } = maintenancePreviousSettings);
+      maintenancePreviousSettings = null;
+      textInput = '';
+      save();
+    }
     outputUrl = '';
     stage = 'idle';
     stageRuntimes = {};
@@ -188,6 +197,36 @@
   let systemPrompt = systemPromt.trim();
   $: referenceTranscriptPlaceholder = systemPrompt.split(/\r?\n/)[0]?.trim() || systemPromt.split(/\r?\n/)[0].trim();
   let promptMode: PromptMode = 'system';
+  let maintenanceScenarioActive = false;
+  let maintenanceScenarioStep = 0;
+  let maintenancePreviewStep = 0;
+  let maintenancePreviousSettings: {
+    systemPrompt: string; promptMode: PromptMode; useLlm: boolean; useTts: boolean;
+    temperature: number; maxTokens: number; asrContext: string; useHotwords: boolean;
+  } | null = null;
+  function startMaintenanceScenario() {
+    clearConversation();
+    maintenancePreviousSettings = { systemPrompt, promptMode, useLlm, useTts, temperature, maxTokens, asrContext, useHotwords };
+    maintenanceScenarioActive = true;
+    maintenanceScenarioStep = 0;
+    maintenancePreviewStep = 0;
+    systemPrompt = maintenanceScenarioPrompt;
+    promptMode = 'system';
+    useLlm = true;
+    useTts = false;
+    temperature = 0;
+    maxTokens = Math.max(maxTokens, 1024);
+    asrContext = maintenanceScenarioHotwords;
+    useHotwords = true;
+    textInput = maintenanceScenarioSteps[0].message;
+    status = '已載入第 1 輪維修回報，請按 Send text。需要語音時可勾選「播放 AI 語音」。';
+    save();
+  }
+  function fillMaintenanceStep() {
+    if (maintenanceScenarioStep >= maintenanceScenarioSteps.length) return;
+    maintenancePreviewStep = maintenanceScenarioStep;
+    textInput = maintenanceScenarioSteps[maintenanceScenarioStep].message;
+  }
   let useLlm = true;
   let useTts = true;
   let temperature = 0.2;
@@ -364,6 +403,7 @@
   }
 
   function save() {
+    if (maintenanceScenarioActive) return;
     localStorage.setItem('audiocpp.conversation.settings', JSON.stringify({
       promptDefaultsVersion: 2, vadModel, sileroVadSettings, vadUseLongestSilence, sttModel, llmModel, ttsModel,
       audioBaseUrl, llmBaseUrl, asrContext, useHotwords, language, promptMode,
@@ -404,6 +444,7 @@
       endpointJson<{ content: string }>(audioBaseUrl, 'ui/prompt'),
       endpointJson<{ content: string }>(audioBaseUrl, 'ui/hotword')
     ]);
+    if (maintenanceScenarioActive) return;
     if (results[0].status === 'fulfilled') systemPrompt = results[0].value.content;
     if (results[1].status === 'fulfilled') {
       const context = asrContextFromCsv(results[1].value.content);
@@ -1075,6 +1116,8 @@
     turnInput = input;
     turnFromMicrophone = input === 'audio' && sourceFromMicrophone;
     const submittedText = input === 'text' ? textInput.trim() : '';
+    const maintenanceTurn = maintenanceScenarioActive;
+    const submittedMaintenanceStep = maintenanceScenarioStep;
     if (input === 'text') textInput = '';
     aborter?.abort();
     aborter = new AbortController();
@@ -1160,7 +1203,9 @@
           body: JSON.stringify({ model: llmModel, messages, temperature, max_tokens: maxTokens, stream: false }),
           signal: aborter.signal
         }, aborter.signal);
-        llmResponse = spokenExtensionText(verifiedTransferReply(traditionalChineseText(chatText(llm)), transcript, systemPrompt, submittedExampleName));
+        const reply = traditionalChineseText(chatText(llm));
+        llmResponse = maintenanceTurn ? reply
+          : spokenExtensionText(verifiedTransferReply(reply, transcript, systemPrompt, submittedExampleName));
 
         // Jetson uses unified memory. Release the LLM worker before the TTS
         // worker creates its CUDA/cuBLAS context for this sequential pipeline.
@@ -1177,12 +1222,18 @@
         llmResponse = transcript;
       }
 
+      if (!llmResponse.trim()) throw new Error('The language model returned an empty reply.');
       chatHistory = [...chatHistory, { role: 'user', content: transcript }, { role: 'assistant', content: llmResponse }];
+      if (maintenanceTurn && submittedMaintenanceStep < maintenanceScenarioSteps.length &&
+          transcript.trim() === maintenanceScenarioSteps[submittedMaintenanceStep].message.trim()) {
+        maintenanceScenarioStep = submittedMaintenanceStep + 1;
+        maintenancePreviewStep = Math.min(maintenanceScenarioStep, maintenanceScenarioSteps.length - 1);
+      }
 
       if (useTts) {
         step('tts', 'Synthesizing the response…');
         const voiceModel = await ensureAudioModel(ttsModel, aborter.signal);
-        const speechBody: Record<string, unknown> = { model: voiceModel.modelId, input: llmResponse, response_format: 'wav' };
+        const speechBody: Record<string, unknown> = { model: voiceModel.modelId, input: maintenanceTurn ? maintenanceSpeechText(llmResponse) : llmResponse, response_format: 'wav' };
         if (cloneVoiceFile && supportsVoiceClone) {
           if (['qwen3_tts', 'zipvoice'].includes(voiceModel.family || '') && !cloneReferenceText.trim()) {
             throw new Error('Voice cloning requires the matching reference transcript.');
@@ -1347,7 +1398,7 @@
     {/if}
     <div class="pipeline-input">
     <div class="section-title"><div><span>INPUT</span><h2>Instructions</h2></div></div>
-    <label>LLM Knowledge Base<select bind:value={promptMode} on:change={save}><option value="system">System prompt (prompt.csv)</option><option value="rag">Regular RAG (hybrid retrieval)</option><option value="graphrag">GraphRAG (knowledge graph)</option></select></label>
+    <label>LLM Knowledge Base<select bind:value={promptMode} on:change={save} disabled={maintenanceScenarioActive}><option value="system">System prompt (prompt.csv)</option><option value="rag">Regular RAG (hybrid retrieval)</option><option value="graphrag">GraphRAG (knowledge graph)</option></select></label>
     {#if promptMode === 'system'}
       <label>System prompt (prompt.csv)<textarea bind:value={systemPrompt} rows="6"></textarea></label>
       <div class="prompt-actions"><button on:click={saveSystemPromptCsv}>Save CSV</button></div>
@@ -1367,6 +1418,30 @@
 
   <section class="panel page-panel pipeline-results conversation-panel">
     <div class="section-title"><div><span>CHATBOT</span><h2>Conversation</h2></div><button disabled={running || !turns.length} on:click={clearConversation}>New conversation</button></div>
+    <details class="maintenance-scenario" open={maintenanceScenarioActive}>
+      <summary>情境 2：現場維修保養後的語音回報</summary>
+      <p class="field-help">三輪對話模擬：維修回報 → 備註確認 → 起機測試。使用實際 LLM 回覆，不會寫入工單系統。</p>
+      <button disabled={running || microphoneListening || microphoneStarting || cloneRecordingBusy} on:click={startMaintenanceScenario}>
+        {maintenanceScenarioActive ? '重新開始文字模擬' : '開始文字模擬'}
+      </button>
+      {#if maintenanceScenarioActive}
+        <label class="scenario-voice-toggle"><input type="checkbox" bind:checked={useTts} disabled={running} />播放 AI 語音</label>
+        <button disabled={running || microphoneListening || microphoneStarting} on:click={clearConversation}>離開情境</button>
+        <p role="status">{maintenanceScenarioStep >= maintenanceScenarioSteps.length ? '三輪測試訊息已送出，請核對 AI 回覆。' : `第 ${maintenanceScenarioStep + 1} / 3 輪：${maintenanceScenarioSteps[maintenanceScenarioStep].title}`}</p>
+        <p class="field-help">按 Send text 測試本輪，完成後填入下一輪。也可以依腳本錄音或上傳音檔測試 ASR，並手動選擇下一輪腳本。文字模擬預設不播放語音；勾選「播放 AI 語音」即可聆聽 AI 回覆。</p>
+        <label for="maintenance-script">對話腳本</label>
+        <select id="maintenance-script" bind:value={maintenancePreviewStep} disabled={running}>
+          {#each maintenanceScenarioSteps as step, index}<option value={index}>{index + 1}. {step.title}</option>{/each}
+        </select>
+        <pre>{maintenanceScenarioSteps[maintenancePreviewStep].message}</pre>
+        <details><summary>預期確認內容</summary><pre>{maintenanceScenarioSteps[maintenancePreviewStep].expected}</pre></details>
+        <button disabled={running || maintenanceScenarioStep >= maintenanceScenarioSteps.length} on:click={fillMaintenanceStep}>填入本輪測試文字</button>
+        <button disabled={running} on:click={() => {
+          maintenanceScenarioStep = maintenancePreviewStep;
+          fillMaintenanceStep();
+        }}>填入所選腳本</button>
+      {/if}
+    </details>
     <div class="conversation-turns" bind:this={conversationLog} role="log" aria-label="Voice conversation">
       {#each turns as turn, index (turn.id)}
         <div class="conversation-turn">
@@ -1446,6 +1521,13 @@
 </div>
 
 <style>
+  .maintenance-scenario { margin-top: 14px; padding: 14px; border: 1px solid var(--line); border-radius: 10px; }
+  .maintenance-scenario > summary { cursor: pointer; font-weight: 600; }
+  .maintenance-scenario pre { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; font-size: 13px; line-height: 1.65; }
+  .maintenance-scenario button { margin: 8px 8px 0 0; }
+  .maintenance-scenario .scenario-voice-toggle { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
+  .maintenance-scenario .scenario-voice-toggle input { width: auto; margin: 0; }
+
   .reference-recording-actions { flex-wrap: wrap; }
   .reference-recording-actions .microphone-toggle { padding: 7px; font-size: inherit; }
   .reference-playback { margin-top: 12px; }
