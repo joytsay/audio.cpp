@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, onDestroy } from "svelte";
+  import { onMount, onDestroy, tick } from "svelte";
   import { Mic, MicOff, Phone, PhoneOff, Send, Trash2 } from "@lucide/svelte";
   import logo from "../../../static/logo_cloud.svg?raw";
   import "../../app.css";
@@ -7,6 +7,17 @@
   import { readGreetingCsv, writeGreetingCsv } from "$lib/greetings";
   import { recognitionContext } from "$lib/asr-context";
   import { uploadWav } from "$lib/api";
+  import {
+    maintenanceScenarioSteps,
+    maintenanceScenarioPrompt,
+    maintenanceSpeechText,
+  } from "$lib/maintenance-scenario";
+  import centralAudio from "../../../../../assets/resources/中央監控站2.mp3?url";
+  import controlAudio from "../../../../../assets/resources/中控室.mp3?url";
+  import employeeAudio from "../../../../../assets/resources/員工檢查哨.mp3?url";
+  import lobbyAudio from "../../../../../assets/resources/大廳.mp3?url";
+  import vehicleAudio from "../../../../../assets/resources/車輛檢查哨.mp3?url";
+
   import {
     endpointJson,
     endpointBlob,
@@ -27,6 +38,29 @@
     summary: string;
     runtimeMs?: number | null;
   };
+  let scenarioMode: "audio" | "maintenance" = "audio";
+  let scenarioFile: File | null = null,
+    scenarioAudioName = "",
+    scenarioStatus = "";
+  let transcriptElement: HTMLDivElement | null = null;
+  $: if (messages.length) void scrollTranscript(messages.length);
+  async function scrollTranscript(_count: number) {
+    await tick();
+    if (transcriptElement)
+      transcriptElement.scrollTop = transcriptElement.scrollHeight;
+  }
+  let scenarioRunning = false,
+    scenarioStep = 0,
+    scenarioToken = 0;
+  let playbackRole: "assistant" | "technician" = "assistant";
+  const scenarioAudioExamples = [
+    { name: "中央監控站2.mp3", url: centralAudio },
+    { name: "中控室.mp3", url: controlAudio },
+    { name: "員工檢查哨.mp3", url: employeeAudio },
+    { name: "大廳.mp3", url: lobbyAudio },
+    { name: "車輛檢查哨.mp3", url: vehicleAudio },
+  ];
+  $: technicianVoice = voiceChoices.find((id) => id !== voice) || "";
   let events: Event[] = [],
     messages: ChatMessage[] = [];
   let connected = false,
@@ -44,6 +78,12 @@
     asrKey = "",
     ttsKey = "",
     llm = "";
+  let useVad = true,
+    useAsr = true,
+    useLlm = true,
+    useTts = true;
+  let manualRecording = false,
+    manualParts: Float32Array[] = [];
   let discovering = false,
     modelError = "";
   $: vadModels = audioModels.filter((m) => m.task === "vad");
@@ -53,13 +93,34 @@
   $: selectedAsr = audioModels.find((m) => m.key === asrKey);
   $: selectedTts = audioModels.find((m) => m.key === ttsKey);
   $: canCall = !!(
-    selectedVad &&
-    selectedAsr &&
-    selectedTts &&
-    llm &&
-    filesReady &&
-    greeting.trim()
+    (!useAsr || (selectedAsr && (!useVad || selectedVad))) &&
+    (!useLlm || llm) &&
+    (!useTts || (selectedTts && greeting.trim())) &&
+    ((!useLlm && !useTts) || filesReady)
   );
+  function idleStatus() {
+    return !useAsr
+      ? "Ready for text"
+      : muted
+        ? "Microphone muted"
+        : !useVad
+          ? "Ready · record a voice turn"
+          : "Listening";
+  }
+  function toggleManualTurn() {
+    if (!connected || !useAsr || useVad || busy || muted || !context) return;
+    if (!manualRecording) {
+      manualParts = [];
+      manualRecording = true;
+      status = "Recording voice turn…";
+      return;
+    }
+    const parts = manualParts;
+    manualParts = [];
+    manualRecording = false;
+    if (parts.length) void respond("", wav(parts, context));
+    else status = idleStatus();
+  }
   async function refreshModels() {
     discovering = true;
     modelError = "";
@@ -144,7 +205,7 @@
     selectedTts?.task === "clon" ||
     ["audio8_tts", "voxcpm1", "qwen3_tts"].includes(selectedTts?.family || "");
   $: scheduleGreeting(
-    mounted && filesReady,
+    mounted && filesReady && useTts,
     connected || starting,
     ttsKey,
     voice,
@@ -325,7 +386,12 @@
       if (epoch === generation) detecting = false;
     }
   }
-  async function respond(text: string, audio?: Blob, generation = epoch) {
+  async function respond(
+    text: string,
+    audio?: Blob,
+    generation = epoch,
+    options: { speakTechnician?: boolean; playInputAudio?: boolean } = {},
+  ) {
     const signal = controller?.signal;
     if (!connected || busy || !signal) return;
     busy = true;
@@ -334,7 +400,12 @@
     const turnStarted = performance.now();
     let operationStarted = turnStarted;
     try {
-      if (audio) {
+      if (audio && options.playInputAudio) {
+        await playAudio(audio, generation, "technician");
+        if (signal.aborted || generation !== epoch) return;
+        operationStarted = performance.now();
+      }
+      if (audio && useAsr) {
         const asrId = await load(asrKey, signal);
         const path = await uploadWav(
           await browserDecodeToWav(new File([audio], "turn.wav"), 16000, 1),
@@ -379,58 +450,109 @@
       if (generation !== epoch) return;
       messages = [...messages, { role: "user", content: text }];
       record("CONVERSATION_ITEM_ADDED", `USER · ${text}`);
-      status = "Thinking";
-      record("AGENT_STATE_CHANGED", "listening → thinking");
-      operationStarted = performance.now();
-      const response = await endpointJson<any>(
-        llmBase(),
-        "chat/completions",
-        {
-          method: "POST",
-          body: JSON.stringify({
-            model: llm,
-            messages: [{ role: "system", content: prompt }, ...messages],
-            max_tokens: 256,
-            temperature: 0.4,
-            stream: false,
-          }),
-        },
-        signal,
-      );
-      const reply = chatText(response).trim();
-      if (!reply)
-        throw new Error("The language model returned an empty reply.");
-      if (generation !== epoch) return;
-      record("LLM_COMPLETED", llm, performance.now() - operationStarted);
+      if (options.speakTechnician && useTts) {
+        if (!technicianVoice)
+          throw new Error(
+            "Choose a TTS model with two built-in voices for the scenario.",
+          );
+        operationStarted = performance.now();
+        const id = await load(ttsKey, signal);
+        status = "Synthesizing technician voice";
+        const audio = await endpointBlob(
+          "",
+          "audio/speech",
+          {
+            model: id,
+            input: maintenanceSpeechText(text),
+            voice: technicianVoice,
+            response_format: "wav",
+          },
+          signal,
+        );
+        record(
+          "TECHNICIAN_TTS_COMPLETED",
+          technicianVoice,
+          performance.now() - operationStarted,
+        );
+        const wallMs = await playAudio(audio, generation, "technician");
+        if (signal.aborted || generation !== epoch) return;
+        record("TECHNICIAN_PLAYED", text, wallMs);
+      }
+
+      let reply = text;
+      if (useLlm) {
+        status = "Thinking";
+        record("AGENT_STATE_CHANGED", "listening → thinking");
+        operationStarted = performance.now();
+        const response = await endpointJson<any>(
+          llmBase(),
+          "chat/completions",
+          {
+            method: "POST",
+            body: JSON.stringify({
+              model: llm,
+              messages: [
+                {
+                  role: "system",
+                  content: options.speakTechnician
+                    ? maintenanceScenarioPrompt
+                    : prompt,
+                },
+                ...messages,
+              ],
+              max_tokens: 256,
+              temperature: 0.4,
+              stream: false,
+            }),
+          },
+          signal,
+        );
+        reply = chatText(response).trim();
+        if (!reply)
+          throw new Error("The language model returned an empty reply.");
+        if (generation !== epoch) return;
+        record("LLM_COMPLETED", llm, performance.now() - operationStarted);
+      } else record("LLM_SKIPPED", "Input text passed through");
+      if (!useLlm && !useTts) {
+        record("TTS_SKIPPED", "Text output only");
+        record(
+          "TURN_COMPLETED",
+          "Transcription/text turn complete",
+          performance.now() - turnStarted,
+        );
+        return;
+      }
       messages = [...messages, { role: "assistant", content: reply }];
       record("CONVERSATION_ITEM_ADDED", `ASSISTANT · ${reply}`);
-      operationStarted = performance.now();
-      const ttsId = await load(ttsKey, signal);
-      status = "Synthesizing";
-      const body: Record<string, unknown> = {
-        model: ttsId,
-        input: reply,
-        response_format: "wav",
-      };
-      if (referencePath && supportsReference) {
-        body.voice_ref = referencePath;
-        body.reference_text = referenceText;
-      } else {
-        body.voice = voice;
-        if (supportsReference && referenceText.trim())
-          body.reference_text = referenceText.trim();
-      }
-      const output = await endpointBlob("", "audio/speech", body, signal);
-      if (generation !== epoch) return;
-      record(
-        "TTS_COMPLETED",
-        selectedTts?.label || "Speech synthesized",
-        performance.now() - operationStarted,
-      );
-      operationStarted = performance.now();
-      const playbackMs = await playAudio(output, generation);
-      if (generation !== epoch) return;
-      record("PLAYBACK_COMPLETED", "Assistant reply played", playbackMs);
+      if (useTts) {
+        operationStarted = performance.now();
+        const ttsId = await load(ttsKey, signal);
+        status = "Synthesizing";
+        const body: Record<string, unknown> = {
+          model: ttsId,
+          input: options.speakTechnician ? maintenanceSpeechText(reply) : reply,
+          response_format: "wav",
+        };
+        if (referencePath && supportsReference) {
+          body.voice_ref = referencePath;
+          body.reference_text = referenceText;
+        } else {
+          body.voice = voice;
+          if (supportsReference && referenceText.trim())
+            body.reference_text = referenceText.trim();
+        }
+        const output = await endpointBlob("", "audio/speech", body, signal);
+        if (generation !== epoch) return;
+        record(
+          "TTS_COMPLETED",
+          selectedTts?.label || "Speech synthesized",
+          performance.now() - operationStarted,
+        );
+        operationStarted = performance.now();
+        const playbackMs = await playAudio(output, generation);
+        if (generation !== epoch || signal.aborted) return;
+        record("PLAYBACK_COMPLETED", "Assistant reply played", playbackMs);
+      } else record("TTS_SKIPPED", "Text response only");
       record(
         "TURN_COMPLETED",
         audio ? "Voice turn complete" : "Text turn complete",
@@ -443,7 +565,7 @@
       if (generation === epoch) {
         busy = false;
         reset();
-        if (!error) status = muted ? "Microphone muted" : "Listening";
+        if (!error) status = idleStatus();
       }
     }
   }
@@ -472,7 +594,7 @@
       );
       greeting = readGreetingCsv(saved.content);
       fileStatus = "Saved greetings.csv";
-      await prepareGreeting();
+      if (useTts) await prepareGreeting();
     } catch (cause) {
       fileStatus = `Greeting save failed: ${cause instanceof Error ? cause.message : cause}`;
     } finally {
@@ -496,6 +618,7 @@
   async function playAudio(
     output: Blob,
     generation: number,
+    role: "assistant" | "technician" = "assistant",
   ): Promise<number | null> {
     const started = performance.now();
     if (generation !== epoch || !context) return null;
@@ -509,8 +632,14 @@
     analyser.connect(context.destination);
     player = node;
     speaking = true;
-    status = "Speaking";
-    record("AGENT_STATE_CHANGED", "thinking → speaking");
+    playbackRole = role;
+    status = role === "technician" ? "Technician speaking" : "Speaking";
+    record(
+      role === "technician"
+        ? "TECHNICIAN_STATE_CHANGED"
+        : "AGENT_STATE_CHANGED",
+      "thinking → speaking",
+    );
     await new Promise<void>((resolve) => {
       node.onended = () => resolve();
       node.start();
@@ -521,7 +650,14 @@
       speaking = false;
       player = null;
       analyser = null;
-      record("AGENT_STATE_CHANGED", "speaking → listening");
+      record(
+        role === "technician"
+          ? "TECHNICIAN_STATE_CHANGED"
+          : "AGENT_STATE_CHANGED",
+        "speaking → listening",
+      );
+      if (role === "technician") inputBars = Array(36).fill(2);
+      playbackRole = "assistant";
       return performance.now() - started;
     }
     return null;
@@ -548,7 +684,12 @@
     cloning: boolean,
   ) {
     clearTimeout(greetingTimer);
-    if (!ready || inCall) return;
+    if (!ready) {
+      greetingAborter?.abort();
+      if (mounted && !useTts) greetingStatus = "TTS is off · greeting skipped";
+      return;
+    }
+    if (inCall) return;
     if (cloning) {
       greetingAborter?.abort();
       return;
@@ -560,11 +701,14 @@
     )
       return;
     const key = greetingFingerprint();
+    if (key === preparedKey) {
+      greetingStatus = "Greeting ready · instant playback";
+      return;
+    }
     if (
-      key === preparedKey ||
-      (key === preparingKey &&
-        greetingPreparing &&
-        !greetingAborter?.signal.aborted)
+      key === preparingKey &&
+      greetingPreparing &&
+      !greetingAborter?.signal.aborted
     )
       return;
     greetingAborter?.abort();
@@ -574,7 +718,7 @@
   }
   async function prepareGreeting(): Promise<Blob | null> {
     const key = greetingFingerprint();
-    if (!greeting.trim()) return null;
+    if (!useTts || !greeting.trim()) return null;
     if (preparedKey === key && preparedGreeting) return preparedGreeting;
     if (
       preparingKey === key &&
@@ -597,7 +741,7 @@
           input: greeting,
           response_format: "wav",
         };
-        if (voiceFile && supportsReference) {
+        if (useTts && voiceFile && supportsReference) {
           if (!referenceText.trim())
             throw new Error("Enter the reference transcript first.");
           body.voice_ref = await uploadWav(
@@ -692,7 +836,9 @@
     referencePath = "";
     referenceText = file ? "" : defaultReferenceText;
     cloneStatus = "";
-    if (file && asrKey) void transcribeReference(file);
+    if (file && useAsr && asrKey) void transcribeReference(file);
+    else if (file)
+      cloneStatus = "ASR is off · enter the reference transcript manually";
   }
   async function startCloneRecording() {
     if (connected || starting || cloneRecording || cloneBusy) return;
@@ -743,11 +889,93 @@
       cloneBusy = false;
     }
   }
+  async function selectScenarioExample(example: { name: string; url: string }) {
+    try {
+      const response = await fetch(example.url);
+      if (!response.ok)
+        throw new Error(`Example audio failed: ${response.status}`);
+      scenarioFile = new File([await response.blob()], example.name, {
+        type: "audio/mpeg",
+      });
+      scenarioAudioName = example.name;
+      scenarioStatus = "Example audio ready";
+    } catch (cause) {
+      scenarioStatus = cause instanceof Error ? cause.message : String(cause);
+    }
+  }
+  async function runScenario(stepOnly?: number) {
+    if (scenarioRunning || busy || detecting || starting) return;
+    if (scenarioMode === "audio" && (!scenarioFile || !useAsr)) return;
+    if (scenarioMode === "maintenance" && useTts && !technicianVoice) {
+      scenarioStatus = "Two built-in voices are required.";
+      return;
+    }
+    const token = ++scenarioToken;
+    scenarioRunning = true;
+    error = "";
+    scenarioStatus = "Starting scenario…";
+    try {
+      if (!connected) await call();
+      if (!connected || token !== scenarioToken) return;
+      if (scenarioMode === "audio") {
+        await respond("", scenarioFile!, epoch, { playInputAudio: true });
+        if (!error) scenarioStatus = "Scenario 1 complete";
+      } else {
+        if (stepOnly === undefined) {
+          messages = [];
+          scenarioStep = 0;
+        }
+        const first = stepOnly ?? 0,
+          last =
+            stepOnly === undefined
+              ? maintenanceScenarioSteps.length
+              : first + 1;
+        for (let index = first; index < last; index++) {
+          if (!connected || token !== scenarioToken) break;
+          scenarioStep = index;
+          scenarioStatus = `Scenario 2 · ${index + 1}/3 · ${maintenanceScenarioSteps[index].title}`;
+          input = maintenanceScenarioSteps[index].message;
+          await tick();
+          if (token !== scenarioToken || !connected) break;
+          const text = input;
+          input = "";
+          await respond(text, undefined, epoch, { speakTechnician: true });
+          if (error || token !== scenarioToken) break;
+          scenarioStep = index + 1;
+        }
+        if (!error && token === scenarioToken)
+          scenarioStatus =
+            stepOnly === undefined ? "Scenario 2 complete" : "Turn complete";
+      }
+      if (error) scenarioStatus = error;
+    } finally {
+      if (token === scenarioToken) {
+        scenarioRunning = false;
+        if (!busy && connected) status = idleStatus();
+      }
+    }
+  }
+  function stopScenario() {
+    if (starting) {
+      hangup();
+      scenarioStatus = "Scenario stopped";
+      return;
+    }
+    scenarioToken++;
+    scenarioRunning = false;
+    controller?.abort();
+    if (connected) controller = new AbortController();
+    if (player) player.stop();
+    scenarioStatus = "Scenario stopped";
+    reset();
+  }
   function send() {
     const text = input.trim();
-    if (!text || busy || detecting || !connected) return;
+    if (!text || busy || detecting || scenarioRunning || !connected) return;
     input = "";
-    void respond(text);
+    void respond(text, undefined, epoch, {
+      speakTechnician: scenarioMode === "maintenance",
+    });
   }
   async function call() {
     if (connected || starting || !canCall || cloneRecording || cloneBusy)
@@ -760,29 +988,31 @@
     messages = [];
     controller = new AbortController();
     try {
-      if (!window.isSecureContext || !navigator.mediaDevices)
+      if (useAsr && (!window.isSecureContext || !navigator.mediaDevices))
         throw new Error(
           "Open this page over trusted HTTPS to use the microphone.",
         );
       context = new AudioContext();
       await context.resume();
-      const acquired = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-        },
-      });
-      if (epoch !== generation) {
-        acquired.getTracks().forEach((t) => t.stop());
-        return;
+      if (useAsr) {
+        const acquired = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+          },
+        });
+        if (epoch !== generation) {
+          acquired.getTracks().forEach((t) => t.stop());
+          return;
+        }
+        stream = acquired;
       }
-      stream = acquired;
       if (!canCall)
         throw new Error(
           "Choose an installed model for each stage before calling.",
         );
-      if (voiceFile && supportsReference) {
+      if (useTts && voiceFile && supportsReference) {
         if (!referenceText.trim())
           throw new Error("Enter the matching reference voice transcript.");
         referencePath = await uploadWav(
@@ -791,58 +1021,79 @@
         );
       } else referencePath = "";
       if (epoch !== generation || !context) return;
-      source = context.createMediaStreamSource(stream);
-      processor = context.createScriptProcessor(4096, 1, 1);
-      gain = context.createGain();
-      gain.gain.value = 0;
-      source.connect(processor);
-      processor.connect(gain);
-      gain.connect(context.destination);
+      if (useAsr && stream) {
+        source = context.createMediaStreamSource(stream!);
+        processor = context.createScriptProcessor(4096, 1, 1);
+        gain = context.createGain();
+        gain.gain.value = 0;
+        source.connect(processor);
+        processor.connect(gain);
+        gain.connect(context.destination);
+      }
       connected = true;
       muted = false;
-      status = "Listening";
+      status = idleStatus();
       record(
         "SESSION_STARTED",
-        "Microphone connected · echo cancellation enabled",
+        useAsr
+          ? "Microphone connected · echo cancellation enabled"
+          : "Text input · ASR skipped",
       );
-      busy = !!greeting.trim();
-      processor.onaudioprocess = (e) => {
-        const samples = new Float32Array(e.inputBuffer.getChannelData(0));
-        inputBars = muted ? Array(36).fill(2) : bars(samples);
-        if (muted || busy || speaking) {
-          windows = [];
-          frames = 0;
-          return;
-        }
-        windows.push(samples);
-        frames += samples.length;
-        if (
-          !detecting &&
-          context &&
-          frames >= (context.sampleRate * windowMs) / 1000
-        ) {
-          const combined = new Float32Array(frames);
-          let offset = 0;
-          for (const p of windows) {
-            combined.set(p, offset);
-            offset += p.length;
+      busy = useTts && !!greeting.trim();
+      if (processor)
+        processor.onaudioprocess = (e) => {
+          const samples = new Float32Array(e.inputBuffer.getChannelData(0));
+          if (!(speaking && playbackRole === "technician"))
+            inputBars = muted ? Array(36).fill(2) : bars(samples);
+          if (muted || busy || speaking || scenarioRunning) {
+            windows = [];
+            frames = 0;
+            return;
           }
-          windows = [];
-          frames = 0;
-          void detect(combined, generation);
-        }
-      };
+          if (!useVad) {
+            if (manualRecording) {
+              manualParts.push(samples);
+              if (
+                context &&
+                manualParts.reduce((n, p) => n + p.length, 0) >=
+                  context.sampleRate * 15
+              )
+                toggleManualTurn();
+            }
+            return;
+          }
+          windows.push(samples);
+          frames += samples.length;
+          if (
+            !detecting &&
+            context &&
+            frames >= (context.sampleRate * windowMs) / 1000
+          ) {
+            const combined = new Float32Array(frames);
+            let offset = 0;
+            for (const p of windows) {
+              combined.set(p, offset);
+              offset += p.length;
+            }
+            windows = [];
+            frames = 0;
+            void detect(combined, generation);
+          }
+        };
       const draw = () => {
         if (!connected) return;
         if (analyser && speaking) {
           const data = new Float32Array(analyser.fftSize);
           analyser.getFloatTimeDomainData(data);
-          outputBars = bars(data);
+          if (playbackRole === "technician") {
+            inputBars = bars(data);
+            outputBars = Array(36).fill(2);
+          } else outputBars = bars(data);
         } else outputBars = Array(36).fill(2);
         animation = requestAnimationFrame(draw);
       };
       draw();
-      if (greeting.trim()) {
+      if (useTts && greeting.trim()) {
         record("GREETING_REQUESTED", greeting);
         const audio = await prepareGreeting();
         if (generation !== epoch) return;
@@ -853,7 +1104,7 @@
         if (generation !== epoch) return;
         record("GREETING_PLAYED", greeting, playbackMs);
         busy = false;
-        status = "Listening";
+        status = idleStatus();
       }
     } catch (cause) {
       if (generation === epoch) {
@@ -865,6 +1116,8 @@
     }
   }
   function hangup(log = true) {
+    scenarioToken++;
+    scenarioRunning = false;
     epoch++;
     greetingAborter?.abort();
     controller?.abort();
@@ -893,6 +1146,8 @@
     detecting = false;
     speaking = false;
     reset();
+    manualRecording = false;
+    manualParts = [];
     inputBars = Array(36).fill(2);
     outputBars = Array(36).fill(2);
     if (log) {
@@ -902,8 +1157,10 @@
   }
   function toggleMute() {
     muted = !muted;
+    manualRecording = false;
+    manualParts = [];
     reset();
-    if (!busy) status = muted ? "Microphone muted" : "Listening";
+    if (!busy) status = idleStatus();
     stream?.getAudioTracks().forEach((t) => (t.enabled = !muted));
     record("MICROPHONE", muted ? "Muted" : "Unmuted");
   }
@@ -956,129 +1213,252 @@
       >{discovering ? "Refreshing…" : "Refresh models"}</button
     >
     {#if modelError}<p class="error" role="alert">{modelError}</p>{/if}
-    {#if !discovering && !llmModels.length && !modelError}<p class="error">
+    {#if useLlm && !discovering && !llmModels.length && !modelError}<p
+        class="error"
+      >
         No downloaded LLM models found. Download a model in the LLM page, then
         refresh models.
       </p>{/if}
-    <fieldset
-      disabled={connected ||
-        starting ||
-        discovering ||
-        cloneRecording ||
-        cloneBusy}
-    >
-      <label
-        >VAD<select aria-label="VAD" bind:value={vadKey}
-          ><option value="" disabled>No installed VAD models</option
-          >{#each vadModels as model}<option value={model.key}
-              >{model.label}</option
-            >{/each}</select
-        ></label
+    <section class="stage-settings" aria-label="VAD settings">
+      <div class="stage-heading">
+        <h2>VAD</h2>
+        <label class="stage-switch"
+          ><input
+            type="checkbox"
+            role="switch"
+            aria-label="Enable VAD"
+            bind:checked={useVad}
+            disabled={connected ||
+              starting ||
+              discovering ||
+              cloneRecording ||
+              cloneBusy}
+          /><span>{useVad ? "On" : "Off"}</span></label
+        >
+      </div>
+      <fieldset
+        disabled={connected ||
+          starting ||
+          discovering ||
+          cloneRecording ||
+          cloneBusy ||
+          !useVad}
       >
-      <label
-        >Speech threshold<input
-          type="number"
-          min="0.01"
-          max="0.99"
-          step="0.05"
-          bind:value={threshold}
-        /></label
-      >
-      <label
-        >Turn window (ms)<input
-          type="number"
-          min="300"
-          max="2000"
-          step="50"
-          bind:value={windowMs}
-        /></label
-      >
-      <label
-        >ASR<select aria-label="ASR" bind:value={asrKey}
-          ><option value="" disabled>No installed ASR models</option
-          >{#each asrModels as model}<option value={model.key}
-              >{model.label}</option
-            >{/each}</select
-        ></label
-      >
-      <label
-        >ASR hotwords / context<textarea
-          rows="3"
-          bind:value={hotwords}
-          placeholder="X光機、設備代碼、人名…"></textarea></label
-      >
-      {#if selectedAsr?.family === "audio8_asr"}<small
-          >Audio8 ASR currently uses a fixed transcription prompt; context
-          biasing requires a model that supports it.</small
-        >{/if}
-      <label
-        >LLM<select aria-label="LLM" bind:value={llm}
-          ><option value="" disabled>No downloaded LLM models</option
-          >{#each llmModels as model}<option value={model.id}>{model.id}</option
-            >{/each}</select
-        ></label
-      >
-      <label
-        >TTS<select aria-label="TTS" bind:value={ttsKey}
-          ><option value="" disabled>No installed TTS models</option
-          >{#each ttsModels as model}<option value={model.key}
-              >{model.label}</option
-            >{/each}</select
-        ></label
-      >
-      <label
-        >Built-in voice<select bind:value={voice}>
-          {#each voiceChoices as id}<option value={id}
-              >{id === "lingCLvocals"
-                ? "Ling · Chinese"
-                : id === "wangSG9s"
-                  ? "Wang · Chinese"
-                  : id}</option
-            >{/each}
-        </select></label
-      >
-      {#if supportsReference}<label
-          >Custom reference voice (optional)<input
-            type="file"
-            accept="audio/*"
-            on:change={(e) =>
-              chooseReference(e.currentTarget.files?.[0] || null)}
+        <label
+          >VAD<select aria-label="VAD" bind:value={vadKey}
+            ><option value="" disabled>No installed VAD models</option
+            >{#each vadModels as model}<option value={model.key}
+                >{model.label}</option
+              >{/each}</select
+          ></label
+        >
+        <label
+          >Speech threshold<input
+            type="number"
+            min="0.01"
+            max="0.99"
+            step="0.05"
+            bind:value={threshold}
           /></label
         >
         <label
-          >Reference transcript<textarea
-            rows="2"
-            bind:value={referenceText}
-            placeholder="Exact words in reference audio"></textarea></label
+          >Turn window (ms)<input
+            type="number"
+            min="300"
+            max="2000"
+            step="50"
+            bind:value={windowMs}
+          /></label
         >
-      {/if}<label
-        >System prompt<textarea rows="4" bind:value={prompt}></textarea></label
-      ><button disabled={savingPrompt} on:click={savePromptCsv}
-        >{savingPrompt ? "Saving…" : "Save prompt.csv"}</button
+      </fieldset>
+      {#if !useVad}<small
+          >VAD skipped. Record and send voice turns manually.</small
+        >{/if}
+    </section>
+    <section class="stage-settings" aria-label="ASR settings">
+      <div class="stage-heading">
+        <h2>ASR</h2>
+        <label class="stage-switch"
+          ><input
+            type="checkbox"
+            role="switch"
+            aria-label="Enable ASR"
+            bind:checked={useAsr}
+            disabled={connected ||
+              starting ||
+              discovering ||
+              cloneRecording ||
+              cloneBusy}
+          /><span>{useAsr ? "On" : "Off"}</span></label
+        >
+      </div>
+      <fieldset
+        disabled={connected ||
+          starting ||
+          discovering ||
+          cloneRecording ||
+          cloneBusy ||
+          !useAsr}
       >
-      <label
-        >Call greeting<textarea rows="3" bind:value={greeting}
-        ></textarea></label
-      >
-      <button
-        disabled={savingGreeting || !greeting.trim() || !ttsKey}
-        on:click={saveGreetingCsv}
-        >{savingGreeting ? "Saving…" : "Update greetings.csv"}</button
-      >
-      <small>{greetingStatus}</small>
-      <p role="status">{fileStatus}</p>
-    </fieldset>
-    {#if supportsReference}<div class="clone-recording">
-        {#if cloneRecording}<button on:click={() => cloneRecorder?.stop()}
-            ><MicOff size={16} /> Stop recording</button
-          >
-        {:else}<button
-            disabled={connected || starting || cloneBusy || !asrKey}
-            on:click={startCloneRecording}
-            ><Mic size={16} /> Record clone voice</button
+        <label
+          >ASR<select aria-label="ASR" bind:value={asrKey}
+            ><option value="" disabled>No installed ASR models</option
+            >{#each asrModels as model}<option value={model.key}
+                >{model.label}</option
+              >{/each}</select
+          ></label
+        >
+        <label
+          >ASR hotwords / context<textarea
+            rows="3"
+            bind:value={hotwords}
+            placeholder="X光機、設備代碼、人名…"></textarea></label
+        >
+        {#if selectedAsr?.family === "audio8_asr"}<small
+            >Audio8 ASR currently uses a fixed transcription prompt; context
+            biasing requires a model that supports it.</small
           >{/if}
-        {#if cloneStatus}<p role="status">{cloneStatus}</p>{/if}
-      </div>{/if}
+      </fieldset>
+      {#if !useAsr}<small
+          >ASR skipped. Type messages instead of using the microphone.</small
+        >{/if}
+    </section>
+    <section class="stage-settings" aria-label="LLM settings">
+      <div class="stage-heading">
+        <h2>LLM</h2>
+        <label class="stage-switch"
+          ><input
+            type="checkbox"
+            role="switch"
+            aria-label="Enable LLM"
+            bind:checked={useLlm}
+            disabled={connected ||
+              starting ||
+              discovering ||
+              cloneRecording ||
+              cloneBusy}
+          /><span>{useLlm ? "On" : "Off"}</span></label
+        >
+      </div>
+      <fieldset
+        disabled={connected ||
+          starting ||
+          discovering ||
+          cloneRecording ||
+          cloneBusy ||
+          !useLlm}
+      >
+        <label
+          >LLM<select aria-label="LLM" bind:value={llm}
+            ><option value="" disabled>No downloaded LLM models</option
+            >{#each llmModels as model}<option value={model.id}
+                >{model.id}</option
+              >{/each}</select
+          ></label
+        >
+        <label
+          >System prompt<textarea rows="4" bind:value={prompt}
+          ></textarea></label
+        >
+        <button disabled={savingPrompt} on:click={savePromptCsv}
+          >{savingPrompt ? "Saving…" : "Save prompt.csv"}</button
+        >
+      </fieldset>
+      {#if !useLlm}<small
+          >LLM skipped. Input text passes directly to the output.</small
+        >{/if}
+    </section>
+    <section class="stage-settings" aria-label="TTS settings">
+      <div class="stage-heading">
+        <h2>TTS</h2>
+        <label class="stage-switch"
+          ><input
+            type="checkbox"
+            role="switch"
+            aria-label="Enable TTS"
+            bind:checked={useTts}
+            disabled={connected ||
+              starting ||
+              discovering ||
+              cloneRecording ||
+              cloneBusy}
+          /><span>{useTts ? "On" : "Off"}</span></label
+        >
+      </div>
+      <fieldset
+        disabled={connected ||
+          starting ||
+          discovering ||
+          cloneRecording ||
+          cloneBusy ||
+          !useTts}
+      >
+        <label
+          >TTS<select aria-label="TTS" bind:value={ttsKey}
+            ><option value="" disabled>No installed TTS models</option
+            >{#each ttsModels as model}<option value={model.key}
+                >{model.label}</option
+              >{/each}</select
+          ></label
+        >
+        <label
+          >Built-in voice<select aria-label="Built-in voice" bind:value={voice}
+            >{#each voiceChoices as id}<option value={id}
+                >{id === "lingCLvocals"
+                  ? "Ling · Chinese"
+                  : id === "wangSG9s"
+                    ? "Wang · Chinese"
+                    : id}</option
+              >{/each}</select
+          ></label
+        >
+        {#if supportsReference}
+          <label
+            >Custom reference voice (optional)<input
+              type="file"
+              accept="audio/*"
+              on:change={(e) =>
+                chooseReference(e.currentTarget.files?.[0] || null)}
+            /></label
+          >
+          <label
+            >Reference transcript<textarea
+              rows="2"
+              bind:value={referenceText}
+              placeholder="Exact words in reference audio"></textarea></label
+          >
+        {/if}
+        <label
+          >Call greeting<textarea rows="3" bind:value={greeting}
+          ></textarea></label
+        >
+        <button
+          disabled={savingGreeting || !greeting.trim() || !ttsKey}
+          on:click={saveGreetingCsv}
+          >{savingGreeting ? "Saving…" : "Update greetings.csv"}</button
+        >
+        <small>{greetingStatus}</small>
+      </fieldset>
+      {#if supportsReference}<div class="clone-recording">
+          {#if cloneRecording}<button on:click={() => cloneRecorder?.stop()}
+              ><MicOff size={16} /> Stop recording</button
+            >
+          {:else}<button
+              disabled={connected ||
+                starting ||
+                cloneBusy ||
+                !useTts ||
+                (useAsr && !asrKey)}
+              on:click={startCloneRecording}
+              ><Mic size={16} /> Record clone voice</button
+            >{/if}
+          {#if cloneStatus}<p role="status">{cloneStatus}</p>{/if}
+        </div>{/if}
+      {#if !useTts}<small
+          >TTS skipped. Replies are text only; the greeting is not spoken.</small
+        >{/if}
+    </section>
+    <p role="status">{fileStatus}</p>
     <div class="sidebar-foot">
       HTTPS microphone<br />Echo cancellation enabled<br />Listening pauses
       during replies
@@ -1098,7 +1478,11 @@
     <section class="session">
       <div class="conversation">
         <div class="wave-area">
-          <div class="wave-label">MICROPHONE</div>
+          <div class="wave-label">
+            {speaking && playbackRole === "technician"
+              ? "TECHNICIAN"
+              : "MICROPHONE"}
+          </div>
           <div class="wave wave-in" aria-label="Live microphone waveform">
             {#each inputBars as height}<span style:height={`${height}px`}
               ></span>{/each}
@@ -1109,7 +1493,11 @@
               ></span>{/each}
           </div>
         </div>
-        <div class="transcript" aria-live="polite">
+        <div
+          class="transcript"
+          bind:this={transcriptElement}
+          aria-live="polite"
+        >
           {#if !messages.length}<div class="empty">
               <h1>Your local voice assistant</h1>
               <p>Start a call, then speak or type a message.</p>
@@ -1123,27 +1511,42 @@
         </div>
         <div class="composer">
           <form on:submit|preventDefault={send}>
-            <input
+            <textarea
+              rows="2"
               aria-label="Message"
               placeholder="Type something…"
               bind:value={input}
-              disabled={!connected}
-            /><button
+              disabled={!connected || scenarioRunning}
+              on:keydown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  send();
+                }
+              }}></textarea><button
               aria-label="Send message"
-              disabled={!connected || busy || detecting || !input.trim()}
-              ><Send size={18} /></button
+              disabled={!connected ||
+                busy ||
+                detecting ||
+                scenarioRunning ||
+                !input.trim()}><Send size={18} /></button
             >
           </form>
           <div class="controls">
             <button
               class:muted
               on:click={toggleMute}
-              disabled={!connected}
+              disabled={!connected || !useAsr}
               aria-label={muted ? "Unmute microphone" : "Mute microphone"}
               >{#if muted}<MicOff size={18} />{:else}<Mic
                   size={18}
                 />{/if}</button
-            ><span class="call-status" role="status">{status}</span
+            >{#if !useVad && useAsr}<button
+                disabled={!connected || busy || muted || scenarioRunning}
+                on:click={toggleManualTurn}
+                ><Mic size={16} />{manualRecording
+                  ? "Send voice turn"
+                  : "Record voice turn"}</button
+              >{/if}<span class="call-status" role="status">{status}</span
             >{#if connected || starting}<button
                 class="hangup"
                 on:click={() => hangup()}><PhoneOff size={16} /> Hang up</button
@@ -1167,13 +1570,15 @@
           <dt>Audio</dt>
           <dd>Microphone + speaker</dd>
           <dt>Turn detection</dt>
-          <dd>{selectedVad?.label || "—"}</dd>
+          <dd>{useVad && useAsr ? selectedVad?.label || "—" : "Skipped"}</dd>
           <dt>ASR</dt>
-          <dd>{selectedAsr?.label || "—"}</dd>
+          <dd>{useAsr ? selectedAsr?.label || "—" : "Skipped · text input"}</dd>
           <dt>LLM</dt>
-          <dd>{llm || "—"}</dd>
+          <dd>{useLlm ? llm || "—" : "Skipped · passthrough"}</dd>
           <dt>TTS</dt>
-          <dd>{selectedTts?.label || "—"}</dd>
+          <dd>
+            {useTts ? selectedTts?.label || "—" : "Skipped · text output"}
+          </dd>
           <dt>Session</dt>
           <dd>{run || "—"}</dd>
         </dl>
@@ -1183,41 +1588,140 @@
         </p>
       </div>
     </section>
-    <section class="events">
-      <div class="events-title">
-        <strong>Events <span>{events.length}</span></strong><button
-          on:click={() => {
-            events = [];
-            localStorage.removeItem(historyKey);
-          }}><Trash2 size={14} /> Clear events</button
-        >
-      </div>
-      <div class="event-scroll">
-        <table>
-          <thead
-            ><tr
-              ><th>TIMESTAMP</th><th
-                title="Elapsed wall time for this operation">RUNTIME</th
-              ><th>EVENT TYPE</th><th>SUMMARY</th></tr
-            ></thead
-          ><tbody
-            >{#each events as event}<tr
-                ><td>{new Date(event.time).toLocaleTimeString()}</td><td
-                  class="runtime">{runtimeLabel(event.runtimeMs)}</td
-                ><td
-                  ><span
-                    class:error-tag={event.type === "ERROR"}
-                    class="event-tag">{event.type}</span
-                  ></td
-                ><td>{event.summary}</td></tr
-              >{/each}</tbody
+    <div class="bottom-panels">
+      <section class="events">
+        <div class="events-title">
+          <strong>Events <span>{events.length}</span></strong><button
+            on:click={() => {
+              events = [];
+              localStorage.removeItem(historyKey);
+            }}><Trash2 size={14} /> Clear events</button
           >
-        </table>
-        {#if !events.length}<p class="no-events">
-            Events from this and previous calls appear here.
-          </p>{/if}
-      </div>
-    </section>
+        </div>
+        <div class="event-scroll">
+          <table>
+            <thead
+              ><tr
+                ><th>TIMESTAMP</th><th
+                  title="Elapsed wall time for this operation">RUNTIME</th
+                ><th>EVENT TYPE</th><th>SUMMARY</th></tr
+              ></thead
+            ><tbody
+              >{#each events as event}<tr
+                  ><td>{new Date(event.time).toLocaleTimeString()}</td><td
+                    class="runtime">{runtimeLabel(event.runtimeMs)}</td
+                  ><td
+                    ><span
+                      class:error-tag={event.type === "ERROR"}
+                      class="event-tag">{event.type}</span
+                    ></td
+                  ><td>{event.summary}</td></tr
+                >{/each}</tbody
+            >
+          </table>
+          {#if !events.length}<p class="no-events">
+              Events from this and previous calls appear here.
+            </p>{/if}
+        </div>
+      </section>
+      <section class="scenario-dock" aria-label="Demo scenarios">
+        <details class="scenario-panel" open>
+          <summary>Demo scenarios</summary>
+          <label
+            >Scenario<select
+              aria-label="Scenario"
+              bind:value={scenarioMode}
+              disabled={scenarioRunning}
+              ><option value="audio">Scenario 1 · audio examples</option><option
+                value="maintenance"
+                >Scenario 2 · 現場維修保養後的語音回報</option
+              ></select
+            ></label
+          >
+          {#if scenarioMode === "audio"}
+            <div class="scenario-upload">
+              <strong>{scenarioAudioName || "No audio selected"}</strong><small
+                >WAV, MP3, or FLAC</small
+              ><label class="audio-choice"
+                >Choose audio<input
+                  aria-label="Choose scenario audio"
+                  type="file"
+                  accept=".wav,.mp3,.flac,audio/*"
+                  disabled={scenarioRunning}
+                  on:change={(e) => {
+                    scenarioFile = e.currentTarget.files?.[0] || null;
+                    scenarioAudioName = scenarioFile?.name || "";
+                  }}
+                /></label
+              >
+            </div>
+            <div class="example-chips">
+              <small>Example audio</small
+              >{#each scenarioAudioExamples as example}<button
+                  disabled={scenarioRunning}
+                  on:click={() => selectScenarioExample(example)}
+                  >{example.name}</button
+                >{/each}
+            </div>
+            <button
+              disabled={scenarioRunning ||
+                busy ||
+                detecting ||
+                starting ||
+                !scenarioFile ||
+                !useAsr ||
+                (!connected && !canCall)}
+              on:click={() => runScenario()}>Send audio</button
+            >
+          {:else}
+            <p>
+              Technician voice: <strong
+                >{technicianVoice || "No alternative built-in voice"}</strong
+              >. Assistant voice:
+              <strong>{voiceFile ? "Custom reference" : voice}</strong>.
+            </p>
+            <button
+              disabled={scenarioRunning ||
+                busy ||
+                detecting ||
+                starting ||
+                (!connected && !canCall) ||
+                (useTts && !technicianVoice)}
+              on:click={() => runScenario()}>Run Scenario 2</button
+            >
+            <details class="scenario-script">
+              <summary
+                >Script and expected replies · {Math.min(
+                  scenarioStep,
+                  3,
+                )}/3</summary
+              >{#each maintenanceScenarioSteps as step, index}<div>
+                  <strong>{index + 1}. {step.title}</strong>
+                  <p><b>維修人員：</b>{step.message}</p>
+                  <button
+                    disabled={scenarioRunning ||
+                      busy ||
+                      detecting ||
+                      starting ||
+                      (!connected && !canCall)}
+                    on:click={() => runScenario(index)}
+                    >Send technician turn {index + 1}</button
+                  >
+                  <p><b>AI（預期）：</b>{step.expected}</p>
+                </div>{/each}
+            </details>
+            <small
+              >Replies are generated live using the maintenance scenario
+              instructions.</small
+            >
+          {/if}
+          {#if scenarioRunning}<button class="hangup" on:click={stopScenario}
+              >Stop scenario</button
+            >{/if}
+          <small role="status">{scenarioStatus}</small>
+        </details>
+      </section>
+    </div>
   </main>
 </div>
 
@@ -1270,6 +1774,71 @@
     font-size: 10px;
     letter-spacing: 1.6px;
     margin: 16px 0;
+  }
+  .stage-settings {
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    margin-top: 16px;
+    padding: 14px;
+  }
+  .stage-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .stage-heading h2 {
+    margin: 0;
+    font-size: 12px;
+    letter-spacing: 1px;
+    color: var(--text-strong);
+  }
+  .demo label.stage-switch {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    margin: 0;
+  }
+  .demo .stage-switch input {
+    appearance: none;
+    width: 30px;
+    height: 17px;
+    border: 1px solid var(--control-border);
+    border-radius: 12px;
+    margin: 0;
+    padding: 0;
+    background: var(--control-bg);
+    cursor: pointer;
+    position: relative;
+  }
+  .demo .stage-switch input::before {
+    content: "";
+    position: absolute;
+    width: 11px;
+    height: 11px;
+    border-radius: 50%;
+    top: 2px;
+    left: 2px;
+    background: var(--muted);
+    transition: transform 0.15s;
+  }
+  .demo .stage-switch input:checked {
+    background: var(--active-bg);
+    border-color: var(--cyan);
+  }
+  .demo .stage-switch input:checked::before {
+    transform: translateX(13px);
+    background: var(--cyan);
+  }
+  .stage-switch span {
+    font-size: 11px;
+    min-width: 17px;
+  }
+  .stage-settings fieldset:disabled {
+    opacity: 0.5;
+  }
+  .clone-recording {
+    margin-top: 14px;
   }
   .demo fieldset {
     border: 0;
@@ -1412,7 +1981,7 @@
     display: flex;
     flex-direction: column;
     gap: 18px;
-    min-height: 100px;
+    min-height: 60px;
   }
   .empty {
     margin: auto;
@@ -1448,6 +2017,71 @@
     white-space: pre-wrap;
     line-height: 1.7;
   }
+  .bottom-panels {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(320px, 0.9fr);
+    height: clamp(260px, 33vh, 380px);
+    flex-shrink: 0;
+    border-top: 1px solid var(--line);
+    min-width: 0;
+  }
+  .scenario-dock {
+    min-width: 0;
+    min-height: 0;
+    overflow: auto;
+    border-left: 1px solid var(--line);
+    background: var(--control-bg);
+  }
+  .scenario-panel {
+    padding: 12px 16px;
+    font-size: 11px;
+  }
+  .scenario-panel summary {
+    cursor: pointer;
+    color: var(--text-label);
+    font-weight: 600;
+  }
+  .scenario-panel > button {
+    margin: 8px 5px 8px 0;
+  }
+  .scenario-panel > small {
+    display: block;
+    margin-top: 6px;
+  }
+  .scenario-upload {
+    border: 1px dashed var(--control-border);
+    border-radius: 8px;
+    padding: 10px;
+    margin-top: 10px;
+  }
+  .scenario-upload > small {
+    display: block;
+  }
+  .example-chips {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 5px;
+    margin: 8px 0;
+  }
+  .demo .example-chips button {
+    font-size: 10px;
+    padding: 4px 6px;
+  }
+  .scenario-script {
+    margin-top: 10px;
+  }
+  .scenario-script p {
+    white-space: pre-wrap;
+    line-height: 1.6;
+  }
+  .scenario-script > div {
+    padding: 12px 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .scenario-script b {
+    display: block;
+  }
   .composer {
     flex-shrink: 0;
     padding: 14px;
@@ -1458,7 +2092,7 @@
     align-items: center;
     gap: 10px;
   }
-  .composer input {
+  .composer textarea {
     margin: 0;
     border: 0;
     background: transparent;
@@ -1489,6 +2123,7 @@
     outline-offset: 2px;
   }
   .controls {
+    flex-wrap: wrap;
     display: flex;
     align-items: center;
     gap: 12px;
@@ -1535,9 +2170,8 @@
     margin-top: 30px;
   }
   .events {
-    height: 30vh;
-    min-height: 180px;
-    border-top: 1px solid var(--line);
+    min-width: 0;
+    min-height: 0;
     display: flex;
     flex-direction: column;
   }
@@ -1618,6 +2252,19 @@
     font-size: 12px;
   }
   @media (max-width: 1050px) {
+    .bottom-panels {
+      grid-template-columns: 1fr;
+      grid-template-rows: 220px 260px;
+      height: 480px;
+    }
+    .scenario-dock {
+      border-left: 0;
+      border-top: 1px solid var(--line);
+    }
+    .demo main {
+      min-height: 940px;
+    }
+
     .details {
       display: none;
     }

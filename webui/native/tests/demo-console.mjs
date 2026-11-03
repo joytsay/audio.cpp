@@ -379,6 +379,225 @@ const { chromium } = require("playwright");
     await page.getByRole("button", { name: "Start call" }).isDisabled(),
     true,
   );
+  for (const stage of ["VAD", "ASR", "LLM", "TTS"]) {
+    await page
+      .getByRole("switch", { name: `Enable ${stage}`, exact: true })
+      .uncheck();
+  }
+  assert.equal(
+    await page
+      .getByRole("region", { name: "LLM settings" })
+      .getByLabel("System prompt")
+      .count(),
+    1,
+  );
+  assert.equal(
+    await page.getByRole("button", { name: "Start call" }).isDisabled(),
+    false,
+  );
+  let offset = requests.length;
+  await page.getByRole("button", { name: "Start call" }).click();
+  await page.getByText("CONNECTED", { exact: true }).waitFor();
+  await page.getByLabel("Message", { exact: true }).fill("只保留文字");
+  await page.getByRole("button", { name: "Send message" }).click();
+  await page.locator("article").filter({ hasText: "只保留文字" }).waitFor();
+  assert.equal(
+    requests.slice(offset).length,
+    0,
+    "All disabled stages must make no inference requests",
+  );
+  await page.getByRole("button", { name: "Hang up" }).click();
+
+  // ASR + manual voice turns only: VAD, LLM, and TTS must be bypassed.
+  await page.getByRole("switch", { name: "Enable ASR", exact: true }).check();
+  offset = requests.length;
+  await page.getByRole("button", { name: "Start call" }).click();
+  await page
+    .getByRole("button", { name: "Record voice turn", exact: true })
+    .click();
+  await page.waitForTimeout(600);
+  await page
+    .getByRole("button", { name: "Send voice turn", exact: true })
+    .click();
+  await page.locator("article").filter({ hasText: "語音測試" }).waitFor();
+  await page.waitForFunction(
+    () =>
+      document.querySelector(".call-status")?.textContent ===
+      "Ready · record a voice turn",
+  );
+  assert.ok(
+    requests
+      .slice(offset)
+      .some((r) => r.path === "/v1/audio/transcriptions/details"),
+  );
+  assert.equal(
+    requests
+      .slice(offset)
+      .some((r) => /tasks\/run|chat\/completions|audio\/speech/.test(r.path)),
+    false,
+  );
+  await page.getByRole("button", { name: "Hang up" }).click();
+
+  // Text directly to TTS, without ASR/VAD/LLM.
+  await page.getByRole("switch", { name: "Enable ASR", exact: true }).uncheck();
+  await page.getByRole("switch", { name: "Enable TTS", exact: true }).check();
+  offset = requests.length;
+  await page.getByRole("button", { name: "Start call" }).click();
+  await page.waitForFunction(
+    () =>
+      document.querySelector(".call-status")?.textContent === "Ready for text",
+  );
+  await page.getByLabel("Message", { exact: true }).fill("直接朗讀");
+  await page.getByRole("button", { name: "Send message" }).click();
+  await page
+    .locator("article")
+    .filter({ hasText: "直接朗讀" })
+    .first()
+    .waitFor();
+  await page.waitForFunction(
+    () =>
+      document.querySelector(".call-status")?.textContent === "Ready for text",
+  );
+  assert.ok(
+    requests
+      .slice(offset)
+      .some(
+        (r) => r.path === "/v1/audio/speech" && r.body.input === "直接朗讀",
+      ),
+  );
+  assert.equal(
+    requests
+      .slice(offset)
+      .some((r) => /tasks\/run|transcriptions|chat\/completions/.test(r.path)),
+    false,
+  );
+  await page.getByRole("button", { name: "Hang up" }).click();
+
+  noLlmModels = false;
+  await page.getByRole("button", { name: "Refresh models" }).click();
+  await page.getByRole("switch", { name: "Enable TTS", exact: true }).uncheck();
+  await page.getByRole("switch", { name: "Enable LLM", exact: true }).check();
+  await page.getByRole("button", { name: "Start call" }).click();
+  offset = requests.length;
+  await page.getByLabel("Message", { exact: true }).fill("只用 LLM");
+  await page.getByRole("button", { name: "Send message" }).click();
+  await page
+    .locator("article")
+    .filter({ hasText: "您好，請問需要什麼協助？" })
+    .waitFor();
+  assert.ok(
+    requests.slice(offset).some((r) => r.path === "/llm/v1/chat/completions"),
+  );
+  assert.equal(
+    requests.slice(offset).some((r) => r.path === "/v1/audio/speech"),
+    false,
+  );
+  await page.getByRole("button", { name: "Hang up" }).click();
+  assert.deepEqual(errors, []);
+  if (!((await page.locator(".scenario-panel").getAttribute("open")) !== null))
+    await page.locator(".scenario-panel > summary").click();
+  const eventBox = await page.locator(".events").boundingBox(),
+    scenarioBox = await page.locator(".scenario-dock").boundingBox();
+  assert.ok(scenarioBox.x >= eventBox.x + eventBox.width - 1);
+  assert.ok(Math.abs(scenarioBox.y - eventBox.y) < 2);
+  await page
+    .getByLabel("Scenario", { exact: true })
+    .selectOption("maintenance");
+  await page.getByRole("switch", { name: "Enable TTS", exact: true }).check();
+  let scenarioOffset = requests.length;
+  await page
+    .getByRole("button", { name: "Run Scenario 2", exact: true })
+    .click();
+  await page.getByText("Scenario 2 complete", { exact: true }).waitFor();
+  let scenarioRequests = requests.slice(scenarioOffset);
+  const scenarioChats = scenarioRequests.filter(
+    (r) => r.path === "/llm/v1/chat/completions",
+  );
+  assert.equal(scenarioChats.length, 3);
+  assert.deepEqual(
+    scenarioChats.map(
+      (r) => r.body.messages.filter((m) => m.role === "user").length,
+    ),
+    [1, 2, 3],
+  );
+  assert.ok(
+    scenarioChats[0].body.messages
+      .at(-1)
+      .content.includes(
+        "F15P1H4K-GEX-EF-03 五年一維，更換強排FAN 2個、間面FAN 6個。",
+      ),
+  );
+  assert.ok(
+    scenarioChats[1].body.messages
+      .at(-1)
+      .content.includes("SN：14865412 製造日期：2010年12月15日 電容值：6780MF"),
+  );
+  assert.equal(
+    scenarioChats[2].body.messages.at(-1).content,
+    "正確，起機測試正常。",
+  );
+  const technicianCalls = scenarioRequests.filter(
+    (r) => r.path === "/v1/audio/speech" && r.body.voice === "wangSG9s",
+  );
+  assert.equal(technicianCalls.length, 3);
+  assert.ok(
+    technicianCalls.every((r) => !r.body.voice_ref && !r.body.reference_text),
+  );
+  assert.ok(
+    scenarioRequests.some(
+      (r) =>
+        r.path === "/v1/audio/speech" &&
+        r.body.voice === "lingCLvocals" &&
+        r.body.input === "您好，請問需要什麼協助？",
+    ),
+  );
+  assert.equal(await page.locator("article.user").count(), 3);
+  await page.getByRole("button", { name: "Hang up" }).click();
+
+  // Changing the assistant voice reverses the technician voice automatically.
+  await page
+    .getByLabel("Built-in voice", { exact: true })
+    .selectOption("wangSG9s");
+  scenarioOffset = requests.length;
+  await page.locator(".scenario-script > summary").click();
+  await page
+    .getByRole("button", { name: "Send technician turn 1", exact: true })
+    .click();
+  await page.getByText("Turn complete", { exact: true }).waitFor();
+  assert.ok(
+    requests
+      .slice(scenarioOffset)
+      .some(
+        (r) =>
+          r.path === "/v1/audio/speech" &&
+          r.body.voice === "lingCLvocals" &&
+          r.body.input.startsWith("我要回報工單"),
+      ),
+  );
+  await page.getByRole("button", { name: "Hang up" }).click();
+
+  await page.getByLabel("Scenario", { exact: true }).selectOption("audio");
+  assert.equal(await page.locator(".example-chips button").count(), 5);
+  await page.getByRole("switch", { name: "Enable ASR", exact: true }).check();
+  await page
+    .getByLabel("Choose scenario audio", { exact: true })
+    .setInputFiles({
+      name: "scenario-test.wav",
+      mimeType: "audio/wav",
+      buffer: wav,
+    });
+  scenarioOffset = requests.length;
+  await page.getByRole("button", { name: "Send audio", exact: true }).click();
+  await page.getByText("Scenario 1 complete", { exact: true }).waitFor();
+  assert.ok(
+    requests
+      .slice(scenarioOffset)
+      .some((r) => r.path === "/v1/audio/transcriptions/details"),
+  );
+  await page.getByRole("button", { name: "Hang up" }).click();
+  assert.deepEqual(errors, []);
+  if (process.env.UI_SCREENSHOT_PATH)
+    await page.screenshot({ path: process.env.UI_SCREENSHOT_PATH });
   await page.setViewportSize({ width: 390, height: 844 });
   assert.equal(
     await page.evaluate(
@@ -387,7 +606,7 @@ const { chromium } = require("playwright");
     false,
   );
   console.log(
-    "PASS downloaded-model dropdowns, actual LLM IDs, unlinked branding, CSV saves, cached greeting, ASR hotwords, clone recording/transcript, voice/text calls, history, runtime measurements, mobile layout",
+    "PASS downloaded-model dropdowns, actual LLM IDs, unlinked branding, CSV saves, cached greeting, ASR hotwords, clone recording/transcript, voice/text calls, history, runtime measurements, stage switches/bypasses/manual turns, audio scenario, three-turn maintenance simulation, distinct technician/assistant voices, mobile layout",
   );
   await browser.close();
 })().catch((e) => {
