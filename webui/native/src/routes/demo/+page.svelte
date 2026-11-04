@@ -41,6 +41,23 @@
     summary: string;
     runtimeMs?: number | null;
   };
+  type DemoMessage = ChatMessage & {
+    audioId?: string;
+    audioUrl?: string;
+    audioName?: string;
+  };
+  type AudioExample = { name: string; url: string };
+  let incomingPlayer: HTMLAudioElement | null = null,
+    incomingBuffer: AudioBuffer | null = null;
+  let stopIncomingPlayback: (() => void) | null = null;
+  let chatAudioElements: Record<string, HTMLAudioElement> = {};
+  const audioUrls = new Set<string>();
+  function releaseChatAudio() {
+    Object.values(chatAudioElements).forEach((element) => element?.pause());
+    for (const url of audioUrls) URL.revokeObjectURL(url);
+    audioUrls.clear();
+    chatAudioElements = {};
+  }
   let scenarioMode: "audio" | "maintenance" = "audio";
   let scenarioFile: File | null = null,
     scenarioAudioName = "",
@@ -55,7 +72,7 @@
   let scenarioRunning = false,
     scenarioStep = 0,
     scenarioToken = 0;
-  let playbackRole: "assistant" | "technician" = "assistant";
+  let playbackRole: "assistant" | "technician" | "caller" = "assistant";
   const scenarioAudioExamples = [
     { name: "中央監控站2.mp3", url: centralAudio },
     { name: "中控室.mp3", url: controlAudio },
@@ -65,7 +82,7 @@
   ];
   $: technicianVoice = voiceChoices.find((id) => id !== voice) || "";
   let events: Event[] = [],
-    messages: ChatMessage[] = [];
+    messages: DemoMessage[] = [];
   let connected = false,
     starting = false,
     muted = false,
@@ -483,7 +500,11 @@
     text: string,
     audio?: Blob,
     generation = epoch,
-    options: { speakTechnician?: boolean; playInputAudio?: boolean } = {},
+    options: {
+      speakTechnician?: boolean;
+      playInputAudio?: boolean;
+      audioName?: string;
+    } = {},
   ) {
     const signal = controller?.signal;
     if (!connected || busy || !signal) return;
@@ -492,10 +513,35 @@
     reset();
     const turnStarted = performance.now();
     let operationStarted = turnStarted;
+    let audioMessageId = "";
     try {
       if (audio && options.playInputAudio) {
-        await playAudio(audio, generation, "technician");
+        audioMessageId = `audio-${epoch}-${performance.now()}`;
+        const url = URL.createObjectURL(audio);
+        audioUrls.add(url);
+        messages = [
+          ...messages,
+          {
+            role: "user",
+            content: "",
+            audioId: audioMessageId,
+            audioUrl: url,
+            audioName: options.audioName || "Audio message",
+          },
+        ];
+        await tick();
+        const wallMs = await playIncomingAudio(
+          audio,
+          audioMessageId,
+          generation,
+          signal,
+        );
         if (signal.aborted || generation !== epoch) return;
+        record(
+          "INPUT_AUDIO_PLAYED",
+          options.audioName || "Audio message",
+          wallMs,
+        );
         operationStarted = performance.now();
       }
       if (audio && useAsr) {
@@ -532,6 +578,10 @@
             "No speech recognized",
             performance.now() - operationStarted,
           );
+          if (options.playInputAudio)
+            throw new Error(
+              `No speech recognized in ${options.audioName || "the audio message"}. The sequence stopped.`,
+            );
           return;
         }
         record(
@@ -541,7 +591,13 @@
         );
       }
       if (generation !== epoch) return;
-      messages = [...messages, { role: "user", content: text }];
+      if (audioMessageId)
+        messages = messages.map((message) =>
+          message.audioId === audioMessageId
+            ? { ...message, content: text }
+            : message,
+        );
+      else messages = [...messages, { role: "user", content: text }];
       record("CONVERSATION_ITEM_ADDED", `USER · ${text}`);
       if (options.speakTechnician && useTts) {
         if (!technicianVoice)
@@ -567,7 +623,7 @@
           technicianVoice,
           performance.now() - operationStarted,
         );
-        const wallMs = await playAudio(audio, generation, "technician");
+        const wallMs = await playAudio(audio, generation, "technician", signal);
         if (signal.aborted || generation !== epoch) return;
         record("TECHNICIAN_PLAYED", text, wallMs);
       }
@@ -591,7 +647,9 @@
                     ? maintenanceScenarioPrompt
                     : prompt,
                 },
-                ...messages,
+                ...messages
+                  .filter((message) => message.content.trim())
+                  .map(({ role, content }) => ({ role, content })),
               ],
               max_tokens: 256,
               temperature: 0.4,
@@ -640,7 +698,12 @@
           performance.now() - operationStarted,
         );
         operationStarted = performance.now();
-        const playbackMs = await playAudio(output, generation);
+        const playbackMs = await playAudio(
+          output,
+          generation,
+          "assistant",
+          signal,
+        );
         if (generation !== epoch || signal.aborted) return;
         record("PLAYBACK_COMPLETED", "Assistant reply played", playbackMs);
       } else record("TTS_SKIPPED", "Text response only");
@@ -706,15 +769,78 @@
       savingPrompt = false;
     }
   }
+  async function playIncomingAudio(
+    audio: Blob,
+    id: string,
+    generation: number,
+    signal: AbortSignal,
+  ): Promise<number | null> {
+    const element = chatAudioElements[id],
+      ctx = context;
+    if (!element || !ctx || generation !== epoch || signal.aborted) return null;
+    const buffer = await ctx.decodeAudioData(await audio.arrayBuffer());
+    if (generation !== epoch || signal.aborted) return null;
+    const started = performance.now();
+    incomingPlayer = element;
+    incomingBuffer = buffer;
+    speaking = true;
+    playbackRole = "caller";
+    status = "Playing caller audio";
+    record("USER_STATE_CHANGED", "audio playback started");
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const cleanup = () => {
+          element.onended = null;
+          element.onerror = null;
+          element.onplay = null;
+          stopIncomingPlayback = null;
+        };
+        const finish = () => {
+          cleanup();
+          resolve();
+        };
+        element.onended = finish;
+        element.onplay = () => {
+          status = "Playing caller audio";
+        };
+        element.onerror = () => {
+          cleanup();
+          reject(new Error("Could not play the audio message."));
+        };
+        stopIncomingPlayback = () => {
+          element.pause();
+          finish();
+        };
+        void element.play().catch((cause) => {
+          if (cause?.name === "NotAllowedError")
+            status = "Press Play on the audio message to continue";
+          else {
+            cleanup();
+            reject(cause);
+          }
+        });
+      });
+      return performance.now() - started;
+    } finally {
+      if (incomingPlayer === element) {
+        incomingPlayer = null;
+        incomingBuffer = null;
+        speaking = false;
+        playbackRole = "assistant";
+        inputBars = Array(36).fill(2);
+      }
+    }
+  }
   async function playAudio(
     output: Blob,
     generation: number,
     role: "assistant" | "technician" = "assistant",
+    signal?: AbortSignal,
   ): Promise<number | null> {
     const started = performance.now();
-    if (generation !== epoch || !context) return null;
+    if (generation !== epoch || !context || signal?.aborted) return null;
     const buffer = await context.decodeAudioData(await output.arrayBuffer());
-    if (generation !== epoch || !context) return null;
+    if (generation !== epoch || !context || signal?.aborted) return null;
     const node = context.createBufferSource();
     node.buffer = buffer;
     analyser = context.createAnalyser();
@@ -978,39 +1104,75 @@
       cloneBusy = false;
     }
   }
-  async function selectScenarioExample(example: { name: string; url: string }) {
-    try {
-      const response = await fetch(example.url);
-      if (!response.ok)
-        throw new Error(`Example audio failed: ${response.status}`);
-      scenarioFile = new File([await response.blob()], example.name, {
-        type: "audio/mpeg",
+  async function loadScenarioExample(example: AudioExample): Promise<File> {
+    if (example.url.startsWith("data:")) {
+      const comma = example.url.indexOf(",");
+      if (comma < 0) throw new Error(`Invalid bundled audio: ${example.name}`);
+      const header = example.url.slice(0, comma),
+        payload = example.url.slice(comma + 1);
+      const binary = /;base64$/i.test(header)
+        ? atob(payload)
+        : payload.replace(/%([0-9a-f]{2})/gi, (_m, hex: string) =>
+            String.fromCharCode(parseInt(hex, 16)),
+          );
+      const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+      return new File([bytes], example.name, {
+        type: header.slice(5).split(";")[0] || "audio/mpeg",
       });
-      scenarioAudioName = example.name;
-      scenarioStatus = "Example audio ready";
-    } catch (cause) {
-      scenarioStatus = cause instanceof Error ? cause.message : String(cause);
     }
+    const response = await fetch(example.url, { signal: controller?.signal });
+    if (!response.ok)
+      throw new Error(`Example audio failed: ${response.status}`);
+    return new File([await response.blob()], example.name, {
+      type: "audio/mpeg",
+    });
   }
-  async function runScenario(stepOnly?: number) {
+  async function runScenario(stepOnly?: number, examples?: AudioExample[]) {
     if (scenarioRunning || busy || detecting || starting) return;
-    if (scenarioMode === "audio" && (!scenarioFile || !useAsr)) return;
+    if (
+      scenarioMode === "audio" &&
+      ((!scenarioFile && !examples?.length) || !useAsr)
+    )
+      return;
     if (scenarioMode === "maintenance" && useTts && !technicianVoice) {
       scenarioStatus = "Two built-in voices are required.";
       return;
     }
     const token = ++scenarioToken;
     scenarioRunning = true;
+    manualRecording = false;
+    manualParts = [];
     error = "";
     scenarioStatus = "Starting scenario…";
     try {
       if (!connected) await call();
       if (!connected || token !== scenarioToken) return;
       if (scenarioMode === "audio") {
-        await respond("", scenarioFile!, epoch, { playInputAudio: true });
-        if (!error) scenarioStatus = "Scenario 1 complete";
+        const queue = examples || [null];
+        for (let index = 0; index < queue.length; index++) {
+          if (!connected || token !== scenarioToken) break;
+          const example = queue[index];
+          const file = example
+            ? await loadScenarioExample(example)
+            : scenarioFile!;
+          if (!connected || token !== scenarioToken) break;
+          scenarioFile = file;
+          scenarioAudioName = file.name;
+          scenarioStatus = `Scenario 1 · ${index + 1}/${queue.length} · ${file.name}`;
+          await respond("", file, epoch, {
+            playInputAudio: true,
+            audioName: file.name,
+          });
+          if (error || token !== scenarioToken) break;
+        }
+        if (!error && token === scenarioToken)
+          scenarioStatus =
+            queue.length > 1
+              ? "All 5 examples complete"
+              : "Scenario 1 complete";
       } else {
         if (stepOnly === undefined) {
+          releaseChatAudio();
           messages = [];
           scenarioStep = 0;
         }
@@ -1037,6 +1199,11 @@
             stepOnly === undefined ? "Scenario 2 complete" : "Turn complete";
       }
       if (error) scenarioStatus = error;
+    } catch (cause) {
+      if (token === scenarioToken) {
+        fail(cause);
+        scenarioStatus = error;
+      }
     } finally {
       if (token === scenarioToken) {
         scenarioRunning = false;
@@ -1055,6 +1222,7 @@
     controller?.abort();
     if (connected) controller = new AbortController();
     if (player) player.stop();
+    stopIncomingPlayback?.();
     scenarioStatus = "Scenario stopped";
     reset();
   }
@@ -1074,6 +1242,7 @@
     error = "";
     status = "Connecting";
     run = new Date().toLocaleTimeString();
+    releaseChatAudio();
     messages = [];
     controller = new AbortController();
     try {
@@ -1132,9 +1301,12 @@
       if (processor)
         processor.onaudioprocess = (e) => {
           const samples = new Float32Array(e.inputBuffer.getChannelData(0));
-          if (!(speaking && playbackRole === "technician"))
+          if (!(speaking && playbackRole !== "assistant"))
             inputBars = muted ? Array(36).fill(2) : bars(samples);
-          if (muted || busy || speaking || scenarioRunning) {
+          const replaying = Object.values(chatAudioElements).some(
+            (element) => element && !element.paused && !element.ended,
+          );
+          if (muted || busy || speaking || scenarioRunning || replaying) {
             windows = [];
             frames = 0;
             return;
@@ -1171,7 +1343,18 @@
         };
       const draw = () => {
         if (!connected) return;
-        if (analyser && speaking) {
+        if (incomingPlayer && incomingBuffer && !incomingPlayer.paused) {
+          const start = Math.floor(
+            incomingPlayer.currentTime * incomingBuffer.sampleRate,
+          );
+          inputBars = bars(
+            incomingBuffer.getChannelData(0).subarray(start, start + 512),
+          );
+          outputBars = Array(36).fill(2);
+        } else if (incomingPlayer) {
+          inputBars = Array(36).fill(2);
+          outputBars = Array(36).fill(2);
+        } else if (analyser && speaking) {
           const data = new Float32Array(analyser.fftSize);
           analyser.getFloatTimeDomainData(data);
           if (playbackRole === "technician") {
@@ -1189,7 +1372,12 @@
         if (!audio)
           throw new Error(greetingStatus || "Greeting synthesis failed.");
         messages = [{ role: "assistant", content: greeting }];
-        const playbackMs = await playAudio(audio, generation);
+        const playbackMs = await playAudio(
+          audio,
+          generation,
+          "assistant",
+          controller?.signal,
+        );
         if (generation !== epoch) return;
         record("GREETING_PLAYED", greeting, playbackMs);
         busy = false;
@@ -1208,6 +1396,8 @@
     scenarioToken++;
     scenarioRunning = false;
     epoch++;
+    stopIncomingPlayback?.();
+    Object.values(chatAudioElements).forEach((element) => element?.pause());
     greetingAborter?.abort();
     controller?.abort();
     controller = null;
@@ -1289,6 +1479,7 @@
     if (cloneRecorder?.state === "recording") cloneRecorder.stop();
     cloneStream?.getTracks().forEach((t) => t.stop());
     hangup(false);
+    releaseChatAudio();
   });
 </script>
 
@@ -1596,8 +1787,10 @@
       <div class="conversation">
         <div class="wave-area">
           <div class="wave-label">
-            {speaking && playbackRole === "technician"
-              ? "TECHNICIAN"
+            {speaking && playbackRole !== "assistant"
+              ? playbackRole === "technician"
+                ? "TECHNICIAN"
+                : "CALLER"
               : "MICROPHONE"}
           </div>
           <div class="wave wave-in" aria-label="Live microphone waveform">
@@ -1623,7 +1816,17 @@
               class:user={message.role === "user"}
             >
               <small>{message.role === "user" ? "YOU" : "GEOVISION"}</small>
-              <p>{message.content}</p>
+              {#if message.audioId && message.audioUrl}
+                <strong class="audio-message-name">{message.audioName}</strong>
+                <audio
+                  controls
+                  preload="metadata"
+                  src={message.audioUrl}
+                  aria-label={`Audio message: ${message.audioName}`}
+                  bind:this={chatAudioElements[message.audioId]}
+                ></audio>
+              {/if}
+              {#if message.content}<p>{message.content}</p>{/if}
             </article>{/each}
         </div>
         <div class="composer">
@@ -1775,8 +1978,13 @@
             <div class="example-chips">
               <small>Example audio</small
               >{#each scenarioAudioExamples as example}<button
-                  disabled={scenarioRunning}
-                  on:click={() => selectScenarioExample(example)}
+                  disabled={scenarioRunning ||
+                    busy ||
+                    detecting ||
+                    starting ||
+                    !useAsr ||
+                    (!connected && !canCall)}
+                  on:click={() => runScenario(undefined, [example])}
                   >{example.name}</button
                 >{/each}
             </div>
@@ -1789,6 +1997,15 @@
                 !useAsr ||
                 (!connected && !canCall)}
               on:click={() => runScenario()}>Send audio</button
+            ><button
+              disabled={scenarioRunning ||
+                busy ||
+                detecting ||
+                starting ||
+                !useAsr ||
+                (!connected && !canCall)}
+              on:click={() => runScenario(undefined, scenarioAudioExamples)}
+              >Play all 5 examples</button
             >
           {:else}
             <p>
@@ -2128,6 +2345,19 @@
     font-size: 9px;
     letter-spacing: 1px;
     color: #8aaba9;
+  }
+  .audio-message-name {
+    display: block;
+    margin-top: 8px;
+    font-size: 11px;
+    overflow-wrap: anywhere;
+  }
+  .transcript article audio {
+    display: block;
+    max-width: 100%;
+    width: 290px;
+    height: 36px;
+    margin-top: 8px;
   }
   .transcript article p {
     margin: 6px 0;

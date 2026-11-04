@@ -2722,7 +2722,7 @@
   });
 </script>
 
-<svelte:head><title>GeoVision IVR · Interactive Voice Response</title></svelte:head>
+<svelte:head><title>GeoVision · IVR</title></svelte:head>
 <svelte:window on:keydown={handleShortcut} on:focus={refreshVoices} />
 
 <header class="topbar">

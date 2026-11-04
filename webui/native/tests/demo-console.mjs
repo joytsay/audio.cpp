@@ -198,6 +198,30 @@ const { chromium } = require("playwright");
       await new Promise((resolve) => setTimeout(resolve, 120));
     await route.fulfill({ json });
   });
+  await page.addInitScript(() => {
+    window.cspViolations = [];
+    document.addEventListener("securitypolicyviolation", (event) =>
+      window.cspViolations.push(event.violatedDirective),
+    );
+    // Accelerate long source clips in the test; the assistant WAV fixture stays unchanged.
+    const play = HTMLMediaElement.prototype.play;
+    HTMLMediaElement.prototype.play = function () {
+      this.playbackRate = 16;
+      return play.call(this);
+    };
+  });
+  await page.route("**/*", async (route) => {
+    if (route.request().resourceType() !== "document") return route.fallback();
+    const response = await route.fetch();
+    await route.fulfill({
+      response,
+      headers: {
+        ...response.headers(),
+        "Content-Security-Policy":
+          "default-src 'self' 'unsafe-inline' blob: data:; connect-src 'self'; media-src 'self' blob: data:",
+      },
+    });
+  });
   await page.goto(
     (process.env.UI_BASE_URL || "http://127.0.0.1:4173/").replace(/\/$/, "") +
       "/#/demo",
@@ -701,8 +725,141 @@ const { chromium } = require("playwright");
   );
   await page.getByRole("button", { name: "Hang up" }).click();
   assert.deepEqual(errors, []);
+  // An example click loads bundled data locally, sends, and autoplays in chat.
+  scenarioOffset = requests.length;
+  await page
+    .getByRole("button", { name: "中央監控站2.mp3", exact: true })
+    .click();
+  await page.getByText("Scenario 1 complete", { exact: true }).waitFor();
+  await page
+    .getByLabel("Audio message: 中央監控站2.mp3", { exact: true })
+    .waitFor();
+  assert.equal(
+    await page
+      .getByLabel("Audio message: 中央監控站2.mp3", { exact: true })
+      .evaluate((audio) => audio.ended),
+    true,
+  );
+  assert.ok(
+    requests
+      .slice(scenarioOffset)
+      .some((r) => r.path === "/v1/audio/transcriptions/details"),
+  );
+  assert.ok(
+    requests
+      .slice(scenarioOffset)
+      .some((r) => r.path === "/llm/v1/chat/completions"),
+  );
+  assert.ok(
+    requests
+      .slice(scenarioOffset)
+      .filter((r) => r.path === "/llm/v1/chat/completions")
+      .every((r) =>
+        r.body.messages.every(
+          (message) => !("audioUrl" in message) && !("audioId" in message),
+        ),
+      ),
+  );
+  await page.getByRole("button", { name: "Hang up" }).click();
+
+  scenarioOffset = requests.length;
+  await page
+    .getByRole("button", { name: "Play all 5 examples", exact: true })
+    .click();
+  await page
+    .getByText("All 5 examples complete", { exact: true })
+    .waitFor({ timeout: 90000 });
+  const names = [
+    "中央監控站2.mp3",
+    "中控室.mp3",
+    "員工檢查哨.mp3",
+    "大廳.mp3",
+    "車輛檢查哨.mp3",
+  ];
+  assert.deepEqual(
+    await page.locator(".transcript .audio-message-name").allTextContents(),
+    names,
+  );
+  assert.equal(await page.locator(".transcript audio").count(), 5);
+  assert.equal(
+    await page
+      .locator(".transcript audio")
+      .evaluateAll((elements) => elements.every((audio) => audio.ended)),
+    true,
+  );
+  const audioQueueRequests = requests.slice(scenarioOffset);
+  assert.equal(
+    audioQueueRequests.filter(
+      (r) => r.path === "/v1/audio/transcriptions/details",
+    ).length,
+    5,
+  );
+  assert.equal(
+    audioQueueRequests.filter((r) => r.path === "/llm/v1/chat/completions")
+      .length,
+    5,
+  );
+  assert.equal(
+    audioQueueRequests.filter(
+      (r) =>
+        r.path === "/v1/audio/speech" &&
+        r.body.input === "您好，請問需要什麼協助？",
+    ).length,
+    5,
+  );
+  const queueEvents = await page.evaluate(() =>
+    JSON.parse(localStorage.getItem("geovision.demo.events.v1"))
+      .filter((event) =>
+        ["INPUT_AUDIO_PLAYED", "TURN_COMPLETED"].includes(event.type),
+      )
+      .slice(0, 10)
+      .reverse(),
+  );
+  assert.deepEqual(
+    queueEvents.map((event) => event.type),
+    Array.from({ length: 5 }, () => [
+      "INPUT_AUDIO_PLAYED",
+      "TURN_COMPLETED",
+    ]).flat(),
+  );
+  assert.deepEqual(
+    queueEvents
+      .filter((event) => event.type === "INPUT_AUDIO_PLAYED")
+      .map((event) => event.summary),
+    names,
+  );
+  assert.deepEqual(await page.evaluate(() => window.cspViolations), []);
+  await page.getByRole("button", { name: "Hang up" }).click();
   if (process.env.UI_SCREENSHOT_PATH)
     await page.screenshot({ path: process.env.UI_SCREENSHOT_PATH });
+  scenarioOffset = requests.length;
+  await page
+    .getByRole("button", { name: "Play all 5 examples", exact: true })
+    .click();
+  await page
+    .getByLabel("Audio message: 中央監控站2.mp3", { exact: true })
+    .waitFor();
+  await page
+    .getByLabel("Audio message: 中央監控站2.mp3", { exact: true })
+    .evaluate((audio) => (audio.playbackRate = 1));
+  await page
+    .getByRole("button", { name: "Stop scenario", exact: true })
+    .click();
+  await page.getByText("Scenario stopped", { exact: true }).waitFor();
+  await page.waitForTimeout(800);
+  assert.equal(await page.locator(".transcript audio").count(), 1);
+  assert.equal(
+    await page.locator(".transcript audio").evaluate((audio) => audio.paused),
+    true,
+  );
+  assert.equal(
+    requests
+      .slice(scenarioOffset)
+      .filter((r) => r.path === "/v1/audio/transcriptions/details").length,
+    0,
+    "Stopping input playback must cancel remaining transcription and examples",
+  );
+  await page.getByRole("button", { name: "Hang up" }).click();
   await page.setViewportSize({ width: 390, height: 844 });
   assert.equal(
     await page.evaluate(
@@ -711,7 +868,7 @@ const { chromium } = require("playwright");
     false,
   );
   console.log(
-    "PASS downloaded-model dropdowns, actual LLM IDs, unlinked branding, CSV saves, cached greeting, ASR hotwords, clone recording/transcript, voice/text calls, history, runtime measurements, stage switches/bypasses/manual turns, deduplicated model aliases, LFM download, greeting text/reference isolation, fixed equal-width scenarios panel, audio scenario, three-turn maintenance simulation, distinct technician/assistant voices, mobile layout",
+    "PASS downloaded-model dropdowns, actual LLM IDs, unlinked branding, CSV saves, cached greeting, ASR hotwords, clone recording/transcript, voice/text calls, history, runtime measurements, stage switches/bypasses/manual turns, deduplicated model aliases, LFM download, greeting text/reference isolation, fixed equal-width scenarios panel, audio scenario, three-turn maintenance simulation, distinct technician/assistant voices, CSP-safe example click/send/play, chat audio players, ordered five-example autoplay, queue cancellation, mobile layout",
   );
   await browser.close();
 })().catch((e) => {

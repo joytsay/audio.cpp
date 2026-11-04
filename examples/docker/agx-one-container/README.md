@@ -195,9 +195,16 @@ Use **Demo scenarios** beside the Events table to choose. The two panels have
 fixed matching headers and share the width equally; they stack on narrow
 screens:
 
-- **Scenario 1 · audio examples:** select a WAV/MP3/FLAC file or one of the five
-  reception examples (中央監控站2、中控室、員工檢查哨、大廳、車輛檢查哨), then
-  **Send audio**. The input audio plays before ASR and the enabled reply stages.
+- **Scenario 1 · audio examples:** click a reception example (中央監控站2、中控室、
+  員工檢查哨、大廳、車輛檢查哨) to send and play it immediately in the chat.
+  Alternatively, choose a WAV/MP3/FLAC file and press **Send audio**. Each audio
+  message includes a player for replay and its recognized transcript. Bundled
+  data URLs are decoded locally, so the embedded UI's connection policy does
+  not block example loading.
+- **Play all 5 examples:** automatically sends each example in order. The queue
+  waits for the source audio to finish, then ASR, the assistant's reply, and
+  its TTS playback before sending the next example. Disabled pipeline stages
+  are skipped. **Stop scenario** or hangup cancels remaining examples.
 - **Scenario 2 · 現場維修保養後的語音回報:** **Run Scenario 2** automatically fills
   and sends the three technician messages in order, waiting for each assistant
   reply. **Script and expected replies** shows the reference dialogue and lets
