@@ -43,6 +43,25 @@ services:
       RAG_EMBEDDING_CTX_SIZE: 4096
       RAG_EMBEDDING_GPU_LAYERS: 99
     volumes:
+      # Read the Jetson host identity directly; no jtop dependency.
+      - type: bind
+        source: /proc/device-tree/model
+        target: /run/audiocpp-host/model
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /etc/nv_tegra_release
+        target: /run/audiocpp-host/nv_tegra_release
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /etc/os-release
+        target: /run/audiocpp-host/os-release
+        read_only: true
+        bind:
+          create_host_path: false
       # Keep downloaded models, RAG index, knowledge, and prompt edits on the host.
       - ../../../audio-models:/app/models
       - ../../../llama-models:/app/llama-models

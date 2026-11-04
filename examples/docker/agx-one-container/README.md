@@ -469,3 +469,11 @@ Set `SIP_USE_RAG=1` in `.env` to additionally retrieve reference passages.
 Recreate the SIP container after changing environment settings, and restart it
 after editing the mounted prompt. Existing calls retain their loaded prompt.
 The browser Conversation knowledge-base selector is independent of SIP.
+
+The demo header detects the host model directly from `/proc/device-tree/model`
+and reads the L4T release from `/etc/nv_tegra_release`. Compose mounts these files
+read-only under `/run/audiocpp-host`; jtop and the `nvidia-jetpack` metapackage
+are not required. JetPack 6.2.1 is inferred for L4T 36.4.4. Unknown releases show
+the detected L4T version without guessing a JetPack version. When the model is
+unavailable, the header falls back to the host's `/etc/os-release` `PRETTY_NAME`
+(or `NAME` and `VERSION`), also mounted read-only.

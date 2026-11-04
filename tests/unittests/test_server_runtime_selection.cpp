@@ -1,6 +1,7 @@
 // Public legacy handlers reject every explicit slots field before touching state.
 // Exercise frontend forwarding too; no test hook in the original runtime is needed.
 #include "runtime.h"
+#include "server_ui.h"
 #include "sip_settings.h"
 #include "engine/framework/io/json.h"
 
@@ -11,6 +12,45 @@
 
 int main() {
     try {
+        {
+            const auto root = std::filesystem::temp_directory_path() /
+                ("jetson-info-test-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+            struct Cleanup { std::filesystem::path path; ~Cleanup() { std::filesystem::remove_all(path); } } cleanup{root};
+            std::filesystem::create_directories(root / "host");
+            std::filesystem::create_directories(root / "system/proc/device-tree");
+            const auto info = [&]() { return engine::io::json::parse(minitts::server::ui_system_info_response(true, root / "host", root / "system").body); };
+            if (minitts::server::ui_system_info_response(false, root / "host", root / "system").status != 403)
+                throw std::runtime_error("system information bypassed UI guard");
+            if (!info().require("model").as_string().empty()) throw std::runtime_error("unknown host was labeled as Jetson");
+            { std::ofstream out(root / "host/os-release"); out << "PRETTY_NAME=\"Ubuntu 22.04.5 LTS\"\nNAME=\"Ubuntu\"\n"; }
+            auto fallback = info();
+            if (fallback.require("display_name").as_string() != "Ubuntu 22.04.5 LTS" ||
+                fallback.require("description").as_string() != "OS: Ubuntu 22.04.5 LTS")
+                throw std::runtime_error("OS fallback did not use the host PRETTY_NAME");
+            { std::ofstream out(root / "host/model", std::ios::binary); out << "NVIDIA Jetson AGX Orin Developer Kit"; out.put('\0'); }
+            { std::ofstream out(root / "host/nv_tegra_release"); out << "# R36 (release), REVISION: 4.4, GCID: 41062509, BOARD: generic\n"; }
+            { std::ofstream out(root / "system/proc/device-tree/model"); out << "wrong container identity"; }
+            auto detected = info();
+            if (detected.require("model").as_string() != "NVIDIA Jetson AGX Orin Developer Kit" ||
+                detected.require("short_model").as_string() != "NVIDIA Jetson AGX Orin" ||
+                detected.require("l4t").as_string() != "36.4.4" || detected.require("jetpack").as_string() != "6.2.1" ||
+                !detected.require("jetpack_inferred").as_bool() ||
+                detected.require("display_name").as_string() != "NVIDIA Jetson AGX Orin")
+                throw std::runtime_error("host model, NUL stripping, or L4T lookup failed");
+            { std::ofstream out(root / "host/nv_tegra_release"); out << "# R36 (release), REVISION: 9.9, BOARD: generic\n"; }
+            detected = info();
+            if (!detected.require("jetpack").as_string().empty() || detected.require("l4t").as_string() != "36.9.9")
+                throw std::runtime_error("unknown BSP was assigned an unverified JetPack version");
+            std::filesystem::remove(root / "host/model");
+            if (info().require("model").as_string() != "wrong container identity")
+                throw std::runtime_error("native device-tree fallback failed");
+            std::filesystem::remove(root / "system/proc/device-tree/model");
+            { std::ofstream out(root / "host/os-release"); out << "NAME=Alpine\nVERSION=3.22\n"; }
+            if (info().require("display_name").as_string() != "Alpine 3.22")
+                throw std::runtime_error("OS NAME/VERSION fallback failed");
+            std::cout << "Jetson host system information passed\n";
+        }
+
         {
             const auto root = std::filesystem::temp_directory_path() /
                 ("sip-settings-test-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
@@ -74,6 +114,16 @@ int main() {
         config.backend = engine::core::BackendType::Cpu;
         config.ui_management = true;
         minitts::server::ServerState state(config, std::filesystem::current_path());
+        {
+            minitts::server::HttpRequest request;
+            request.method = "GET";
+            request.path = "/v1/ui/system-info";
+            for (bool forwarded : {false, true}) {
+                const auto response = forwarded ? state.forward_to_core(request) : state.handle(request);
+                if (response.status != 200 || engine::io::json::parse(response.body).find("display_name") == nullptr)
+                    throw std::runtime_error("system information route or frontend forwarding failed");
+            }
+        }
         for (const std::string value : {"1", "2", "null", "false", "\"4\""}) {
             minitts::server::HttpRequest request;
             request.method = "POST";

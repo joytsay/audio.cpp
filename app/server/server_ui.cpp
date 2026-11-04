@@ -12,11 +12,87 @@
 #include <algorithm>
 #include <fstream>
 #include <iterator>
+#include <regex>
+#include <sstream>
 #include <stdexcept>
 #include <system_error>
 #include <vector>
 
 namespace minitts::server {
+
+HttpResponse ui_system_info_response(
+    bool enabled,
+    const std::filesystem::path & host_root,
+    const std::filesystem::path & system_root) {
+    if (!enabled) return error_response(403, "WebUI system information is disabled", "forbidden");
+    const auto read = [](const std::filesystem::path & path) {
+        std::ifstream input(path, std::ios::binary);
+        if (!input) return std::string{};
+        char buffer[4096];
+        input.read(buffer, sizeof(buffer));
+        std::string value(buffer, static_cast<size_t>(input.gcount()));
+        value.erase(std::remove(value.begin(), value.end(), '\0'), value.end());
+        while (!value.empty() && (value.back() == '\n' || value.back() == '\r' || value.back() == ' ')) value.pop_back();
+        return value;
+    };
+    // Mounted host files take priority over the container image's BSP metadata.
+    auto model = read(host_root / "model");
+    if (model.empty()) model = read(system_root / "proc/device-tree/model");
+    if (model.empty()) model = read(system_root / "sys/firmware/devicetree/base/model");
+    auto release = read(host_root / "nv_tegra_release");
+    if (release.empty()) release = read(system_root / "etc/nv_tegra_release");
+    auto os_release = read(host_root / "os-release");
+    if (os_release.empty()) os_release = read(system_root / "etc/os-release");
+    const auto os_field = [&](const std::string & key) {
+        std::istringstream lines(os_release);
+        std::string line;
+        while (std::getline(lines, line)) {
+            if (line.rfind(key + "=", 0) != 0) continue;
+            auto value = line.substr(key.size() + 1);
+            if (!value.empty() && value.back() == '\r') value.pop_back();
+            if (value.size() >= 2 && (value.front() == '\"' || value.front() == '\'') && value.back() == value.front()) {
+                value = value.substr(1, value.size() - 2);
+                std::string unescaped;
+                for (size_t i = 0; i < value.size(); ++i) {
+                    if (value[i] == '\\' && i + 1 < value.size()) ++i;
+                    unescaped += value[i];
+                }
+                value = std::move(unescaped);
+            }
+            return value;
+        }
+        return std::string{};
+    };
+    auto os = os_field("PRETTY_NAME");
+    if (os.empty()) {
+        os = os_field("NAME");
+        const auto version = os_field("VERSION");
+        if (!os.empty() && !version.empty()) os += " " + version;
+    }
+    std::string l4t, jetpack;
+    std::smatch match;
+    if (std::regex_search(release, match, std::regex(R"(#\s*R([0-9]+)\s*\(release\),\s*REVISION:\s*([0-9]+\.[0-9]+))"))) {
+        l4t = match[1].str() + "." + match[2].str();
+        // Verified release mapping. Unknown BSP releases stay unknown.
+        if (l4t == "36.4.4") jetpack = "6.2.1";
+    }
+    auto short_model = model;
+    const std::string suffix = " Developer Kit";
+    if (short_model.size() >= suffix.size() && short_model.compare(short_model.size() - suffix.size(), suffix.size(), suffix) == 0)
+        short_model.resize(short_model.size() - suffix.size());
+    auto description = model.empty() ? (os.empty() ? std::string{} : "OS: " + os) : "Model: " + model;
+    if (!jetpack.empty()) description += " - JetPack " + jetpack;
+    if (!l4t.empty()) description += " [L4T " + l4t + "]";
+    auto response = json_response("{\"model\":" + json_quote(model) +
+        ",\"short_model\":" + json_quote(short_model) +
+        ",\"os\":" + json_quote(os) +
+        ",\"display_name\":" + json_quote(model.empty() ? os : short_model) +
+        ",\"l4t\":" + json_quote(l4t) + ",\"jetpack\":" + json_quote(jetpack) +
+        ",\"jetpack_inferred\":" + (jetpack.empty() ? "false" : "true") +
+        ",\"description\":" + json_quote(description) + "}");
+    response.headers["Cache-Control"] = "no-store";
+    return response;
+}
 
 std::filesystem::path resolve_ui_model_path(
     const std::filesystem::path &path,

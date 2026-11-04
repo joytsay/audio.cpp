@@ -43,6 +43,22 @@
     LFM_DEMO_REF,
     isDemoLfmModel,
   } from "$lib/demo-models";
+  let systemModel = "",
+    systemDescription = "";
+  async function loadSystemInfo() {
+    try {
+      const info = await endpointJson<{
+        short_model?: string;
+        display_name?: string;
+        os?: string;
+        description?: string;
+      }>("", "ui/system-info", { cache: "no-store" });
+      systemModel = info.display_name || info.short_model || info.os || "";
+      systemDescription = info.description || "";
+    } catch {
+      /* Keep a generic header when host information is unavailable. */
+    }
+  }
   let detailsWidth = 225,
     bottomHeight = 320,
     eventsShare = 50,
@@ -1830,6 +1846,7 @@
         setSidebarWidth(savedWidth);
     } catch {}
     restorePanelLayout();
+    void loadSystemInfo();
     void refreshModels();
     void loadCsvFiles();
     void refreshVoices();
@@ -2273,7 +2290,13 @@
     style:--composer-height={`${composerHeight}px`}
   >
     <header>
-      <div><strong>Console</strong><span class="badge">LOCAL DEMO</span></div>
+      <div>
+        <strong>Console</strong><span
+          class="badge"
+          title={systemDescription || undefined}
+          >LOCAL IVR DEMO{systemModel ? ` on ${systemModel}` : ""}</span
+        >
+      </div>
       <div class="connection">
         <i class:online={connected}></i>{connected
           ? "CONNECTED"

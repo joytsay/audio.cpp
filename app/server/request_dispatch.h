@@ -3,6 +3,7 @@
 #include "busy_guard.h"
 #include "model_memory.h"
 #include "server_protocol.h"
+#include "server_ui.h"
 #include "sip_settings.h"
 
 #include "engine/framework/debug/trace.h"
@@ -47,6 +48,8 @@ struct RequestDispatcher {
         response.content_type = "image/x-icon";
       } else if (request.method == "GET" && request.path == "/health") {
         response = state.handle_health();
+      } else if (request.method == "GET" && request.path == "/v1/ui/system-info") {
+        response = ui_system_info_response(state.config_.ui_enabled || state.config_.ui_management);
       } else if ((request.method == "GET" || request.method == "POST") && request.path == "/v1/ui/sip") {
         response = sip_settings_response(request, state.config_.ui_management, state.request_base_);
       } else if (request.method == "GET" && request.path == "/v1/models") {

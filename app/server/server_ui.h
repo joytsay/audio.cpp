@@ -27,6 +27,10 @@ HttpResponse ui_upload_response(
     bool enabled,
     const std::function<std::filesystem::path(std::string_view)> &make_path);
 HttpResponse ui_asset_response(bool ui_enabled);
+HttpResponse ui_system_info_response(
+    bool enabled,
+    const std::filesystem::path & host_root = "/run/audiocpp-host",
+    const std::filesystem::path & system_root = "/");
 HttpResponse ui_voice_preview_response(
     const HttpRequest &request,
     bool ui_enabled,
