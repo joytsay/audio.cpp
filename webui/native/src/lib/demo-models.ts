@@ -1,6 +1,11 @@
 import { catalog } from "./catalog";
 import { getModelsRoot, modelPackageSizes, models, pathStatus } from "./api";
-import { endpointRouterModels, type OpenAIModel } from "./openai";
+import {
+  endpointRouterModels,
+  endpointJson,
+  routerEndpoint,
+  type OpenAIModel,
+} from "./openai";
 import type { CatalogEntry, StringMap } from "./types";
 
 export interface DemoAudioModel {
@@ -192,6 +197,9 @@ export async function discoverDemoLlmModels(
     .map((m) => ({
       ...m,
       label: isDemoLfmModel(m.id) ? LFM_DEMO_FILENAME : m.id,
+      requiresDownload: ["incomplete", "downloading"].includes(
+        m.status?.value || "",
+      ),
     }));
   if (!result.some((m) => isDemoLfmModel(m.id)))
     result.unshift({
@@ -200,6 +208,85 @@ export async function discoverDemoLlmModels(
       requiresDownload: true,
     });
   return result;
+}
+
+type RouterModel = OpenAIModel & {
+  aliases?: string[];
+  status?: { value?: string; failed?: boolean; exit_code?: number };
+};
+const resolveRouterModel = (entries: RouterModel[], id: string) =>
+  entries.find((m) => m.id === id || m.aliases?.includes(id)) ||
+  (isDemoLfmModel(id) ? entries.find((m) => isDemoLfmModel(m.id)) : undefined);
+
+function waitForRouter(signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const abort = () => {
+      clearTimeout(timer);
+      reject(signal.reason || new DOMException("Cancelled", "AbortError"));
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", abort);
+      resolve();
+    }, 500);
+    signal.addEventListener("abort", abort, { once: true });
+    if (signal.aborted) abort();
+  });
+}
+
+// Download completion is distinct from a running model worker. Load explicitly,
+// then poll the router's readiness before submitting a generation request.
+export async function ensureDemoLlmReady(
+  base: string,
+  requested: string,
+  signal: AbortSignal,
+  onStatus: (message: string) => void = () => {},
+): Promise<string> {
+  const started = performance.now();
+  let requestedLoad = false;
+  while (performance.now() - started < 180_000) {
+    signal.throwIfAborted();
+    const entries = (await endpointRouterModels(base, signal)) as RouterModel[];
+    const model = resolveRouterModel(entries, requested);
+    if (!model)
+      throw new Error(
+        `LLM ${requested} is not available in llama.cpp. Refresh or download it first.`,
+      );
+    const state = model.status?.value || "";
+    if (["incomplete", "downloading"].includes(state))
+      throw new Error(
+        `LLM ${model.id} download is ${state}. Resume or finish the download before calling.`,
+      );
+    if (model.loaded || ["loaded", "sleeping"].includes(state)) return model.id;
+    if (requestedLoad && model.status?.failed)
+      throw new Error(
+        `LLM ${model.id} failed to start (exit ${model.status.exit_code ?? "unknown"}). Check the llama.cpp worker logs.`,
+      );
+    if (!requestedLoad && !["loading", "downloaded"].includes(state)) {
+      onStatus(`Loading ${model.id}…`);
+      try {
+        await endpointJson(
+          routerEndpoint(base, ""),
+          "models/load",
+          {
+            method: "POST",
+            body: JSON.stringify({ model: model.id }),
+          },
+          signal,
+        );
+      } catch (cause) {
+        if (
+          !(cause instanceof Error) ||
+          !/already (running|loaded)/i.test(cause.message)
+        )
+          throw cause;
+      }
+      requestedLoad = true;
+    } else onStatus(`Waiting for ${model.id}…`);
+    await waitForRouter(signal);
+  }
+  throw new Error(
+    `LLM ${requested} did not become ready within 180 seconds. Check the llama.cpp worker logs.`,
+  );
 }
 
 export function preferredDemoModel(

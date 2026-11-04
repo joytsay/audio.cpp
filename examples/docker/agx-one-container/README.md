@@ -178,6 +178,10 @@ Audio packages must be installed first. The LLM dropdown always includes
 monitors completion, and uses the real router ID once available. Calls cannot
 use this preset until it is downloaded. Audio dropdowns merge registered aliases
 and equivalent folder/file paths; distinct quantizations remain separate.
+Router entries marked `incomplete` or `downloading` remain unavailable for
+calls. An incomplete LFM2.5 download has a **Resume LFM2.5 Q4_K_M** action.
+Before each LLM turn, the demo explicitly loads the selected worker and waits
+for its ready state. Inference also enables router autoload for that request.
 
 The sidebar groups controls into **VAD**, **ASR**, **LLM**, and **TTS** sections,
 each with an On/Off switch. System prompt and its save button are in **LLM**.

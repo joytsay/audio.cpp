@@ -29,6 +29,8 @@ const { chromium } = require("playwright");
     requests = [];
   let vadCalls = 0,
     noLlmModels = false;
+  let llmState = "unloaded",
+    llmLoadPolls = 0;
   let greetingsCsv = 'greeting\n"您好，這裡是 GeoVision IVR。"\n';
   let promptCsv = "你是現場維修保養的語音助理。";
   const llmId = "LiquidAI_LFM2.5-1.2B-Instruct-Q4_K_M.gguf";
@@ -54,6 +56,14 @@ const { chromium } = require("playwright");
         ? route.request().postDataJSON()
         : {};
     requests.push({ path: url.pathname, body });
+    if (url.pathname === "/llm/v1/chat/completions") {
+      assert.equal(
+        llmState,
+        "loaded",
+        "The demo must wait for the worker to be ready before chat",
+      );
+      assert.equal(url.searchParams.get("autoload"), "true");
+    }
     let json = {};
     if (url.pathname.endsWith("models-root"))
       json = { models_root: "/app/models" };
@@ -66,18 +76,31 @@ const { chromium } = require("playwright");
         "bartowski/LiquidAI_LFM2.5-1.2B-Instruct-GGUF:Q4_K_M",
       );
       noLlmModels = false;
+      llmState = "unloaded";
+      llmLoadPolls = 0;
       json = { success: true };
-    } else if (url.pathname === "/llm/models")
+    } else if (url.pathname === "/llm/models/load") {
+      assert.equal(body.model, llmId);
+      llmState = "loading";
+      llmLoadPolls = 0;
+      json = { success: true };
+    } else if (url.pathname === "/llm/models") {
+      if (llmState === "loading" && ++llmLoadPolls >= 2) llmState = "loaded";
       json = {
         data: noLlmModels
-          ? []
+          ? [
+              {
+                id: "bartowski/LiquidAI_LFM2.5-1.2B-Instruct-GGUF:Q4_K_M",
+                status: { value: "incomplete" },
+              },
+            ]
           : [
-              { id: llmId },
-              { id: "Other-local-model.gguf" },
+              { id: llmId, status: { value: llmState } },
+              { id: "Other-local-model.gguf", status: { value: "loaded" } },
               { id: "Qwen3-Embedding" },
             ],
       };
-    else if (url.pathname === "/v1/models")
+    } else if (url.pathname === "/v1/models")
       json = {
         data: [
           {
@@ -495,7 +518,7 @@ const { chromium } = require("playwright");
     ),
   );
   await page
-    .getByRole("button", { name: "Download LFM2.5 Q4_K_M", exact: true })
+    .getByRole("button", { name: "Resume LFM2.5 Q4_K_M", exact: true })
     .click();
   await page
     .getByText("LFM2.5 Q4_K_M downloaded and ready", { exact: true })
@@ -868,7 +891,7 @@ const { chromium } = require("playwright");
     false,
   );
   console.log(
-    "PASS downloaded-model dropdowns, actual LLM IDs, unlinked branding, CSV saves, cached greeting, ASR hotwords, clone recording/transcript, voice/text calls, history, runtime measurements, stage switches/bypasses/manual turns, deduplicated model aliases, LFM download, greeting text/reference isolation, fixed equal-width scenarios panel, audio scenario, three-turn maintenance simulation, distinct technician/assistant voices, CSP-safe example click/send/play, chat audio players, ordered five-example autoplay, queue cancellation, mobile layout",
+    "PASS downloaded-model dropdowns, actual LLM IDs, unlinked branding, CSV saves, cached greeting, ASR hotwords, clone recording/transcript, voice/text calls, history, runtime measurements, stage switches/bypasses/manual turns, deduplicated model aliases, LFM download, greeting text/reference isolation, fixed equal-width scenarios panel, audio scenario, three-turn maintenance simulation, distinct technician/assistant voices, CSP-safe example click/send/play, chat audio players, ordered five-example autoplay, queue cancellation, incomplete LLM detection/resume, explicit model loading/readiness before chat, mobile layout",
   );
   await browser.close();
 })().catch((e) => {

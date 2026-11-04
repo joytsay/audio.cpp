@@ -28,6 +28,7 @@
   import {
     discoverDemoAudioModels,
     discoverDemoLlmModels,
+    ensureDemoLlmReady,
     preferredDemoModel,
     type DemoAudioModel,
     type DemoLlmModel,
@@ -633,9 +634,20 @@
         status = "Thinking";
         record("AGENT_STATE_CHANGED", "listening → thinking");
         operationStarted = performance.now();
+        const readyLlm = await ensureDemoLlmReady(
+          llmBase(),
+          llm,
+          signal,
+          (message) => {
+            status = message;
+          },
+        );
+        if (generation !== epoch || signal.aborted) return;
+        llm = readyLlm;
+        status = "Thinking";
         const response = await endpointJson<any>(
           llmBase(),
-          "chat/completions",
+          "chat/completions?autoload=true",
           {
             method: "POST",
             body: JSON.stringify({
@@ -1675,7 +1687,9 @@
             on:click={downloadLfmModel}
             >{llmDownloading
               ? "Downloading…"
-              : "Download LFM2.5 Q4_K_M"}</button
+              : selectedLlm?.status?.value === "incomplete"
+                ? "Resume LFM2.5 Q4_K_M"
+                : "Download LFM2.5 Q4_K_M"}</button
           >{/if}
         {#if llmDownloadStatus}<p role="status">{llmDownloadStatus}</p>{/if}
       </fieldset>
