@@ -31,6 +31,9 @@ const { chromium } = require("playwright");
     noLlmModels = false;
   let llmState = "unloaded",
     llmLoadPolls = 0;
+  let llmReportsRtf = false,
+    checkingAudioHighlights = false;
+  const highlightedTurns = [];
   let greetingsCsv = 'greeting\n"您好，這裡是 GeoVision IVR。"\n';
   let promptCsv = "你是現場維修保養的語音助理。";
   const llmId = "LiquidAI_LFM2.5-1.2B-Instruct-Q4_K_M.gguf";
@@ -56,6 +59,25 @@ const { chromium } = require("playwright");
         ? route.request().postDataJSON()
         : {};
     requests.push({ path: url.pathname, body });
+    if (
+      checkingAudioHighlights &&
+      url.pathname.endsWith("/audio/transcriptions/details")
+    ) {
+      const current = page.locator(".example-chips button.processing");
+      assert.equal(await current.count(), 1);
+      assert.equal(await current.getAttribute("aria-current"), "step");
+      highlightedTurns.push(await current.textContent());
+    }
+    if (
+      checkingAudioHighlights &&
+      (url.pathname.endsWith("/chat/completions") ||
+        (url.pathname.endsWith("/audio/speech") &&
+          body.input === "您好，請問需要什麼協助？"))
+    )
+      assert.equal(
+        await page.locator(".example-chips button.processing").textContent(),
+        highlightedTurns.at(-1),
+      );
     if (url.pathname === "/llm/v1/chat/completions") {
       assert.equal(
         llmState,
@@ -206,22 +228,45 @@ const { chromium } = require("playwright");
       json = { path: "/tmp/demo.wav" };
     else if (url.pathname.endsWith("/tasks/run"))
       json = {
+        timing: { rtf: 0 },
         segments:
           ++vadCalls === 1 ? [{ start_sample: 0, end_sample: 8000 }] : [],
       };
     else if (url.pathname.endsWith("/audio/transcriptions/details"))
-      json = { text: "語音測試" };
+      json = { text: "語音測試", timing: { rtf: 0.024241 } };
     else if (url.pathname.endsWith("/chat/completions"))
       json = {
         choices: [{ message: { content: "您好，請問需要什麼協助？" } }],
+        timings: llmReportsRtf ? { rtf: 0.75 } : { predicted_per_second: 45 },
       };
-    else if (url.pathname.endsWith("/audio/speech"))
-      return route.fulfill({ contentType: "audio/wav", body: wav });
+    else if (url.pathname.endsWith("/audio/speech")) {
+      assert.equal(body.response_format, "json");
+      return route.fulfill({
+        json: {
+          audio: wav.toString("base64"),
+          format: "wav",
+          timing: { rtf: 0.5 },
+        },
+      });
+    }
     if (url.pathname.endsWith("/chat/completions"))
       await new Promise((resolve) => setTimeout(resolve, 120));
     await route.fulfill({ json });
   });
   await page.addInitScript(() => {
+    if (!localStorage.getItem("geovision.demo.events.v1"))
+      localStorage.setItem(
+        "geovision.demo.events.v1",
+        JSON.stringify([
+          {
+            time: new Date().toISOString(),
+            run: "legacy",
+            type: "USER_INPUT_TRANSCRIBED",
+            summary: "legacy transcript",
+            runtimeMs: 12,
+          },
+        ]),
+      );
     window.cspViolations = [];
     document.addEventListener("securitypolicyviolation", (event) =>
       window.cspViolations.push(event.violatedDirective),
@@ -250,7 +295,7 @@ const { chromium } = require("playwright");
       "/#/demo",
   );
   await page.getByRole("button", { name: "Start call" }).waitFor();
-  assert.equal(await page.title(), "GeoVision · Voice Demo");
+  assert.equal(await page.title(), "GeoVision · IVR");
   assert.ok(await page.locator('link[rel="icon"]').getAttribute("href"));
 
   await page.getByLabel("LLM", { exact: true }).selectOption(llmId);
@@ -437,12 +482,61 @@ const { chromium } = require("playwright");
       .count(),
     0,
   );
+  await page.getByRole("columnheader", { name: "RTF", exact: true }).waitFor();
+  assert.equal(
+    await page.getByText("USER_INPUT_TRANSCRIBED", { exact: true }).count(),
+    0,
+  );
+  assert.equal(
+    await page
+      .locator(".events tbody tr")
+      .filter({ hasText: "legacy transcript" })
+      .locator("td.rtf")
+      .textContent(),
+    "—",
+  );
+  assert.equal(
+    await page
+      .locator(".events tbody tr")
+      .filter({ hasText: "VAD_COMPLETED" })
+      .first()
+      .locator("td.rtf")
+      .textContent(),
+    "0.0000",
+  );
+  assert.equal(
+    await page
+      .locator(".events tbody tr")
+      .filter({ hasText: "ASR_COMPLETED" })
+      .first()
+      .locator("td.rtf")
+      .textContent(),
+    "0.0242",
+  );
+  assert.equal(
+    await page
+      .locator(".events tbody tr")
+      .filter({ hasText: "TTS_COMPLETED" })
+      .first()
+      .locator("td.rtf")
+      .textContent(),
+    "0.5000",
+  );
+  assert.equal(
+    await page
+      .locator(".events tbody tr")
+      .filter({ hasText: "LLM_COMPLETED" })
+      .first()
+      .locator("td.rtf")
+      .textContent(),
+    "—",
+  );
   const timedEvents = await page.evaluate(() =>
     JSON.parse(localStorage.getItem("geovision.demo.events.v1")),
   );
   for (const type of [
     "VAD_COMPLETED",
-    "USER_INPUT_TRANSCRIBED",
+    "ASR_COMPLETED",
     "LLM_COMPLETED",
     "TTS_COMPLETED",
     "PLAYBACK_COMPLETED",
@@ -462,6 +556,21 @@ const { chromium } = require("playwright");
   assert.ok(
     timedEvents.some(
       (event) => event.type === "LLM_COMPLETED" && event.runtimeMs >= 120,
+    ),
+  );
+  assert.ok(
+    timedEvents.some(
+      (event) => event.type === "ASR_COMPLETED" && event.rtf === 0.024241,
+    ),
+  );
+  assert.ok(
+    timedEvents.some(
+      (event) => event.type === "TTS_COMPLETED" && event.rtf === 0.5,
+    ),
+  );
+  assert.ok(
+    timedEvents.some(
+      (event) => event.type === "LLM_COMPLETED" && event.rtf === null,
     ),
   );
   assert.ok(
@@ -627,6 +736,7 @@ const { chromium } = require("playwright");
   await page.getByRole("switch", { name: "Enable LLM", exact: true }).check();
   await page.getByRole("button", { name: "Start call" }).click();
   offset = requests.length;
+  llmReportsRtf = true;
   await page.getByLabel("Message", { exact: true }).fill("只用 LLM");
   await page.getByRole("button", { name: "Send message" }).click();
   await page
@@ -639,6 +749,15 @@ const { chromium } = require("playwright");
   assert.equal(
     requests.slice(offset).some((r) => r.path === "/v1/audio/speech"),
     false,
+  );
+  assert.equal(
+    await page
+      .locator(".events tbody tr")
+      .filter({ hasText: "LLM_COMPLETED" })
+      .first()
+      .locator("td.rtf")
+      .textContent(),
+    "0.7500",
   );
   await page.getByRole("button", { name: "Hang up" }).click();
   assert.deepEqual(errors, []);
@@ -748,11 +867,50 @@ const { chromium } = require("playwright");
   );
   await page.getByRole("button", { name: "Hang up" }).click();
   assert.deepEqual(errors, []);
-  // An example click loads bundled data locally, sends, and autoplays in chat.
+  // Selecting an example only previews it; sending requires the Send button.
   scenarioOffset = requests.length;
+  const chatPlayersBefore = await page.locator(".transcript audio").count();
   await page
     .getByRole("button", { name: "中央監控站2.mp3", exact: true })
     .click();
+  const preview = page.getByLabel("Selected audio preview", { exact: true });
+  await preview.waitFor();
+  assert.equal(await preview.evaluate((audio) => audio.paused), true);
+  assert.equal(
+    await page
+      .getByRole("button", { name: "中央監控站2.mp3", exact: true })
+      .getAttribute("aria-pressed"),
+    "true",
+  );
+  assert.ok(
+    (
+      await page
+        .getByRole("button", { name: "中央監控站2.mp3", exact: true })
+        .getAttribute("class")
+    ).includes("selected"),
+  );
+  assert.ok(
+    (await page.locator(".scenario-upload").boundingBox()).height <= 60,
+    "Audio chooser should be one compact row",
+  );
+  await preview.evaluate((audio) => audio.play());
+  await page.waitForFunction(
+    () => document.querySelector(".scenario-preview")?.ended,
+  );
+  assert.equal(
+    await page.locator(".transcript audio").count(),
+    chatPlayersBefore,
+  );
+  assert.equal(
+    requests
+      .slice(scenarioOffset)
+      .some((r) =>
+        /transcriptions|chat\/completions|audio\/speech/.test(r.path),
+      ),
+    false,
+    "Previewing a clip must not send it",
+  );
+  await page.getByRole("button", { name: "Send audio", exact: true }).click();
   await page.getByText("Scenario 1 complete", { exact: true }).waitFor();
   await page
     .getByLabel("Audio message: 中央監控站2.mp3", { exact: true })
@@ -786,12 +944,14 @@ const { chromium } = require("playwright");
   await page.getByRole("button", { name: "Hang up" }).click();
 
   scenarioOffset = requests.length;
+  checkingAudioHighlights = true;
   await page
     .getByRole("button", { name: "Play all 5 examples", exact: true })
     .click();
   await page
     .getByText("All 5 examples complete", { exact: true })
     .waitFor({ timeout: 90000 });
+  checkingAudioHighlights = false;
   const names = [
     "中央監控站2.mp3",
     "中控室.mp3",
@@ -801,6 +961,10 @@ const { chromium } = require("playwright");
   ];
   assert.deepEqual(
     await page.locator(".transcript .audio-message-name").allTextContents(),
+    names,
+  );
+  assert.deepEqual(
+    highlightedTurns.map((name) => name.trim()),
     names,
   );
   assert.equal(await page.locator(".transcript audio").count(), 5);
@@ -891,7 +1055,7 @@ const { chromium } = require("playwright");
     false,
   );
   console.log(
-    "PASS downloaded-model dropdowns, actual LLM IDs, unlinked branding, CSV saves, cached greeting, ASR hotwords, clone recording/transcript, voice/text calls, history, runtime measurements, stage switches/bypasses/manual turns, deduplicated model aliases, LFM download, greeting text/reference isolation, fixed equal-width scenarios panel, audio scenario, three-turn maintenance simulation, distinct technician/assistant voices, CSP-safe example click/send/play, chat audio players, ordered five-example autoplay, queue cancellation, incomplete LLM detection/resume, explicit model loading/readiness before chat, mobile layout",
+    "PASS downloaded-model dropdowns, actual LLM IDs, unlinked branding, CSV saves, cached greeting, ASR hotwords, clone recording/transcript, voice/text calls, history, runtime measurements, stage switches/bypasses/manual turns, deduplicated model aliases, LFM download, greeting text/reference isolation, fixed equal-width scenarios panel, audio scenario, three-turn maintenance simulation, distinct technician/assistant voices, CSP-safe preview then explicit send, chat audio players, ordered five-example autoplay, queue highlighting/cancellation, RTF reporting/persistence, legacy ASR event migration, compact audio chooser, incomplete LLM detection/resume, explicit model loading/readiness before chat, mobile layout",
   );
   await browser.close();
 })().catch((e) => {

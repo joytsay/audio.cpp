@@ -166,6 +166,11 @@ calls in this browser. **Clear events** removes that history.
 The **Runtime** column shows each operation's elapsed wall time in milliseconds,
 including request setup and transfer. Turn totals include reply playback;
 instant events and older history without timing show `—`.
+The **RTF** column displays a real-time factor only when the model's JSON
+response reports one (for example, `timing.rtf`). Missing values show `—`,
+including LLM responses that only report token throughput. TTS uses the JSON
+audio response to retain its timing. Successful transcription events are named
+**ASR_COMPLETED**; saved history using the older name is migrated on load.
 
 The VAD, ASR, LLM, and TTS dropdowns list installed packages, existing local
 GGUFs, and available registered models. **Refresh models** discovers new
@@ -200,14 +205,17 @@ fixed matching headers and share the width equally; they stack on narrow
 screens:
 
 - **Scenario 1 · audio examples:** click a reception example (中央監控站2、中控室、
-  員工檢查哨、大廳、車輛檢查哨) to send and play it immediately in the chat.
-  Alternatively, choose a WAV/MP3/FLAC file and press **Send audio**. Each audio
+  員工檢查哨、大廳、車輛檢查哨) to select it, highlight it blue, and show its
+  preview player. Selection and preview playback do not send it to the pipeline.
+  Press **Send audio** to send the selected clip and play it in chat. Alternatively,
+  choose a WAV/MP3/FLAC file using the compact single-row chooser. Each audio
   message includes a player for replay and its recognized transcript. Bundled
   data URLs are decoded locally, so the embedded UI's connection policy does
   not block example loading.
 - **Play all 5 examples:** automatically sends each example in order. The queue
   waits for the source audio to finish, then ASR, the assistant's reply, and
-  its TTS playback before sending the next example. Disabled pipeline stages
+  its TTS playback before sending the next example. The current clip stays
+  highlighted blue throughout that turn. Disabled pipeline stages
   are skipped. **Stop scenario** or hangup cancels remaining examples.
 - **Scenario 2 · 現場維修保養後的語音回報:** **Run Scenario 2** automatically fills
   and sends the three technician messages in order, waiting for each assistant

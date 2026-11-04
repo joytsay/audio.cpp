@@ -6,6 +6,7 @@
   import { browserDecodeToWav, encodePcm16Wav } from "$lib/audio";
   import { readGreetingCsv, writeGreetingCsv } from "$lib/greetings";
   import { recognitionContext } from "$lib/asr-context";
+  import { reportedRtf, rtfLabel } from "$lib/response-timing";
   import { uploadWav } from "$lib/api";
   import {
     maintenanceScenarioSteps,
@@ -20,7 +21,6 @@
 
   import {
     endpointJson,
-    endpointBlob,
     routerEndpoint,
     chatText,
     type ChatMessage,
@@ -41,6 +41,7 @@
     type: string;
     summary: string;
     runtimeMs?: number | null;
+    rtf?: number | null;
   };
   type DemoMessage = ChatMessage & {
     audioId?: string;
@@ -60,6 +61,11 @@
     chatAudioElements = {};
   }
   let scenarioMode: "audio" | "maintenance" = "audio";
+  let scenarioPreviewUrl = "",
+    selectedExampleName = "",
+    activeExampleName = "",
+    exampleLoading = false;
+  let scenarioPreviewPlayer: HTMLAudioElement | null = null;
   let scenarioFile: File | null = null,
     scenarioAudioName = "",
     scenarioStatus = "";
@@ -348,9 +354,10 @@
     type: string,
     summary: string,
     runtimeMs: number | null = null,
+    rtf: number | null = null,
   ) {
     events = [
-      { time: new Date().toISOString(), run, type, summary, runtimeMs },
+      { time: new Date().toISOString(), run, type, summary, runtimeMs, rtf },
       ...events,
     ].slice(0, 300);
     try {
@@ -470,6 +477,7 @@
           "VAD_COMPLETED",
           speech ? "Speech detected" : "End of speech",
           performance.now() - started,
+          reportedRtf(result),
         );
       if (speech) {
         if (!utterance.length) {
@@ -578,6 +586,7 @@
             "ASR_EMPTY",
             "No speech recognized",
             performance.now() - operationStarted,
+            reportedRtf(result),
           );
           if (options.playInputAudio)
             throw new Error(
@@ -586,9 +595,10 @@
           return;
         }
         record(
-          "USER_INPUT_TRANSCRIBED",
+          "ASR_COMPLETED",
           text,
           performance.now() - operationStarted,
+          reportedRtf(result),
         );
       }
       if (generation !== epoch) return;
@@ -608,9 +618,7 @@
         operationStarted = performance.now();
         const id = await load(ttsKey, signal);
         status = "Synthesizing technician voice";
-        const audio = await endpointBlob(
-          "",
-          "audio/speech",
+        const synthesis = await synthesizeSpeech(
           {
             model: id,
             input: maintenanceSpeechText(text),
@@ -623,8 +631,14 @@
           "TECHNICIAN_TTS_COMPLETED",
           technicianVoice,
           performance.now() - operationStarted,
+          synthesis.rtf,
         );
-        const wallMs = await playAudio(audio, generation, "technician", signal);
+        const wallMs = await playAudio(
+          synthesis.audio,
+          generation,
+          "technician",
+          signal,
+        );
         if (signal.aborted || generation !== epoch) return;
         record("TECHNICIAN_PLAYED", text, wallMs);
       }
@@ -674,7 +688,12 @@
         if (!reply)
           throw new Error("The language model returned an empty reply.");
         if (generation !== epoch) return;
-        record("LLM_COMPLETED", llm, performance.now() - operationStarted);
+        record(
+          "LLM_COMPLETED",
+          llm,
+          performance.now() - operationStarted,
+          reportedRtf(response),
+        );
       } else record("LLM_SKIPPED", "Input text passed through");
       if (!useLlm && !useTts) {
         record("TTS_SKIPPED", "Text output only");
@@ -702,16 +721,17 @@
         } else {
           body.voice = voice;
         }
-        const output = await endpointBlob("", "audio/speech", body, signal);
+        const synthesis = await synthesizeSpeech(body, signal);
         if (generation !== epoch) return;
         record(
           "TTS_COMPLETED",
           selectedTts?.label || "Speech synthesized",
           performance.now() - operationStarted,
+          synthesis.rtf,
         );
         operationStarted = performance.now();
         const playbackMs = await playAudio(
-          output,
+          synthesis.audio,
           generation,
           "assistant",
           signal,
@@ -780,6 +800,32 @@
     } finally {
       savingPrompt = false;
     }
+  }
+  async function synthesizeSpeech(
+    body: Record<string, unknown>,
+    signal: AbortSignal,
+  ) {
+    const result = await endpointJson<{
+      audio: string;
+      timing?: { rtf?: number };
+    }>(
+      "",
+      "audio/speech",
+      {
+        method: "POST",
+        body: JSON.stringify({ ...body, response_format: "json" }),
+      },
+      signal,
+    );
+    if (typeof result.audio !== "string" || !result.audio)
+      throw new Error("TTS returned no audio.");
+    const bytes = Uint8Array.from(atob(result.audio), (character) =>
+      character.charCodeAt(0),
+    );
+    return {
+      audio: new Blob([bytes], { type: "audio/wav" }),
+      rtf: reportedRtf(result),
+    };
   }
   async function playIncomingAudio(
     audio: Blob,
@@ -963,6 +1009,7 @@
     greetingPreparing = true;
     greetingStatus = "Preparing greeting…";
     greetingPromise = (async () => {
+      const started = performance.now();
       try {
         const id = await load(ttsKey, aborter.signal);
         const body: Record<string, unknown> = {
@@ -981,13 +1028,15 @@
         } else {
           body.voice = voice;
         }
-        const audio = await endpointBlob(
-          "",
-          "audio/speech",
-          body,
-          aborter.signal,
-        );
+        const synthesis = await synthesizeSpeech(body, aborter.signal);
+        const audio = synthesis.audio;
         if (!aborter.signal.aborted && greetingFingerprint() === key) {
+          record(
+            "GREETING_TTS_COMPLETED",
+            "Prepared call greeting",
+            performance.now() - started,
+            synthesis.rtf,
+          );
           preparedGreeting = audio;
           preparedKey = key;
           greetingStatus = "Greeting ready · instant playback";
@@ -1014,6 +1063,7 @@
     const aborter = new AbortController();
     cloneAborter = aborter;
     cloneBusy = true;
+    const started = performance.now();
     cloneStatus = "Transcribing reference voice…";
     try {
       const id = await load(asrKey, aborter.signal);
@@ -1043,6 +1093,12 @@
       );
       if (!aborter.signal.aborted && voiceFile === file) {
         referenceText = result.text?.trim() || "";
+        record(
+          referenceText ? "ASR_COMPLETED" : "ASR_EMPTY",
+          `Reference voice: ${referenceText || "No speech recognized"}`,
+          performance.now() - started,
+          reportedRtf(result),
+        );
         cloneStatus = referenceText
           ? "Transcript ready · review before calling"
           : "No speech recognized. Enter the transcript manually.";
@@ -1116,6 +1172,26 @@
       cloneBusy = false;
     }
   }
+  function setScenarioFile(file: File | null, exampleName = "") {
+    scenarioPreviewPlayer?.pause();
+    if (scenarioPreviewUrl) URL.revokeObjectURL(scenarioPreviewUrl);
+    scenarioFile = file;
+    scenarioAudioName = file?.name || "";
+    selectedExampleName = exampleName;
+    scenarioPreviewUrl = file ? URL.createObjectURL(file) : "";
+  }
+  async function selectScenarioExample(example: AudioExample) {
+    if (scenarioRunning || exampleLoading) return;
+    exampleLoading = true;
+    try {
+      setScenarioFile(await loadScenarioExample(example), example.name);
+      scenarioStatus = "Audio selected · press Send audio";
+    } catch (cause) {
+      scenarioStatus = cause instanceof Error ? cause.message : String(cause);
+    } finally {
+      exampleLoading = false;
+    }
+  }
   async function loadScenarioExample(example: AudioExample): Promise<File> {
     if (example.url.startsWith("data:")) {
       const comma = example.url.indexOf(",");
@@ -1152,6 +1228,7 @@
     }
     const token = ++scenarioToken;
     scenarioRunning = true;
+    scenarioPreviewPlayer?.pause();
     manualRecording = false;
     manualParts = [];
     error = "";
@@ -1168,14 +1245,15 @@
             ? await loadScenarioExample(example)
             : scenarioFile!;
           if (!connected || token !== scenarioToken) break;
-          scenarioFile = file;
-          scenarioAudioName = file.name;
+          setScenarioFile(file, example?.name || selectedExampleName);
+          activeExampleName = example?.name || selectedExampleName;
           scenarioStatus = `Scenario 1 · ${index + 1}/${queue.length} · ${file.name}`;
           await respond("", file, epoch, {
             playInputAudio: true,
             audioName: file.name,
           });
           if (error || token !== scenarioToken) break;
+          activeExampleName = "";
         }
         if (!error && token === scenarioToken)
           scenarioStatus =
@@ -1219,6 +1297,7 @@
     } finally {
       if (token === scenarioToken) {
         scenarioRunning = false;
+        activeExampleName = "";
         if (!busy && connected) status = idleStatus();
       }
     }
@@ -1231,6 +1310,8 @@
     }
     scenarioToken++;
     scenarioRunning = false;
+    activeExampleName = "";
+    scenarioPreviewPlayer?.pause();
     controller?.abort();
     if (connected) controller = new AbortController();
     if (player) player.stop();
@@ -1251,6 +1332,7 @@
       return;
     const generation = ++epoch;
     starting = true;
+    scenarioPreviewPlayer?.pause();
     error = "";
     status = "Connecting";
     run = new Date().toLocaleTimeString();
@@ -1315,9 +1397,13 @@
           const samples = new Float32Array(e.inputBuffer.getChannelData(0));
           if (!(speaking && playbackRole !== "assistant"))
             inputBars = muted ? Array(36).fill(2) : bars(samples);
-          const replaying = Object.values(chatAudioElements).some(
-            (element) => element && !element.paused && !element.ended,
-          );
+          const replaying =
+            (scenarioPreviewPlayer &&
+              !scenarioPreviewPlayer.paused &&
+              !scenarioPreviewPlayer.ended) ||
+            Object.values(chatAudioElements).some(
+              (element) => element && !element.paused && !element.ended,
+            );
           if (muted || busy || speaking || scenarioRunning || replaying) {
             windows = [];
             frames = 0;
@@ -1407,6 +1493,8 @@
   function hangup(log = true) {
     scenarioToken++;
     scenarioRunning = false;
+    activeExampleName = "";
+    scenarioPreviewPlayer?.pause();
     epoch++;
     stopIncomingPlayback?.();
     Object.values(chatAudioElements).forEach((element) => element?.pause());
@@ -1474,7 +1562,12 @@
             (e) =>
               typeof e?.summary === "string" && typeof e?.time === "string",
           )
-          .slice(0, 300);
+          .slice(0, 300)
+          .map((event) =>
+            event.type === "USER_INPUT_TRANSCRIBED"
+              ? { ...event, type: "ASR_COMPLETED" }
+              : event,
+          );
     } catch {}
   });
   onDestroy(() => {
@@ -1492,10 +1585,11 @@
     cloneStream?.getTracks().forEach((t) => t.stop());
     hangup(false);
     releaseChatAudio();
+    if (scenarioPreviewUrl) URL.revokeObjectURL(scenarioPreviewUrl);
   });
 </script>
 
-<svelte:head><title>GeoVision · Voice Demo</title></svelte:head>
+<svelte:head><title>GeoVision · IVR</title></svelte:head>
 <div class="demo">
   <aside>
     <div class="brand">
@@ -1938,13 +2032,15 @@
               ><tr
                 ><th>TIMESTAMP</th><th
                   title="Elapsed wall time for this operation">RUNTIME</th
+                ><th title="Real-time factor reported by the model response"
+                  >RTF</th
                 ><th>EVENT TYPE</th><th>SUMMARY</th></tr
               ></thead
             ><tbody
               >{#each events as event}<tr
                   ><td>{new Date(event.time).toLocaleTimeString()}</td><td
                     class="runtime">{runtimeLabel(event.runtimeMs)}</td
-                  ><td
+                  ><td class="rtf">{rtfLabel(event.rtf)}</td><td
                     ><span
                       class:error-tag={event.type === "ERROR"}
                       class="event-tag">{event.type}</span
@@ -1974,40 +2070,54 @@
           >
           {#if scenarioMode === "audio"}
             <div class="scenario-upload">
-              <strong>{scenarioAudioName || "No audio selected"}</strong><small
-                >WAV, MP3, or FLAC</small
-              ><label class="audio-choice"
+              <strong title={scenarioAudioName || "No audio selected"}
+                >{scenarioAudioName || "No audio selected"}</strong
+              >
+              <small>WAV, MP3, FLAC</small>
+              <label class="audio-choice"
                 >Choose audio<input
+                  class="audio-file-input"
                   aria-label="Choose scenario audio"
                   type="file"
                   accept=".wav,.mp3,.flac,audio/*"
                   disabled={scenarioRunning}
-                  on:change={(e) => {
-                    scenarioFile = e.currentTarget.files?.[0] || null;
-                    scenarioAudioName = scenarioFile?.name || "";
-                  }}
+                  on:change={(e) =>
+                    setScenarioFile(e.currentTarget.files?.[0] || null)}
                 /></label
               >
             </div>
             <div class="example-chips">
-              <small>Example audio</small
-              >{#each scenarioAudioExamples as example}<button
+              <small>Example audio</small>
+              {#each scenarioAudioExamples as example}<button
+                  class:selected={selectedExampleName === example.name}
+                  class:processing={activeExampleName === example.name}
+                  aria-pressed={selectedExampleName === example.name}
+                  aria-current={activeExampleName === example.name
+                    ? "step"
+                    : undefined}
                   disabled={scenarioRunning ||
+                    exampleLoading ||
                     busy ||
-                    detecting ||
-                    starting ||
-                    !useAsr ||
-                    (!connected && !canCall)}
-                  on:click={() => runScenario(undefined, [example])}
+                    starting}
+                  on:click={() => selectScenarioExample(example)}
                   >{example.name}</button
                 >{/each}
             </div>
+            {#if scenarioPreviewUrl}<audio
+                class="scenario-preview"
+                controls
+                preload="metadata"
+                src={scenarioPreviewUrl}
+                aria-label="Selected audio preview"
+                bind:this={scenarioPreviewPlayer}
+              ></audio>{/if}
             <button
               disabled={scenarioRunning ||
                 busy ||
                 detecting ||
                 starting ||
                 !scenarioFile ||
+                exampleLoading ||
                 !useAsr ||
                 (!connected && !canCall)}
               on:click={() => runScenario()}>Send audio</button
@@ -2429,13 +2539,51 @@
     margin-top: 6px;
   }
   .scenario-upload {
+    display: flex;
+    align-items: center;
+    flex-wrap: nowrap;
+    gap: 8px;
     border: 1px dashed var(--control-border);
     border-radius: 8px;
-    padding: 10px;
+    padding: 8px 10px;
     margin-top: 10px;
   }
+  .scenario-upload > strong {
+    min-width: 0;
+    flex: 1;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
   .scenario-upload > small {
-    display: block;
+    flex-shrink: 0;
+    white-space: nowrap;
+  }
+  .demo .audio-choice {
+    position: relative;
+    display: inline-flex;
+    margin: 0;
+    padding: 7px 9px;
+    background: var(--button-bg);
+    border: 1px solid var(--control-border);
+    border-radius: 6px;
+    cursor: pointer;
+    flex-shrink: 0;
+    white-space: nowrap;
+  }
+  .demo .audio-file-input {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    opacity: 0;
+    overflow: hidden;
+    padding: 0;
+    margin: 0;
+    border: 0;
+  }
+  .audio-choice:focus-within {
+    outline: 2px solid var(--blue);
+    outline-offset: 2px;
   }
   .example-chips {
     display: flex;
@@ -2447,6 +2595,21 @@
   .demo .example-chips button {
     font-size: 10px;
     padding: 4px 6px;
+  }
+  .demo .example-chips button.selected {
+    background: #17375b;
+    border-color: var(--blue);
+    color: #b9d7ff;
+  }
+  .demo .example-chips button.processing {
+    opacity: 1;
+    box-shadow: 0 0 0 1px var(--blue);
+  }
+  .scenario-preview {
+    display: block;
+    width: 100%;
+    height: 36px;
+    margin: 8px 0;
   }
   .scenario-script {
     margin-top: 10px;
@@ -2600,7 +2763,8 @@
   .events th:first-child {
     width: 110px;
   }
-  .events td.runtime {
+  .events td.runtime,
+  .events td.rtf {
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
   }
@@ -2608,6 +2772,9 @@
     width: 110px;
   }
   .events th:nth-child(3) {
+    width: 80px;
+  }
+  .events th:nth-child(4) {
     width: 235px;
   }
   .event-tag {
@@ -2688,7 +2855,7 @@
     .session {
       padding: 12px;
     }
-    .events th:nth-child(3) {
+    .events th:nth-child(4) {
       width: 170px;
     }
     .events td,
