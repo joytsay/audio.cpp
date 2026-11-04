@@ -1,0 +1,16 @@
+import assert from 'node:assert/strict';
+import { traditionalTranscript, traditionalTranscriptionResponse, isTranscriptionPath } from '../src/lib/transcript.ts';
+assert.equal(traditionalTranscript('请帮我转接车辆检查哨，台积电 X光机，维修 FAN 2个。'), '請幫我轉接車輛檢查哨，臺積電 X光機，維修 FAN 2個。');
+assert.equal(traditionalTranscript('F15P1H4K-GEX-EF-03 SN:14778725 6460MF GeoVision IVR'), 'F15P1H4K-GEX-EF-03 SN:14778725 6460MF GeoVision IVR');
+const original = { text: '头发干燥', segments: [{text:'车辆'}], timing:{rtf:0.2}, language:'zh', model:'测试模型' };
+const converted = traditionalTranscriptionResponse(original);
+assert.equal(converted.text, '頭髮乾燥');
+assert.equal(converted.segments[0].text, '車輛');
+assert.equal(original.text, '头发干燥');
+assert.deepEqual(converted.timing, {rtf:0.2});
+assert.equal(converted.model, '测试模型');
+assert.equal(traditionalTranscriptionResponse({text_output:{text:'大厅'}}).text_output.text, '大廳');
+assert.equal(isTranscriptionPath('/v1/audio/transcriptions/details'), true);
+assert.equal(isTranscriptionPath('audio/transcriptions?format=json'), true);
+assert.equal(isTranscriptionPath('chat/completions'), false);
+console.log('PASS dictionary transcription conversion, phrases, segments, identifiers and response metadata');

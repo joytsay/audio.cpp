@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy, tick } from "svelte";
+  import PanelDivider from "$lib/PanelDivider.svelte";
   import { Mic, MicOff, Phone, PhoneOff, Send, Trash2 } from "@lucide/svelte";
   import logo from "../../../static/logo_cloud.svg?raw";
   import "../../app.css";
@@ -42,6 +43,92 @@
     LFM_DEMO_REF,
     isDemoLfmModel,
   } from "$lib/demo-models";
+  let detailsWidth = 225,
+    bottomHeight = 320,
+    eventsShare = 50,
+    waveHeight = 124,
+    composerHeight = 136;
+  let viewportHeight = 900;
+  function savePanelLayout() {
+    try {
+      localStorage.setItem(
+        "geovision.demo.panel-layout",
+        JSON.stringify({
+          detailsWidth,
+          bottomHeight,
+          eventsShare,
+          waveHeight,
+          composerHeight,
+        }),
+      );
+    } catch {}
+  }
+  function restorePanelLayout() {
+    bottomHeight = Math.max(260, Math.min(380, window.innerHeight * 0.33));
+    try {
+      const saved = JSON.parse(
+        localStorage.getItem("geovision.demo.panel-layout") || "{}",
+      );
+      const bounded = (
+        name: string,
+        fallback: number,
+        min: number,
+        max: number,
+      ) =>
+        typeof saved[name] === "number" && Number.isFinite(saved[name])
+          ? Math.max(min, Math.min(max, saved[name]))
+          : fallback;
+      detailsWidth = bounded("detailsWidth", detailsWidth, 150, 500);
+      bottomHeight = bounded(
+        "bottomHeight",
+        bottomHeight,
+        160,
+        Math.max(260, window.innerHeight - 400),
+      );
+      eventsShare = bounded("eventsShare", eventsShare, 20, 80);
+      waveHeight = bounded("waveHeight", waveHeight, 70, 260);
+      composerHeight = bounded("composerHeight", composerHeight, 120, 300);
+    } catch {}
+  }
+  let sidebarWidth = 290;
+  let resizingSidebar = false;
+  function setSidebarWidth(width: number) {
+    if (window.innerWidth <= 700) return;
+    sidebarWidth = Math.round(
+      Math.max(240, Math.min(width, 640, window.innerWidth - 420)),
+    );
+  }
+  function saveSidebarWidth() {
+    try {
+      localStorage.setItem(
+        "geovision.demo.sidebar-width",
+        String(sidebarWidth),
+      );
+    } catch {}
+  }
+  function resizeSidebar(event: PointerEvent) {
+    if (!resizingSidebar) return;
+    const divider = event.currentTarget as HTMLElement;
+    const left = divider.parentElement?.getBoundingClientRect().left || 0;
+    setSidebarWidth(event.clientX - left);
+  }
+  function finishSidebarResize() {
+    if (!resizingSidebar) return;
+    resizingSidebar = false;
+    saveSidebarWidth();
+  }
+  function sidebarResizeKey(event: KeyboardEvent) {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    setSidebarWidth(
+      event.key === "Home"
+        ? 240
+        : event.key === "End"
+          ? 640
+          : sidebarWidth + (event.key === "ArrowRight" ? 20 : -20),
+    );
+    saveSidebarWidth();
+  }
   type Event = {
     time: string;
     run: string;
@@ -1042,13 +1129,33 @@
     generation: number,
     role: "assistant" | "technician" = "assistant",
     signal?: AbortSignal,
+    leadInSeconds = 0,
   ): Promise<number | null> {
     const started = performance.now();
-    if (generation !== epoch || !context || signal?.aborted) return null;
-    const buffer = await context.decodeAudioData(await output.arrayBuffer());
-    if (generation !== epoch || !context || signal?.aborted) return null;
-    const node = context.createBufferSource();
-    node.buffer = buffer;
+    const ctx = context;
+    if (generation !== epoch || !ctx || signal?.aborted) return null;
+    await ctx.resume();
+    if (generation !== epoch || context !== ctx || signal?.aborted) return null;
+    const buffer = await ctx.decodeAudioData(await output.arrayBuffer());
+    if (generation !== epoch || context !== ctx || signal?.aborted) return null;
+    const node = ctx.createBufferSource();
+    if (leadInSeconds > 0) {
+      // Render silence first so a newly opened output device does not clip
+      // the greeting's first syllable. Keep every sample of the TTS audio.
+      const leadFrames = Math.ceil(leadInSeconds * buffer.sampleRate);
+      const padded = ctx.createBuffer(
+        buffer.numberOfChannels,
+        leadFrames + buffer.length,
+        buffer.sampleRate,
+      );
+      for (let channel = 0; channel < buffer.numberOfChannels; channel++)
+        padded.copyToChannel(
+          buffer.getChannelData(channel),
+          channel,
+          leadFrames,
+        );
+      node.buffer = padded;
+    } else node.buffer = buffer;
     analyser = context.createAnalyser();
     analyser.fftSize = 512;
     node.connect(analyser);
@@ -1630,11 +1737,14 @@
         if (!audio)
           throw new Error(greetingStatus || "Greeting synthesis failed.");
         messages = [{ role: "assistant", content: greeting }];
+        await tick();
+        if (generation !== epoch || !connected) return;
         const playbackMs = await playAudio(
           audio,
           generation,
           "assistant",
           controller?.signal,
+          0.3,
         );
         if (generation !== epoch) return;
         record("GREETING_PLAYED", greeting, playbackMs);
@@ -1712,6 +1822,14 @@
     previousTheme = document.documentElement.dataset.theme;
     document.documentElement.dataset.theme = "dark";
     mounted = true;
+    try {
+      const savedWidth = Number(
+        localStorage.getItem("geovision.demo.sidebar-width"),
+      );
+      if (savedWidth > 0 && Number.isFinite(savedWidth))
+        setSidebarWidth(savedWidth);
+    } catch {}
+    restorePanelLayout();
     void refreshModels();
     void loadCsvFiles();
     void refreshVoices();
@@ -1755,8 +1873,16 @@
 </script>
 
 <svelte:head><title>GeoVision · IVR</title></svelte:head>
-<div class="demo">
-  <aside>
+<svelte:window
+  bind:innerHeight={viewportHeight}
+  on:resize={() => setSidebarWidth(sidebarWidth)}
+/>
+<div
+  class="demo"
+  class:resizing-sidebar={resizingSidebar}
+  style:--sidebar-width={`${sidebarWidth}px`}
+>
+  <aside id="demo-settings">
     <div class="brand">
       <span class="gv">{@html logo}</span><span>GeoVision IVR</span>
     </div>
@@ -2114,7 +2240,38 @@
       during replies
     </div>
   </aside>
-  <main>
+  <!-- A focusable separator is the ARIA window-splitter pattern; it supports arrow keys. -->
+  <!-- svelte-ignore a11y_no_noninteractive_tabindex a11y_no_noninteractive_element_interactions -->
+  <div
+    class="sidebar-divider"
+    role="separator"
+    aria-label="Resize sidebar"
+    aria-controls="demo-settings"
+    aria-orientation="vertical"
+    aria-valuemin={240}
+    aria-valuemax={640}
+    aria-valuenow={sidebarWidth}
+    tabindex="0"
+    on:pointerdown={(event) => {
+      if (event.button !== 0) return;
+      event.preventDefault();
+      resizingSidebar = true;
+      event.currentTarget.setPointerCapture(event.pointerId);
+    }}
+    on:pointermove={resizeSidebar}
+    on:pointerup={finishSidebarResize}
+    on:pointercancel={finishSidebarResize}
+    on:lostpointercapture={finishSidebarResize}
+    on:keydown={sidebarResizeKey}
+  ></div>
+  <main
+    style:--details-width={`${detailsWidth}px`}
+    style:--bottom-height={`${bottomHeight}px`}
+    style:--events-share={`${eventsShare}fr`}
+    style:--scenarios-share={`${100 - eventsShare}fr`}
+    style:--wave-height={`${waveHeight}px`}
+    style:--composer-height={`${composerHeight}px`}
+  >
     <header>
       <div><strong>Console</strong><span class="badge">LOCAL DEMO</span></div>
       <div class="connection">
@@ -2145,6 +2302,16 @@
               ></span>{/each}
           </div>
         </div>
+        <div class="wave-resize panel-resize">
+          <PanelDivider
+            label="Resize waveform"
+            orientation="horizontal"
+            bind:value={waveHeight}
+            min={70}
+            max={260}
+            oncommit={savePanelLayout}
+          />
+        </div>
         <div
           class="transcript"
           bind:this={transcriptElement}
@@ -2170,6 +2337,17 @@
               {/if}
               {#if message.content}<p>{message.content}</p>{/if}
             </article>{/each}
+        </div>
+        <div class="composer-resize panel-resize">
+          <PanelDivider
+            label="Resize message input"
+            orientation="horizontal"
+            bind:value={composerHeight}
+            min={120}
+            max={300}
+            reverse
+            oncommit={savePanelLayout}
+          />
         </div>
         <div class="composer">
           <form on:submit|preventDefault={send}>
@@ -2224,6 +2402,16 @@
           {#if error}<p class="error" role="alert">{error}</p>{/if}
         </div>
       </div>
+      <div class="details-resize panel-resize">
+        <PanelDivider
+          label="Resize session details"
+          bind:value={detailsWidth}
+          min={150}
+          max={500}
+          reverse
+          oncommit={savePanelLayout}
+        />
+      </div>
       <div class="details">
         <div class="section-label">SESSION</div>
         <dl>
@@ -2250,7 +2438,18 @@
         </p>
       </div>
     </section>
-    <div class="bottom-panels">
+    <div class="bottom-resize panel-resize">
+      <PanelDivider
+        label="Resize bottom panels"
+        orientation="horizontal"
+        bind:value={bottomHeight}
+        min={160}
+        max={Math.max(260, viewportHeight - 400)}
+        reverse
+        oncommit={savePanelLayout}
+      />
+    </div>
+    <div class="bottom-panels" data-resize-container>
       <section class="events">
         <div class="events-title">
           <strong>Events <span>{events.length}</span></strong><button
@@ -2288,6 +2487,16 @@
             </p>{/if}
         </div>
       </section>
+      <div class="events-resize panel-resize">
+        <PanelDivider
+          label="Resize events and scenarios"
+          bind:value={eventsShare}
+          min={20}
+          max={80}
+          percent
+          oncommit={savePanelLayout}
+        />
+      </div>
       <section class="scenario-dock" aria-label="Demo scenarios">
         <div class="scenario-title"><strong>Scenarios</strong></div>
         <div class="scenario-panel">
@@ -2425,12 +2634,35 @@
   }
   .demo {
     display: grid;
-    grid-template-columns: 290px 1fr;
+    grid-template-columns: var(--sidebar-width, 290px) minmax(0, 1fr);
+    position: relative;
     min-height: 100vh;
     font-family: Inter, system-ui, sans-serif;
     font-size: 13px;
     background: var(--bg);
     color: var(--text);
+  }
+  .sidebar-divider {
+    position: absolute;
+    left: calc(var(--sidebar-width, 290px) - 4px);
+    top: 0;
+    bottom: 0;
+    width: 8px;
+    z-index: 5;
+    cursor: col-resize;
+    touch-action: none;
+    border-left: 2px solid transparent;
+    outline: none;
+  }
+  .sidebar-divider:hover,
+  .sidebar-divider:focus-visible,
+  .resizing-sidebar .sidebar-divider {
+    border-left-color: var(--accent, #38d9d3);
+    background: #38d9d322;
+  }
+  .resizing-sidebar {
+    user-select: none;
+    cursor: col-resize;
   }
   .demo * {
     box-sizing: border-box;
@@ -2676,11 +2908,14 @@
   }
   .session {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) 225px;
-    min-height: 360px;
+    grid-template-columns: minmax(0, 1fr) 6px minmax(
+        150px,
+        var(--details-width, 225px)
+      );
+    min-height: 320px;
     flex: 1;
     padding: 20px;
-    gap: 20px;
+    gap: 8px;
   }
   .conversation {
     display: flex;
@@ -2691,6 +2926,10 @@
     overflow: hidden;
   }
   .wave-area {
+    grid-template-rows: auto minmax(0, 1fr);
+    height: min(var(--wave-height, 124px), 40%);
+    min-height: 70px;
+    overflow: hidden;
     flex-shrink: 0;
     display: grid;
     grid-template-columns: 1fr 1fr;
@@ -2708,7 +2947,8 @@
     grid-row: 1;
   }
   .wave {
-    height: 78px;
+    height: 100%;
+    min-height: 0;
     display: flex;
     gap: 3px;
     align-items: center;
@@ -2781,8 +3021,11 @@
   }
   .bottom-panels {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-    height: clamp(260px, 33vh, 380px);
+    grid-template-columns: minmax(0, var(--events-share, 50fr)) 6px minmax(
+        0,
+        var(--scenarios-share, 50fr)
+      );
+    height: clamp(160px, var(--bottom-height, 320px), calc(100vh - 400px));
     flex-shrink: 0;
     border-top: 1px solid var(--line);
     min-width: 0;
@@ -2917,16 +3160,25 @@
     display: block;
   }
   .composer {
+    height: min(var(--composer-height, 136px), 45%);
+    min-height: 120px;
+    overflow: auto;
+    display: flex;
+    flex-direction: column;
     flex-shrink: 0;
     padding: 14px;
     border-top: 1px solid var(--line);
   }
   .composer form {
+    flex: 1;
+    min-height: 0;
     display: flex;
     align-items: center;
     gap: 10px;
   }
   .composer textarea {
+    height: 100%;
+    min-height: 35px;
     margin: 0;
     border: 0;
     background: transparent;
@@ -2982,6 +3234,8 @@
     color: #ffb3ab;
   }
   .details {
+    min-width: 0;
+    overflow: auto;
     border-left: 1px solid var(--line);
     padding-left: 20px;
     overflow: auto;
@@ -3089,7 +3343,21 @@
     color: var(--muted);
     font-size: 12px;
   }
+  .panel-resize {
+    min-width: 0;
+    min-height: 0;
+  }
+  .bottom-resize,
+  .wave-resize,
+  .composer-resize {
+    height: 6px;
+    flex: 0 0 6px;
+  }
   @media (max-width: 1050px) {
+    .details-resize,
+    .events-resize {
+      display: none;
+    }
     .bottom-panels {
       grid-template-columns: 1fr;
       grid-template-rows: 220px 260px;
@@ -3110,10 +3378,18 @@
       grid-template-columns: 1fr;
     }
     .demo {
-      grid-template-columns: 250px 1fr;
+      grid-template-columns: var(--sidebar-width, 290px) minmax(0, 1fr);
     }
   }
   @media (max-width: 700px) {
+    .sidebar-divider,
+    .panel-resize {
+      display: none;
+    }
+    .wave-area,
+    .composer {
+      height: auto;
+    }
     .demo {
       display: block;
     }

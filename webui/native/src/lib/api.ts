@@ -1,3 +1,4 @@
+import { isTranscriptionPath, traditionalTranscriptionResponse } from "./transcript";
 import type { LoadedModel, PackageLoadTarget, ServerHealth } from './types';
 
 function apiUrl(path: string): string {
@@ -27,7 +28,8 @@ export async function jsonRequest<T>(
   }
   const response = await fetch(apiUrl(path), { ...init, headers, signal });
   if (!response.ok) throw await errorFrom(response);
-  return response.json() as Promise<T>;
+  const result = await response.json() as T;
+  return isTranscriptionPath(path) ? traditionalTranscriptionResponse(result) : result;
 }
 
 export async function health(): Promise<ServerHealth> {
@@ -223,10 +225,11 @@ export async function transcription(body: Record<string, unknown>, signal?: Abor
 }
 
 export async function runTask(body: Record<string, unknown>, signal?: AbortSignal) {
-  return jsonRequest<Record<string, unknown>>('/v1/tasks/run', {
+  const result = await jsonRequest<Record<string, unknown>>('/v1/tasks/run', {
     method: 'POST',
     body: JSON.stringify(body)
   }, signal);
+  return body.task === 'asr' ? traditionalTranscriptionResponse(result) : result;
 }
 
 export class TaskStreamClosedError extends Error {
@@ -319,6 +322,10 @@ export async function* taskStreamEvents(
         if (parsed?.type === 'error') throw new Error(parsed.error?.message || 'The stream failed.');
         if (parsed?.type === 'task.stream.event' || parsed?.type === 'task.stream.done') {
           if (parsed.type === 'task.stream.done') sawDone = true;
+          if (body.task === 'asr') {
+            if (parsed.event) parsed.event = traditionalTranscriptionResponse(parsed.event);
+            if (parsed.result) parsed.result = traditionalTranscriptionResponse(parsed.result);
+          }
           yield parsed as TaskStreamMessage;
         }
       }

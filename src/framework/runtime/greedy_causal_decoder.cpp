@@ -1,3 +1,4 @@
+#include "engine/framework/runtime/greedy_token_selector.h"
 #include "engine/framework/runtime/greedy_causal_decoder.h"
 
 #include "engine/framework/core/backend.h"
@@ -230,19 +231,6 @@ DecoderWeights load_weights(
     }
     weights.store->upload();
     return weights;
-}
-
-int32_t argmax_index(const std::vector<float> & values) {
-    if (values.empty()) {
-        throw std::runtime_error("Greedy Qwen decoder cannot select from empty logits");
-    }
-    size_t best = 0;
-    for (size_t i = 1; i < values.size(); ++i) {
-        if (values[i] > values[best]) {
-            best = i;
-        }
-    }
-    return static_cast<int32_t>(best);
 }
 
 bool is_eos(const GreedyCausalDecoderSpec & spec, int32_t token) {
@@ -677,7 +665,8 @@ struct GreedyCausalDecoderRuntime::Impl {
         const GreedyCausalDecoderRuntime::Prompt & prompt,
         int64_t max_new_tokens,
         int64_t cached_prefix_steps,
-        int64_t capacity_bucket) {
+        int64_t capacity_bucket,
+        float repetition_penalty = 1.0f) {
         const auto & spec = weights->spec();
         if (!reusable_decoder) {
             modules::CausalDecoderRuntimeConfig config;
@@ -733,11 +722,13 @@ struct GreedyCausalDecoderRuntime::Impl {
         auto logits = reusable_decoder->prefill_embeddings_into_cache(
             embeddings, steps, capacity, block_steps_for(steps - kept), kept).logits;
         debug::timing_log_scalar("greedy_qwen_decoder.reusable.prefill_ms", engine::debug::elapsed_ms(start));
+        GreedyTokenSelector selector(static_cast<size_t>(spec.vocab_size), prompt.input_ids, repetition_penalty);
         std::vector<int32_t> out;
         for (int64_t step = 0; step < max_new_tokens; ++step) {
-            const int32_t token = argmax_index(logits);
+            const int32_t token = selector.select(logits);
             if (is_eos(spec, token)) { break; }
             out.push_back(token);
+            selector.observe(token);
             if (step + 1 < max_new_tokens) {
                 logits = reusable_decoder->decode_token(token).logits;
             }
@@ -808,13 +799,13 @@ std::vector<int32_t> GreedyCausalDecoderRuntime::generate_incremental(
     return impl_->generate_reusing_graphs(prompt, max_new_tokens, cached_prefix_steps, /*capacity_bucket=*/512);
 }
 
-std::vector<int32_t> GreedyCausalDecoderRuntime::generate(const Prompt & prompt, int64_t max_new_tokens, bool reuse_graphs) {
+std::vector<int32_t> GreedyCausalDecoderRuntime::generate(const Prompt & prompt, int64_t max_new_tokens, bool reuse_graphs, float repetition_penalty) {
     const auto & spec = impl_->weights->spec();
     validate_generate_request(spec, prompt, max_new_tokens);
     const int64_t prompt_steps = static_cast<int64_t>(prompt.input_ids.size());
     const auto & injection = prompt.injection;
     if (reuse_graphs) {
-        return impl_->generate_reusing_graphs(prompt, max_new_tokens, /*cached_prefix_steps=*/0, /*capacity_bucket=*/128);
+        return impl_->generate_reusing_graphs(prompt, max_new_tokens, /*cached_prefix_steps=*/0, /*capacity_bucket=*/128, repetition_penalty);
     }
     if (impl_->prefill_graph == nullptr || !impl_->prefill_graph->matches(prompt_steps, injection.tokens)) {
         impl_->prefill_graph.reset();
@@ -838,14 +829,16 @@ std::vector<int32_t> GreedyCausalDecoderRuntime::generate(const Prompt & prompt,
     }
     impl_->decode_graph->import_state(prefill.kv_state);
 
+    GreedyTokenSelector selector(static_cast<size_t>(spec.vocab_size), prompt.input_ids, repetition_penalty);
     std::vector<int32_t> out;
     std::vector<float> logits = std::move(prefill.logits);
     for (int64_t step = 0; step < max_new_tokens; ++step) {
-        const int32_t token = argmax_index(logits);
+        const int32_t token = selector.select(logits);
         if (is_eos(spec, token)) {
             break;
         }
         out.push_back(token);
+        selector.observe(token);
         logits = impl_->decode_graph->run_step(token);
     }
     return out;

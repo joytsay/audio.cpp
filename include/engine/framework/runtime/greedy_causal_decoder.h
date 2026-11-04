@@ -64,7 +64,7 @@ public:
 
     // Opt-in bounded-block prefill and capacity-bucketed decode for repeated
     // growing prompts. Each call still recomputes the full prompt.
-    std::vector<int32_t> generate(const Prompt & prompt, int64_t max_new_tokens, bool reuse_graphs = false);
+    std::vector<int32_t> generate(const Prompt & prompt, int64_t max_new_tokens, bool reuse_graphs = false, float repetition_penalty = 1.0f);
 
     // Streaming variant of the reusing path. The caller guarantees the first
     // cached_prefix_steps prompt rows (token ids and injected embeddings) are

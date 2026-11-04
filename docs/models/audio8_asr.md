@@ -153,3 +153,18 @@ transcription (Metal buffers + per-window-shape graph pools on top of the
   entry uses **Manual setup**; the package manager does not download GGUF
   packages marked unsupported.
 - Hotword logit boosting from the reference implementation is not ported.
+
+## Repetition control
+
+Audio8 uses a sign-aware token repetition penalty of **1.1** by default. The
+upstream model's unpenalized greedy decoding can get stuck repeating a short
+phrase on conversational Chinese audio, including the lobby and vehicle examples.
+The penalty is applied during decoding, before selecting each token; it does not
+remove repetitions from the finished transcript. Other ASR families keep their
+existing defaults.
+
+Set `--session-option audio8_asr.repetition_penalty=1` to reproduce the original
+greedy behavior. Values must be finite and at least 1. The reference comparison
+script accepts `--repetition-penalty` with the same default. This reduces decoder
+loops; it does not guarantee accurate recognition of every clip or add hotword
+support.

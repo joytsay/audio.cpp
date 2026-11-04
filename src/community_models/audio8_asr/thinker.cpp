@@ -81,7 +81,7 @@ Audio8ASRGeneratedTokens Audio8Qwen2ThinkerRuntime::generate(
     decoder_prompt.injection.tokens = audio_embeddings.tokens;
     decoder_prompt.injection.positions = prompt.audio_token_positions;
     Audio8ASRGeneratedTokens out;
-    out.token_ids = qwen2_runtime_.generate(decoder_prompt, options.max_new_tokens);
+    out.token_ids = qwen2_runtime_.generate(decoder_prompt, options.max_new_tokens, false, options.repetition_penalty);
     return out;
 }
 

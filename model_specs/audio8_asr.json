@@ -26,6 +26,14 @@
     "request": [],
     "session": [
       {
+        "name": "repetition_penalty",
+        "type": "float",
+        "description": "Sign-aware repetition penalty to reduce decoder loops. Set 1 for original greedy decoding.",
+        "required": false,
+        "min": 1,
+        "default": 1.1
+      },
+      {
         "name": "weight_type",
         "type": "enum",
         "description": "Decoder and adapter weight storage type.",

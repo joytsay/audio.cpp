@@ -1,5 +1,7 @@
 #include "engine/community_models/audio8_asr/types.h"
 #include "test_assert.h"
+#include "engine/framework/runtime/greedy_token_selector.h"
+#include <limits>
 
 #include <cstdint>
 #include <cstring>
@@ -34,6 +36,20 @@ void test_prompt_token_count_matches_reference() {
     test::require(threw, "zero mel frames must be rejected");
 }
 
+void test_repetition_penalty() {
+    using engine::runtime::GreedyTokenSelector;
+    test::require_eq(GreedyTokenSelector(3, {0}, 1.0f).select({10.0f, 9.5f, 1.0f}), int32_t{0}, "original greedy selection");
+    GreedyTokenSelector selector(3, {0, 0}, 1.1f);
+    test::require_eq(selector.select({10.0f, 9.5f, 1.0f}), int32_t{1}, "positive seen logits are divided once");
+    test::require_eq(selector.select({-1.0f, -1.05f, -2.0f}), int32_t{1}, "negative seen logits are multiplied");
+    selector.observe(1);
+    test::require_eq(selector.select({1.0f, 1.0f, 0.95f}), int32_t{2}, "generated history is penalized");
+    bool rejected = false;
+    try { GreedyTokenSelector invalid(3, {}, std::numeric_limits<float>::quiet_NaN()); }
+    catch (const std::invalid_argument &) { rejected = true; }
+    test::require(rejected, "reject nonfinite penalties");
+}
+
 void test_bf16_rounding() {
     // Exactly representable in bfloat16.
     test::require_eq(audio8_asr_round_f32_to_bf16(1.0F), 1.0F, "1.0");
@@ -55,6 +71,7 @@ int main() {
     try {
         test_prompt_token_count_matches_reference();
         test_bf16_rounding();
+        test_repetition_penalty();
     } catch (const std::exception & error) {
         std::cerr << "FAIL: " << error.what() << "\n";
         return 1;

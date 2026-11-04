@@ -70,6 +70,7 @@ struct Audio8ASRAudioEmbeddings {
 
 struct Audio8ASRGenerationOptions {
     int64_t max_new_tokens = 256;
+    float repetition_penalty = 1.1f;
 };
 
 struct Audio8ASRGeneratedTokens {

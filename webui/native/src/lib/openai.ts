@@ -1,3 +1,4 @@
+import { isTranscriptionPath, traditionalTranscriptionResponse } from "./transcript";
 export interface OpenAIModel {
   id: string;
   family?: string;
@@ -61,7 +62,8 @@ export async function endpointJson<T>(
   }
   const response = await fetch(apiEndpoint(base, path), { ...init, headers, signal });
   if (!response.ok) throw await responseError(response);
-  return response.json() as Promise<T>;
+  const result = await response.json() as T;
+  return isTranscriptionPath(path) ? traditionalTranscriptionResponse(result) : result;
 }
 
 export async function endpointBlob(

@@ -1,3 +1,4 @@
+import { traditionalTranscript } from "./transcript";
 import { jsonRequest } from './api';
 
 export interface SavedVoice {
@@ -97,6 +98,7 @@ async function loadVoices(): Promise<SavedVoice[]> {
   if (imported) voices = await serverVoices();
   return voices.map((voice) => ({
     ...voice,
+    transcript: traditionalTranscript(voice.transcript),
     audio: new Blob([Uint8Array.from(atob(voice.audio), (character) => character.charCodeAt(0))], { type: 'audio/wav' })
   })).sort((left, right) => right.createdAt - left.createdAt);
 }

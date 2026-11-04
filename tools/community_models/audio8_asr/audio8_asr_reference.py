@@ -32,6 +32,7 @@ def main() -> None:
     parser.add_argument("--outdir", type=Path, required=True)
     parser.add_argument("--max-audio-seconds", type=float, default=30.0)
     parser.add_argument("--max-new-tokens", type=int, default=128)
+    parser.add_argument("--repetition-penalty", type=float, default=1.1)
     args = parser.parse_args()
 
     args.outdir.mkdir(parents=True, exist_ok=True)
@@ -74,6 +75,7 @@ def main() -> None:
                 **batch,
                 max_new_tokens=args.max_new_tokens,
                 do_sample=False,
+                repetition_penalty=args.repetition_penalty,
             )
         prompt_len = int(batch["input_ids"].shape[1])
         # One forward pass to capture first-step logits over the prompt.

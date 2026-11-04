@@ -169,6 +169,7 @@ public:
             default_spec_path());
         runtime::ModelInspection inspection;
         inspection.cli.session_options = {
+            {"audio8_asr.repetition_penalty", "float", "Sign-aware repetition penalty. Default: 1.1; use 1 for original greedy decoding.", false, "1.1", "1"},
             {"audio8_asr.weight_type", "native|f32|f16|bf16|q8_0", "Decoder and adapter weight storage type. Default: native.", false, "native"},
             {"audio8_asr.audio_encoder_weight_type", "native|f32|f16", "Audio encoder weight storage type (quantized storage is rejected for the encoder; already-quantized GGUF tensors load as native). Default: native.", false, "native"},
             {"audio8_asr.encoder_graph_arena_mb", "int", "Audio encoder graph arena size in MB. Must be positive; sufficient capacity depends on the graph. Default: 128.", false, "128", "1"},
@@ -285,7 +286,9 @@ std::string Audio8ASRSession::transcribe_clip(const runtime::AudioBuffer & audio
     prompt.input_ids.insert(prompt.input_ids.end(), instruction_ids.begin(), instruction_ids.end());
     prompt.input_ids.push_back(static_cast<int32_t>(config.assistant_token_id));
 
-    const Audio8ASRGenerationOptions generation{config.text_decoder.max_new_tokens};
+    const auto penalty = runtime::parse_finite_float_option(options().options, {"audio8_asr.repetition_penalty"}).value_or(1.1f);
+    if (penalty < 1.0f) throw std::invalid_argument("audio8_asr.repetition_penalty must be at least 1");
+    const Audio8ASRGenerationOptions generation{config.text_decoder.max_new_tokens, penalty};
     const auto generated = thinker_.generate(prompt, embeddings, generation);
     if (generated.token_ids.empty()) {
         return "";
