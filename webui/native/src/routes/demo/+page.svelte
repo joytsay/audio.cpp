@@ -7,6 +7,12 @@
     type SpeechStreamSummary,
   } from "$lib/speech-stream";
   import { readHotwordsCsv, writeHotwordsCsv } from "$lib/hotwords";
+  import {
+    audioModelSettings,
+    savedAudioModel,
+    type DemoSettings,
+    type AudioStage,
+  } from "$lib/demo-settings";
   import { Mic, MicOff, Phone, PhoneOff, Send, Trash2 } from "@lucide/svelte";
   import logo from "../../../static/logo_cloud.svg?raw";
   import "../../app.css";
@@ -14,7 +20,7 @@
   import { readGreetingCsv, writeGreetingCsv } from "$lib/greetings";
   import { recognitionContext } from "$lib/asr-context";
   import { reportedRtf, rtfLabel } from "$lib/response-timing";
-  import { uploadWav } from "$lib/api";
+  import { uploadWav, pathStatus } from "$lib/api";
   import {
     listVoices,
     saveVoice,
@@ -49,6 +55,242 @@
     LFM_DEMO_REF,
     isDemoLfmModel,
   } from "$lib/demo-models";
+  let settingsLoading = true,
+    savingSettings = false,
+    settingsStatus = "";
+  async function initializeSidebar() {
+    try {
+      const [result] = await Promise.all([
+        endpointJson<{ settings: DemoSettings | null }>(
+          "",
+          "ui/demo-settings",
+          {
+            cache: "no-store",
+          },
+        )
+          .then((value) => ({ settings: value.settings, error: "" }))
+          .catch((cause) => ({
+            settings: null,
+            error: `Could not load model settings: ${cause instanceof Error ? cause.message : cause}`,
+          })),
+        refreshModels(),
+        loadCsvFiles(),
+        refreshVoices(),
+      ]);
+      if (!mounted) return;
+      if (result.settings) {
+        await restoreSavedModelFiles(result.settings);
+        if (!mounted) return;
+        applyModelSettings(result.settings);
+      } else settingsStatus = result.error || "Using default model settings";
+    } catch (cause) {
+      settingsStatus = `Saved settings could not be applied: ${cause instanceof Error ? cause.message : cause}`;
+    } finally {
+      settingsLoading = false;
+    }
+  }
+  async function restoreSavedModelFiles(saved: DemoSettings) {
+    // Dynamically registered model IDs disappear on a server restart. Their
+    // saved paths can still be used when the actual files remain installed.
+    const stages: AudioStage[] = ["vad", "asr", "tts"];
+    const restored = await Promise.all(
+      stages.map(async (stage) => {
+        const family = saved[`${stage}_model_family`],
+          path = saved[`${stage}_model_path`];
+        if (!family || !path || savedAudioModel(saved, stage, audioModels))
+          return undefined;
+        try {
+          if (!(await pathStatus(path)).exists) return undefined;
+          const entry = catalog.find(
+            (model) =>
+              model.family === family &&
+              (stage === "tts"
+                ? ["tts", "clon"].includes(model.task)
+                : stage === "asr"
+                  ? ["asr", "stt"].includes(model.task)
+                  : model.task === "vad"),
+          );
+          const task = saved[`${stage}_model_task`] || entry?.task || stage;
+          if (
+            !(stage === "tts"
+              ? ["tts", "clon"].includes(task)
+              : stage === "asr"
+                ? ["asr", "stt"].includes(task)
+                : task === "vad")
+          )
+            return undefined;
+          return {
+            key: saved[`${stage}_model_key`] || `saved:${stage}:${family}`,
+            id: saved[`${stage}_model_id`] || `${family}-${stage}`,
+            label: `${entry?.display_name_en || entry?.display_name || family} · ${path.split(/[\\/]/).pop()}`,
+            family,
+            task,
+            mode: "offline",
+            path,
+            builtin_voices: entry?.builtin_voices,
+            default_voice: entry?.default_voice,
+            load_options: saved[`${stage}_load_options`],
+            session_options: saved[`${stage}_session_options`],
+          } as DemoAudioModel;
+        } catch {
+          return undefined;
+        }
+      }),
+    );
+    audioModels = [
+      ...audioModels,
+      ...restored.filter((model): model is DemoAudioModel => !!model),
+    ];
+  }
+  function applyModelSettings(saved: DemoSettings) {
+    if (saved.schema_version !== 1)
+      throw new Error("Unsupported settings version");
+    const warnings: string[] = [];
+    const resolve = (stage: AudioStage) => {
+      if (
+        saved[`${stage}_model_key`] === undefined &&
+        !saved[`${stage}_model_path`]
+      )
+        return stage === "vad" ? vadKey : stage === "asr" ? asrKey : ttsKey;
+      const model = savedAudioModel(saved, stage, audioModels);
+      if (!model) {
+        if (saved[`${stage}_model_key`] || saved[`${stage}_model_path`])
+          warnings.push(`${stage.toUpperCase()} model unavailable`);
+        return "";
+      }
+      audioModels = audioModels.map((entry) =>
+        entry.key === model.key
+          ? {
+              ...entry,
+              load_options:
+                saved[`${stage}_load_options`] ?? entry.load_options,
+              session_options:
+                saved[`${stage}_session_options`] ?? entry.session_options,
+            }
+          : entry,
+      );
+      return model.key;
+    };
+    vadKey = resolve("vad");
+    asrKey = resolve("asr");
+    ttsKey = resolve("tts");
+    if (typeof saved.vad_enabled === "boolean") useVad = saved.vad_enabled;
+    if (typeof saved.asr_enabled === "boolean") useAsr = saved.asr_enabled;
+    if (typeof saved.llm_enabled === "boolean") useLlm = saved.llm_enabled;
+    if (typeof saved.tts_enabled === "boolean") useTts = saved.tts_enabled;
+    if (typeof saved.vad_threshold === "number")
+      threshold = saved.vad_threshold;
+    if (typeof saved.vad_window_ms === "number") windowMs = saved.vad_window_ms;
+    if (saved.llm_model !== undefined) {
+      const selected =
+        llmModels.find((model) => model.id === saved.llm_model) ||
+        (isDemoLfmModel(saved.llm_model)
+          ? llmModels.find((model) => isDemoLfmModel(model.id))
+          : undefined);
+      llm = selected?.id || "";
+      if (!selected && saved.llm_model) warnings.push("LLM model unavailable");
+    }
+    if (typeof saved.tts_streaming === "boolean")
+      ttsStreaming = saved.tts_streaming;
+    if (saved.tts_voice_id !== undefined) {
+      selectSavedVoice(saved.tts_voice_id);
+      if (
+        saved.tts_voice_id &&
+        !protectedVoices.some((id) => `preset-${id}` === saved.tts_voice_id) &&
+        !savedVoices.some((voice) => voice.id === saved.tts_voice_id)
+      )
+        warnings.push("Saved voice unavailable");
+    }
+    if (voiceFile && typeof saved.tts_reference_text === "string")
+      referenceText = saved.tts_reference_text;
+    if (typeof saved.tts_test_text === "string")
+      cloneTestText = saved.tts_test_text;
+    settingsStatus = warnings.length
+      ? `Loaded model settings: ${warnings.join("; ")}. Choose replacements.`
+      : "Loaded server model settings";
+  }
+  async function saveModelSettings() {
+    if (
+      settingsLoading ||
+      savingSettings ||
+      connected ||
+      starting ||
+      cloneBusy ||
+      cloneRecording
+    )
+      return;
+    savingSettings = true;
+    greetingAborter?.abort();
+    clearTimeout(greetingTimer);
+    try {
+      if (
+        !Number.isFinite(threshold) ||
+        threshold < 0.01 ||
+        threshold > 0.99 ||
+        !Number.isInteger(windowMs) ||
+        windowMs < 300 ||
+        windowMs > 2000
+      )
+        throw new Error(
+          "Enter a valid VAD threshold and turn window before saving.",
+        );
+      if (voiceFile && !savedVoiceId) {
+        const id = createLocalId(),
+          name = voiceName.trim() || voiceFile.name;
+        await saveVoice({
+          id,
+          name,
+          transcript: referenceText,
+          audio: await browserDecodeToWav(voiceFile, 24000, 1),
+          createdAt: Date.now(),
+        });
+        await refreshVoices();
+        savedVoiceId = id;
+      }
+      // Keep the existing CSV editors as the single source of truth for text.
+      await Promise.all([
+        endpointJson("", "ui/greetings", {
+          method: "POST",
+          body: JSON.stringify({ content: writeGreetingCsv(greeting) }),
+        }),
+        endpointJson("", "ui/prompt", {
+          method: "POST",
+          body: JSON.stringify({ content: prompt }),
+        }),
+        endpointJson("", "ui/hotwords", {
+          method: "POST",
+          body: JSON.stringify({ content: writeHotwordsCsv(hotwords) }),
+        }),
+      ]);
+      const settings: DemoSettings = {
+        schema_version: 1,
+        vad_enabled: useVad,
+        asr_enabled: useAsr,
+        llm_enabled: useLlm,
+        tts_enabled: useTts,
+        ...audioModelSettings("vad", selectedVad),
+        ...audioModelSettings("asr", selectedAsr),
+        ...audioModelSettings("tts", selectedTts),
+        vad_threshold: threshold,
+        vad_window_ms: windowMs,
+        llm_model: llm,
+        tts_streaming: ttsStreaming,
+        tts_voice_id: savedVoiceId,
+        tts_reference_text: voiceFile ? referenceText : "",
+        tts_test_text: cloneTestText,
+      };
+      await endpointJson("", "ui/demo-settings", {
+        method: "POST",
+        body: JSON.stringify({ settings }),
+      });
+      settingsStatus = "Model settings saved on server";
+      fileStatus = "Saved greetings.csv, prompt.csv and hotwords.csv";
+    } catch (cause) {
+      settingsStatus = `Settings save failed: ${cause instanceof Error ? cause.message : cause}`;
+    } finally {
+      savingSettings = false;
+    }
+  }
   let systemModel = "",
     systemDescription = "";
   async function loadSystemInfo() {
@@ -243,9 +485,16 @@
   $: selectedAsr = audioModels.find((m) => m.key === asrKey);
   $: selectedTts = audioModels.find((m) => m.key === ttsKey);
   $: canCall = !!(
+    !settingsLoading &&
+    !savingSettings &&
     (!useAsr || (selectedAsr && (!useVad || selectedVad))) &&
     (!useLlm || (selectedLlm && !llmNeedsDownload)) &&
-    (!useTts || (selectedTts && greeting.trim())) &&
+    (!useTts ||
+      (selectedTts &&
+        greeting.trim() &&
+        (!savedVoiceId ||
+          protectedVoice ||
+          savedVoices.some((v) => v.id === savedVoiceId)))) &&
     ((!useLlm && !useTts) || filesReady)
   );
   function idleStatus() {
@@ -634,7 +883,7 @@
     selectedTts?.task === "clon" ||
     ["audio8_tts", "voxcpm1", "qwen3_tts"].includes(selectedTts?.family || "");
   $: scheduleGreeting(
-    mounted && filesReady && useTts,
+    mounted && filesReady && !settingsLoading && !savingSettings && useTts,
     connected || starting,
     ttsKey,
     voice,
@@ -2051,9 +2300,7 @@
     } catch {}
     restorePanelLayout();
     void loadSystemInfo();
-    void refreshModels();
-    void loadCsvFiles();
-    void refreshVoices();
+    void initializeSidebar();
     try {
       const saved = JSON.parse(localStorage.getItem(historyKey) || "[]");
       if (Array.isArray(saved))
@@ -2112,7 +2359,14 @@
       aria-label="Call greeting settings"
     >
       <div class="stage-heading"><h2>Call greeting</h2></div>
-      <fieldset disabled={connected || starting || cloneRecording || cloneBusy}>
+      <fieldset
+        disabled={settingsLoading ||
+          savingSettings ||
+          connected ||
+          starting ||
+          cloneRecording ||
+          cloneBusy}
+      >
         <label
           >Call greeting<textarea rows="3" bind:value={greeting}
           ></textarea></label
@@ -2126,15 +2380,33 @@
       </fieldset>
     </section>
     <div class="section-label">MODEL SETTINGS</div>
-    <button
-      disabled={connected ||
-        starting ||
-        discovering ||
-        cloneRecording ||
-        cloneBusy}
-      on:click={refreshModels}
-      >{discovering ? "Refreshing…" : "Refresh models"}</button
-    >
+    <div class="model-settings-actions">
+      <button
+        disabled={settingsLoading ||
+          savingSettings ||
+          connected ||
+          starting ||
+          discovering ||
+          cloneRecording ||
+          cloneBusy}
+        on:click={saveModelSettings}
+        >{savingSettings ? "Saving…" : "Save model settings"}</button
+      >
+      <button
+        disabled={settingsLoading ||
+          savingSettings ||
+          connected ||
+          starting ||
+          discovering ||
+          cloneRecording ||
+          cloneBusy}
+        on:click={refreshModels}
+        >{discovering ? "Refreshing…" : "Refresh models"}</button
+      >
+    </div>
+    {#if settingsStatus}<p class="settings-status" role="status">
+        {settingsStatus}
+      </p>{/if}
     {#if modelError}<p class="error" role="alert">{modelError}</p>{/if}
     {#if useLlm && !discovering && !llmModels.some((m) => !m.requiresDownload) && !modelError}<p
         class="error"
@@ -2151,7 +2423,9 @@
             role="switch"
             aria-label="Enable VAD"
             bind:checked={useVad}
-            disabled={connected ||
+            disabled={settingsLoading ||
+              savingSettings ||
+              connected ||
               starting ||
               discovering ||
               cloneRecording ||
@@ -2160,7 +2434,9 @@
         >
       </div>
       <fieldset
-        disabled={connected ||
+        disabled={settingsLoading ||
+          savingSettings ||
+          connected ||
           starting ||
           discovering ||
           cloneRecording ||
@@ -2207,7 +2483,9 @@
             role="switch"
             aria-label="Enable ASR"
             bind:checked={useAsr}
-            disabled={connected ||
+            disabled={settingsLoading ||
+              savingSettings ||
+              connected ||
               starting ||
               discovering ||
               cloneRecording ||
@@ -2216,7 +2494,9 @@
         >
       </div>
       <fieldset
-        disabled={connected ||
+        disabled={settingsLoading ||
+          savingSettings ||
+          connected ||
           starting ||
           discovering ||
           cloneRecording ||
@@ -2260,7 +2540,9 @@
             role="switch"
             aria-label="Enable LLM"
             bind:checked={useLlm}
-            disabled={connected ||
+            disabled={settingsLoading ||
+              savingSettings ||
+              connected ||
               starting ||
               discovering ||
               cloneRecording ||
@@ -2269,7 +2551,9 @@
         >
       </div>
       <fieldset
-        disabled={connected ||
+        disabled={settingsLoading ||
+          savingSettings ||
+          connected ||
           starting ||
           discovering ||
           cloneRecording ||
@@ -2317,7 +2601,9 @@
             role="switch"
             aria-label="Enable TTS"
             bind:checked={useTts}
-            disabled={connected ||
+            disabled={settingsLoading ||
+              savingSettings ||
+              connected ||
               starting ||
               discovering ||
               cloneRecording ||
@@ -2327,7 +2613,9 @@
       </div>
       <fieldset
         class="tts-controls"
-        disabled={connected ||
+        disabled={settingsLoading ||
+          savingSettings ||
+          connected ||
           starting ||
           discovering ||
           cloneRecording ||
@@ -2369,6 +2657,10 @@
                 {#each protectedVoices as id}<option value={`preset-${id}`}
                     >{id}</option
                   >{/each}
+                {#if savedVoiceId && !protectedVoice && !savedVoices.some((v) => v.id === savedVoiceId)}<option
+                    value={savedVoiceId}
+                    disabled>Saved voice unavailable</option
+                  >{/if}
                 <option value="">New recording / file</option>
                 {#each customSavedVoices as saved}<option value={saved.id}
                     >{saved.name}</option
@@ -2386,7 +2678,9 @@
               aria-label="Record clone voice"
               title="Record clone voice"
               on:click={startCloneRecording}
-              disabled={connected ||
+              disabled={settingsLoading ||
+                savingSettings ||
+                connected ||
                 starting ||
                 cloneBusy ||
                 !useTts ||
@@ -3074,6 +3368,20 @@
   .demo .tts-streaming-switch input {
     width: 16px;
     margin: 0;
+  }
+  .model-settings-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .model-settings-actions button {
+    font-size: 11px;
+    padding: 8px;
+  }
+  .settings-status {
+    color: var(--muted);
+    font-size: 11px;
+    overflow-wrap: anywhere;
   }
   .stage-settings fieldset:disabled {
     opacity: 0.5;

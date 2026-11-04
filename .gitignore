@@ -53,3 +53,7 @@ docs/FALCON_H1_0.1B_PORT_PLAN.md
 
 # Persistent SIP gateway credentials and worker heartbeat
 /sip-data/
+
+# Global demo configuration is persisted locally, not committed.
+/ui-settings/*
+!/ui-settings/.gitkeep

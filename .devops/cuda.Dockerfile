@@ -318,7 +318,7 @@ RUN /app/tts-convert-venv/bin/python /app/tools/community_models/convert_audio8_
     /app/tts-convert-venv/bin/python /app/tools/community_models/convert_audio8_tts_codec.py --help >/dev/null && \
     test -x /app/audiocpp_gguf
 
-RUN mkdir -p /app/models && chown ubuntu:ubuntu /app/models
+RUN mkdir -p /app/models /app/ui-settings && chown ubuntu:ubuntu /app/models /app/ui-settings
 
 USER ubuntu
 
@@ -346,8 +346,8 @@ COPY hotwords.csv /app/hotwords.csv
 COPY greetings.csv /app/greetings.csv
 
 RUN chmod +x /app/all-in-one-entrypoint.sh && \
-    mkdir -p /app/models /app/llama-models /app/rag-data /app/sip-data && \
-    chown -R ubuntu:ubuntu /app/sip-data /app/models /app/llama-models /app/rag-data /app/knowledge /app/prompt.csv /app/hotword.csv /app/hotwords.csv /app/greetings.csv
+    mkdir -p /app/ui-settings /app/models /app/llama-models /app/rag-data /app/sip-data && \
+    chown -R ubuntu:ubuntu /app/ui-settings /app/sip-data /app/models /app/llama-models /app/rag-data /app/knowledge /app/prompt.csv /app/hotword.csv /app/hotwords.csv /app/greetings.csv
 
 USER ubuntu
 

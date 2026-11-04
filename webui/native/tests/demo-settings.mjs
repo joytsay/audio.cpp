@@ -1,0 +1,11 @@
+import assert from 'node:assert/strict';
+import { savedAudioModel, audioModelSettings } from '../src/lib/demo-settings.ts';
+const model={key:'package:audio8:q8',id:'audio8-asr',family:'audio8_asr',task:'asr',path:'/new/models/audio8.gguf',load_options:{},session_options:{'audio8_asr.repetition_penalty':'1.1'}};
+const settings={schema_version:1,...audioModelSettings('asr',model)};
+assert.equal(savedAudioModel(settings,'asr',[model]),model);
+assert.equal(savedAudioModel({...settings,asr_model_path:'/old/models/audio8.gguf'},'asr',[model]),model,'stable package keys survive model-root moves');
+assert.equal(savedAudioModel({...settings,asr_model_key:'old-alias'},'asr',[model]),model,'same file resolves renamed aliases');
+assert.equal(savedAudioModel({...settings,asr_model_key:'gone',asr_model_path:'/missing'},'asr',[model]),undefined);
+assert.equal(savedAudioModel({...settings,asr_model_family:'qwen3_asr'},'asr',[model]),undefined,'never substitute another family');
+assert.deepEqual(settings.asr_session_options,{'audio8_asr.repetition_penalty':'1.1'});
+console.log('PASS saved model identity, path/alias restoration, options and missing-model behavior');

@@ -490,3 +490,18 @@ The demo ASR context loads from `hotwords.csv`. **Save hotwords.csv** writes the
 one-column `context` CSV back to the server; its Docker bind mount preserves edits
 across container restarts. `hotword.csv` remains available for the existing SIP
 and other legacy consumers. Context only affects ASR models that support it.
+
+**Save model settings** in the demo sidebar persists global defaults to
+`ui-settings/demo-settings.yaml` on the host (`/app/ui-settings/demo-settings.yaml`
+in the container). It saves model identities and load/session options, stage
+switches, VAD threshold and turn window, TTS streaming, selected voice, reference
+transcript, and clone test text. It also saves the current greeting, system prompt,
+and hotwords to their existing CSV files. New reference recordings are stored in
+the shared voice library, and YAML keeps only their voice ID.
+
+Every new demo page or browser session restores these server settings after
+model and voice discovery. Saved paths restore installed models even if a
+temporary server registration was lost on restart. Missing models or deleted voices are reported rather
+than replaced silently. The directory bind mount preserves settings across
+container rebuilds; generated YAML is excluded from Git and image build contexts.
+Local panel sizes and event history remain browser preferences.

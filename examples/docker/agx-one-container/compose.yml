@@ -69,6 +69,7 @@ services:
       - ../../../knowledge:/app/knowledge
       - audiocpp-sip-data:/app/sip-data
       - ../../../voices:/app/voices
+      - ../../../ui-settings:/app/ui-settings
       - ../../../prompt.csv:/app/prompt.csv
       - ../../../greetings.csv:/app/greetings.csv
       - ../../../hotword.csv:/app/hotword.csv

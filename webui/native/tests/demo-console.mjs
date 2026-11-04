@@ -27,6 +27,7 @@ const { chromium } = require("playwright");
   const page = await context.newPage(),
     errors = [],
     requests = [];
+  let sharedSettings = null;
   let longStreamAudio = false;
   let vadCalls = 0,
     noLlmModels = false;
@@ -75,7 +76,7 @@ const { chromium } = require("playwright");
       },
     ],
   ]);
-  await page.route(/\/(v1|llm)\//, async (route) => {
+  const apiRoute = async (route) => {
     const url = new URL(route.request().url());
     const body =
       route.request().method() === "POST" &&
@@ -109,6 +110,12 @@ const { chromium } = require("playwright");
         "The demo must wait for the worker to be ready before chat",
       );
       assert.equal(url.searchParams.get("autoload"), "true");
+    }
+    if (url.pathname === "/v1/ui/demo-settings") {
+      if (route.request().method() === "POST") sharedSettings = body.settings;
+      return route.fulfill({
+        json: { settings: sharedSettings, exists: !!sharedSettings },
+      });
     }
     if (url.pathname === "/v1/audio/speech" && body.stream) {
       assert.equal(body.stream_format, "sse");
@@ -261,7 +268,8 @@ const { chromium } = require("playwright");
       json = {
         exists:
           body.path.includes("silero_vad") ||
-          body.path.endsWith("audio8-asr-0.1b-q8_0.gguf"),
+          body.path.endsWith("audio8-asr-0.1b-q8_0.gguf") ||
+          body.path.endsWith("custom-saved-model.gguf"),
         file: true,
         directory: false,
       };
@@ -304,7 +312,8 @@ const { chromium } = require("playwright");
     if (url.pathname.endsWith("/chat/completions"))
       await new Promise((resolve) => setTimeout(resolve, 120));
     await route.fulfill({ json });
-  });
+  };
+  await page.route(/\/(v1|llm)\//, apiRoute);
   await page.addInitScript(() => {
     if (!localStorage.getItem("geovision.demo.events.v1"))
       localStorage.setItem(
@@ -1297,8 +1306,201 @@ const { chromium } = require("playwright");
     ),
     false,
   );
+  await page.setViewportSize({ width: 1584, height: 920 });
+  await page.getByRole("switch", { name: "Enable ASR", exact: true }).check();
+  await page.getByRole("switch", { name: "Enable VAD", exact: true }).check();
+  await page.getByLabel("Speech threshold", { exact: true }).fill("0.7");
+  await page.getByLabel("Turn window (ms)", { exact: true }).fill("1000");
+  await page.getByRole("switch", { name: "Enable VAD", exact: true }).uncheck();
+  await page.getByRole("switch", { name: "Enable LLM", exact: true }).check();
+  await page
+    .getByLabel("System prompt", { exact: true })
+    .fill("保存的系統指令");
+  await page.getByRole("switch", { name: "Enable LLM", exact: true }).uncheck();
+  await page
+    .getByLabel("ASR", { exact: true })
+    .selectOption("package:qwen3-asr:qwen3_asr_0_6b_q8_0");
+  await page
+    .getByLabel("Saved voices", { exact: true })
+    .selectOption("preset-wangSG9s");
+  await page
+    .getByLabel("Call greeting", { exact: true })
+    .fill("您好，這是儲存的問候。");
+  await page
+    .getByLabel("ASR hotwords / context", { exact: true })
+    .fill("台積電, X光機");
+  await page
+    .getByLabel("Clone TTS test", { exact: true })
+    .fill("保存的聲音測試");
+  await page
+    .getByRole("button", { name: "Save model settings", exact: true })
+    .click();
+  await page
+    .getByText("Model settings saved on server", { exact: true })
+    .waitFor();
+  assert.equal(sharedSettings.vad_enabled, false);
+  assert.equal(sharedSettings.llm_enabled, false);
+  assert.equal(sharedSettings.vad_threshold, 0.7);
+  assert.equal(sharedSettings.vad_window_ms, 1000);
+  assert.equal(sharedSettings.tts_voice_id, "preset-wangSG9s");
+  assert.equal(sharedSettings.tts_streaming, true);
+  // A separate browser context has no prior localStorage/session state.
+  const freshContext = await browser.newContext({
+    viewport: { width: 1584, height: 920 },
+  });
+  const freshPage = await freshContext.newPage();
+  await freshPage.route(/\/(v1|llm)\//, apiRoute);
+  await freshPage.goto(
+    (process.env.UI_BASE_URL || "http://127.0.0.1:4173/").replace(/\/$/, "") +
+      "/#/demo",
+  );
+  await freshPage
+    .getByText("Loaded server model settings", { exact: true })
+    .waitFor();
+  assert.equal(
+    await freshPage
+      .getByRole("switch", { name: "Enable VAD", exact: true })
+      .isChecked(),
+    false,
+  );
+  assert.equal(
+    await freshPage
+      .getByRole("switch", { name: "Enable LLM", exact: true })
+      .isChecked(),
+    false,
+  );
+  assert.equal(
+    await freshPage
+      .getByRole("switch", { name: "TTS streaming", exact: true })
+      .isChecked(),
+    true,
+  );
+  assert.equal(
+    await freshPage.getByLabel("ASR", { exact: true }).inputValue(),
+    sharedSettings.asr_model_key,
+  );
+  assert.equal(
+    await freshPage.getByLabel("Saved voices", { exact: true }).inputValue(),
+    "preset-wangSG9s",
+  );
+  assert.equal(
+    await freshPage
+      .getByLabel("Speech threshold", { exact: true })
+      .inputValue(),
+    "0.7",
+  );
+  assert.equal(
+    await freshPage
+      .getByLabel("Turn window (ms)", { exact: true })
+      .inputValue(),
+    "1000",
+  );
+  assert.equal(
+    await freshPage.getByLabel("Call greeting", { exact: true }).inputValue(),
+    "您好，這是儲存的問候。",
+  );
+  assert.equal(
+    await freshPage
+      .getByLabel("ASR hotwords / context", { exact: true })
+      .inputValue(),
+    "台積電, X光機",
+  );
+  assert.equal(
+    await freshPage.getByLabel("System prompt", { exact: true }).inputValue(),
+    "保存的系統指令",
+  );
+  assert.equal(
+    await freshPage.getByLabel("Clone TTS test", { exact: true }).inputValue(),
+    "保存的聲音測試",
+  );
+  longStreamAudio = false;
+  await freshPage
+    .getByRole("region", { name: "TTS settings", exact: true })
+    .getByLabel("Custom reference voice", { exact: true })
+    .setInputFiles({
+      name: "persisted-reference.wav",
+      mimeType: "audio/wav",
+      buffer: wav,
+    });
+  await freshPage
+    .getByText("Transcript ready · review before calling", { exact: true })
+    .waitFor();
+  await freshPage
+    .getByRole("button", { name: "Save model settings", exact: true })
+    .click();
+  await freshPage
+    .getByText("Model settings saved on server", { exact: true })
+    .waitFor();
+  assert.ok(
+    sharedVoices.has(sharedSettings.tts_voice_id),
+    "settings save persists a new reference voice",
+  );
+  await freshPage.reload();
+  await freshPage
+    .getByText("Loaded server model settings", { exact: true })
+    .waitFor();
+  assert.equal(
+    await freshPage.getByLabel("Saved voices", { exact: true }).inputValue(),
+    sharedSettings.tts_voice_id,
+  );
+  assert.equal(
+    await freshPage
+      .getByLabel("Reference transcript", { exact: true })
+      .inputValue(),
+    "語音測試",
+  );
+  const validSettings = sharedSettings;
+  sharedSettings = {
+    ...validSettings,
+    asr_model_key: "registered:restored-asr",
+    asr_model_id: "restored-asr",
+    asr_model_family: "audio8_asr",
+    asr_model_task: "asr",
+    asr_model_path: "/app/models/custom-saved-model.gguf",
+    asr_load_options: {},
+    asr_session_options: {},
+  };
+  await freshPage.reload();
+  await freshPage
+    .getByText("Loaded server model settings", { exact: true })
+    .waitFor();
+  assert.equal(
+    await freshPage.getByLabel("ASR", { exact: true }).inputValue(),
+    "registered:restored-asr",
+    "installed files restore models whose dynamic server registration was lost",
+  );
+
+  sharedSettings = {
+    ...validSettings,
+    asr_model_key: "removed-model",
+    asr_model_path: "/missing/model.gguf",
+  };
+  await freshPage.reload();
+  await freshPage.getByText(/ASR model unavailable/).waitFor();
+  assert.equal(
+    await freshPage.getByLabel("ASR", { exact: true }).inputValue(),
+    "",
+  );
+  assert.equal(
+    await freshPage
+      .getByRole("button", { name: "Start call", exact: true })
+      .isDisabled(),
+    true,
+  );
+  sharedSettings = { ...validSettings, tts_voice_id: "deleted-voice" };
+  await freshPage.reload();
+  await freshPage
+    .getByText(/Loaded model settings: Saved voice unavailable/)
+    .waitFor();
+  assert.equal(
+    await freshPage
+      .getByRole("button", { name: "Start call", exact: true })
+      .isDisabled(),
+    true,
+  );
+  await freshContext.close();
   console.log(
-    "PASS downloaded-model dropdowns, actual LLM IDs, unlinked branding, CSV saves, cached greeting, ASR hotwords, clone recording/transcript, voice/text calls, history, runtime measurements, stage switches/bypasses/manual turns, deduplicated model aliases, LFM download, greeting text/reference isolation, fixed equal-width scenarios panel, audio scenario, three-turn maintenance simulation, distinct technician/assistant voices, CSP-safe preview then explicit send, chat audio players, ordered five-example autoplay, queue highlighting/cancellation, RTF reporting/persistence, legacy ASR event migration, compact audio chooser, incomplete LLM detection/resume, explicit model loading/readiness before chat, TTS streaming switch/persistence/greeting/reply/clone/cancellation, hotwords CSV persistence/default load, mobile layout",
+    "PASS downloaded-model dropdowns, actual LLM IDs, unlinked branding, CSV saves, cached greeting, ASR hotwords, clone recording/transcript, voice/text calls, history, runtime measurements, stage switches/bypasses/manual turns, deduplicated model aliases, LFM download, greeting text/reference isolation, fixed equal-width scenarios panel, audio scenario, three-turn maintenance simulation, distinct technician/assistant voices, CSP-safe preview then explicit send, chat audio players, ordered five-example autoplay, queue highlighting/cancellation, RTF reporting/persistence, legacy ASR event migration, compact audio chooser, incomplete LLM detection/resume, explicit model loading/readiness before chat, TTS streaming switch/persistence/greeting/reply/clone/cancellation, hotwords CSV persistence/default load, global model settings across browser contexts, saved draft voice, unavailable model/voice handling, mobile layout",
   );
   await browser.close();
 })().catch((e) => {

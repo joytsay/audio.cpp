@@ -56,3 +56,6 @@ examples/docker/coturn/**
 # Private runtime settings must never enter an image build context.
 **/.env
 **/.env.*
+
+# Runtime demo settings are mounted separately.
+ui-settings/
