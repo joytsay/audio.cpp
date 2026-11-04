@@ -2626,7 +2626,7 @@
 
   onMount(async () => {
     if (location.port === '8083' && !location.hash.includes('?studio')) {
-      await goto('#/pipeline', { replaceState: true });
+      await goto('#/demo', { replaceState: true });
       return;
     }
     try {

@@ -24,7 +24,8 @@ public:
         const auto id = "preset-" + name;
         validate_id(id);
         const auto marker = root_ / (id + ".imported");
-        if (std::filesystem::exists(marker) || !std::filesystem::is_regular_file(wav)) return;
+        if ((std::filesystem::exists(marker) && std::filesystem::is_regular_file(root_ / (id + ".json"))) ||
+            !std::filesystem::is_regular_file(wav)) return;
         if (std::filesystem::file_size(wav) > 16 * 1024 * 1024) {
             throw std::invalid_argument("Reference voice exceeds the 16 MiB limit");
         }
@@ -38,7 +39,7 @@ public:
             {"createdAt", json::Value::make_number(0)},
             {"audio", json::Value::make_string(minitts::app::base64_encode(audio))}
         })));
-        // Import once, so deleting a preset also survives server restarts.
+        // Keep bundled references available, including restoration of older deletions.
         std::ofstream imported(marker);
         imported.close();
         if (!imported) throw std::ios_base::failure("Could not mark reference voice as imported");
@@ -106,6 +107,8 @@ public:
 
     void erase(const std::string & id) {
         validate_id(id);
+        if (id == "preset-lingCLvocals" || id == "preset-wangSG9s")
+            throw std::invalid_argument("Bundled reference voices cannot be deleted");
         std::lock_guard<std::mutex> lock(mutex_);
         std::filesystem::remove(root_ / (id + ".json"));
     }

@@ -70,9 +70,12 @@ int main() {
         }
         restarted.import_reference("lingCLvocals", source, "must not overwrite");
         require(json::parse(first.list()).require("voices").as_array().size() == 2, "preset import duplicated a voice");
-        first.erase("preset-lingCLvocals");
-        restarted.import_reference("lingCLvocals", source, "must not resurrect");
-        require(json::parse(first.list()).require("voices").as_array().size() == 1, "deleted preset reappeared after restart");
+        for (const auto * id : {"preset-lingCLvocals", "preset-wangSG9s"}) {
+            bool protected_voice = false;
+            try { first.erase(id); } catch (const std::invalid_argument &) { protected_voice = true; }
+            require(protected_voice, "bundled reference voice must reject deletion");
+        }
+        require(json::parse(first.list()).require("voices").as_array().size() == 2, "protected presets must remain available");
         std::filesystem::remove_all(root);
         std::cout << "PASS: shared voices, persistence, Unicode/audio roundtrip, idempotent import, validation and deletion\n";
         return 0;

@@ -9,6 +9,13 @@
   import { reportedRtf, rtfLabel } from "$lib/response-timing";
   import { uploadWav } from "$lib/api";
   import {
+    listVoices,
+    saveVoice,
+    deleteVoice,
+    createLocalId,
+    type SavedVoice,
+  } from "$lib/voices";
+  import {
     maintenanceScenarioSteps,
     maintenanceScenarioPrompt,
     maintenanceSpeechText,
@@ -312,6 +319,147 @@
     cloneBusy = false,
     cloneStatus = "";
   let cloneAborter: AbortController | null = null;
+  let savedVoices: SavedVoice[] = [];
+  let savedVoiceId = "preset-lingCLvocals",
+    voiceName = "",
+    voiceLibraryStatus = "";
+  const protectedVoices = ["lingCLvocals", "wangSG9s"];
+  $: protectedVoice = protectedVoices.some(
+    (id) => savedVoiceId === `preset-${id}`,
+  );
+  $: customSavedVoices = savedVoices.filter(
+    (v) => !protectedVoices.some((id) => v.id === `preset-${id}`),
+  );
+  let referencePreviewUrl = "";
+  let referencePreviewPlayer: HTMLAudioElement | undefined;
+  $: builtinReference = savedVoices.find((v) => v.id === `preset-${voice}`);
+  $: updateReferencePreview(voiceFile, voice);
+  function updateReferencePreview(file: File | null, builtin: string) {
+    referencePreviewPlayer?.pause();
+    if (referencePreviewUrl.startsWith("blob:"))
+      URL.revokeObjectURL(referencePreviewUrl);
+    referencePreviewUrl = file
+      ? URL.createObjectURL(file)
+      : `/v1/ui/voice-preview?voice=${encodeURIComponent(builtin)}`;
+  }
+  let cloneTestText = "這裡是複製聲音TTS的測試";
+  let cloneTestUrl = "";
+  let cloneTestPlayer: HTMLAudioElement | undefined;
+  let cloneTestAborter: AbortController | null = null;
+  function clearCloneTest() {
+    cloneTestAborter?.abort();
+    cloneTestPlayer?.pause();
+    if (cloneTestUrl) URL.revokeObjectURL(cloneTestUrl);
+    cloneTestUrl = "";
+  }
+  async function refreshVoices() {
+    try {
+      savedVoices = await listVoices();
+    } catch (cause) {
+      voiceLibraryStatus = `Voice library: ${cause instanceof Error ? cause.message : cause}`;
+    }
+  }
+  function selectSavedVoice(id: string) {
+    clearCloneTest();
+    cloneAborter?.abort();
+    savedVoiceId = id;
+    const builtin = protectedVoices.find((name) => id === `preset-${name}`);
+    if (builtin) voice = builtin;
+    const saved = savedVoices.find((v) => v.id === id);
+    voiceFile =
+      saved && !builtin
+        ? new File([saved.audio], `${saved.name}.wav`, { type: "audio/wav" })
+        : null;
+    referenceText = saved?.transcript || defaultReferenceText;
+    voiceName = builtin || saved?.name || "";
+    referencePath = "";
+    cloneStatus = "";
+  }
+  async function addCloneVoice() {
+    if (!voiceFile || cloneBusy || !voiceName.trim()) return;
+    cloneBusy = true;
+    try {
+      const id = createLocalId();
+      await saveVoice({
+        id,
+        name: voiceName.trim(),
+        transcript: referenceText.trim(),
+        audio: await browserDecodeToWav(voiceFile, 24000, 1),
+        createdAt: Date.now(),
+      });
+      await refreshVoices();
+      savedVoiceId = id;
+      voiceLibraryStatus = "Voice saved on the server for all clients.";
+    } catch (cause) {
+      voiceLibraryStatus = `Save failed: ${cause instanceof Error ? cause.message : cause}`;
+    } finally {
+      cloneBusy = false;
+    }
+  }
+  async function removeCloneVoice() {
+    if (!savedVoiceId || protectedVoice || cloneBusy) return;
+    cloneBusy = true;
+    try {
+      await deleteVoice(savedVoiceId);
+      selectSavedVoice("");
+      await refreshVoices();
+      voiceLibraryStatus = "Voice deleted from the server.";
+    } catch (cause) {
+      voiceLibraryStatus = `Delete failed: ${cause instanceof Error ? cause.message : cause}`;
+    } finally {
+      cloneBusy = false;
+    }
+  }
+  async function testCloneVoice() {
+    if (
+      (!voiceFile && !protectedVoice) ||
+      (voiceFile && !referenceText.trim()) ||
+      !cloneTestText.trim() ||
+      cloneBusy
+    )
+      return;
+    clearCloneTest();
+    referencePreviewPlayer?.pause();
+    greetingAborter?.abort();
+    clearTimeout(greetingTimer);
+    const aborter = new AbortController();
+    cloneTestAborter = aborter;
+    cloneBusy = true;
+    cloneStatus = "Generating cloned voice…";
+    const started = performance.now();
+    try {
+      const model = await load(ttsKey, aborter.signal);
+      const body: Record<string, unknown> = { model, input: cloneTestText };
+      if (voiceFile) {
+        body.voice_ref = await uploadWav(
+          await browserDecodeToWav(voiceFile, 24000, 1),
+          aborter.signal,
+        );
+        body.reference_text = referenceText;
+      } else body.voice = voice;
+      const result = await synthesizeSpeech(body, aborter.signal);
+      if (aborter.signal.aborted) return;
+      cloneTestUrl = URL.createObjectURL(result.audio);
+      record(
+        "CLONE_TEST_TTS_COMPLETED",
+        "Cloned voice test",
+        performance.now() - started,
+        result.rtf,
+      );
+      await tick();
+      try {
+        await cloneTestPlayer?.play();
+        cloneStatus = "Cloned voice test ready.";
+      } catch {
+        cloneStatus = "Press play below to hear the cloned voice.";
+      }
+    } catch (cause) {
+      if (!aborter.signal.aborted)
+        cloneStatus = `Voice test failed: ${cause instanceof Error ? cause.message : cause}`;
+    } finally {
+      cloneBusy = false;
+    }
+  }
   let voice = "lingCLvocals";
   $: voiceChoices = selectedTts?.builtin_voices?.length
     ? selectedTts.builtin_voices
@@ -1113,7 +1261,14 @@
       }
     }
   }
-  function chooseReference(file: File | null) {
+  function chooseReference(file: File | null, source = "file") {
+    clearCloneTest();
+    savedVoiceId = "";
+    const stamp = new Date();
+    const pad = (n: number) => String(n).padStart(2, "0");
+    voiceName = file
+      ? `${stamp.getFullYear()}-${pad(stamp.getMonth() + 1)}-${pad(stamp.getDate())}-${pad(stamp.getHours())}-${pad(stamp.getMinutes())}-${pad(stamp.getSeconds())}-${source === "mic" ? "mic" : file.name}`
+      : "";
     cloneAborter?.abort();
     voiceFile = file;
     referencePath = "";
@@ -1125,6 +1280,8 @@
   }
   async function startCloneRecording() {
     if (connected || starting || cloneRecording || cloneBusy) return;
+    referencePreviewPlayer?.pause();
+    clearCloneTest();
     greetingAborter?.abort();
     clearTimeout(greetingTimer);
     cloneBusy = true;
@@ -1157,6 +1314,7 @@
         if (mounted)
           chooseReference(
             new File(chunks, "reference.webm", { type: recorder.mimeType }),
+            "mic",
           );
       };
       recorder.onerror = () => {
@@ -1328,6 +1486,8 @@
     });
   }
   async function call() {
+    referencePreviewPlayer?.pause();
+    clearCloneTest();
     if (connected || starting || !canCall || cloneRecording || cloneBusy)
       return;
     const generation = ++epoch;
@@ -1554,6 +1714,7 @@
     mounted = true;
     void refreshModels();
     void loadCsvFiles();
+    void refreshVoices();
     try {
       const saved = JSON.parse(localStorage.getItem(historyKey) || "[]");
       if (Array.isArray(saved))
@@ -1575,6 +1736,10 @@
       if (previousTheme) document.documentElement.dataset.theme = previousTheme;
       else delete document.documentElement.dataset.theme;
     }
+    clearCloneTest();
+    referencePreviewPlayer?.pause();
+    if (referencePreviewUrl.startsWith("blob:"))
+      URL.revokeObjectURL(referencePreviewUrl);
     mounted = false;
     llmDownloading = false;
     stopLlmDownloadWatch();
@@ -1809,6 +1974,7 @@
         >
       </div>
       <fieldset
+        class="tts-controls"
         disabled={connected ||
           starting ||
           discovering ||
@@ -1824,52 +1990,120 @@
               >{/each}</select
           ></label
         >
-        <label
-          >Built-in voice<select aria-label="Built-in voice" bind:value={voice}
-            >{#each voiceChoices as id}<option value={id}
-                >{id === "lingCLvocals"
-                  ? "Ling · Chinese"
-                  : id === "wangSG9s"
-                    ? "Wang · Chinese"
-                    : id}</option
-              >{/each}</select
-          ></label
-        >
         {#if supportsReference}
-          <label
-            >Custom reference voice (optional)<input
-              type="file"
-              accept="audio/*"
-              on:change={(e) =>
-                chooseReference(e.currentTarget.files?.[0] || null)}
-            /></label
-          >
-          <label
-            >Reference transcript<textarea
-              rows="2"
-              bind:value={referenceText}
-              placeholder="Exact words in reference audio"></textarea></label
-          ><small
-            >Reference transcript applies to custom audio. Built-in voices use
-            their own matching transcript.</small
-          >
-        {/if}
-      </fieldset>
-      {#if supportsReference}<div class="clone-recording">
-          {#if cloneRecording}<button on:click={() => cloneRecorder?.stop()}
-              ><MicOff size={16} /> Stop recording</button
+          <div class="voice-picker-row">
+            <label
+              >Saved voices<select
+                aria-label="Saved voices"
+                value={savedVoiceId}
+                on:change={(e) => selectSavedVoice(e.currentTarget.value)}
+              >
+                {#each protectedVoices as id}<option value={`preset-${id}`}
+                    >{id}</option
+                  >{/each}
+                <option value="">New recording / file</option>
+                {#each customSavedVoices as saved}<option value={saved.id}
+                    >{saved.name}</option
+                  >{/each}
+              </select></label
             >
-          {:else}<button
+            <button
+              aria-label="Refresh voices"
+              title="Refresh voices"
+              on:click={refreshVoices}>↻</button
+            >
+          </div>
+          <div class="voice-capture-row">
+            <button
+              aria-label="Record clone voice"
+              title="Record clone voice"
+              on:click={startCloneRecording}
               disabled={connected ||
                 starting ||
                 cloneBusy ||
                 !useTts ||
-                (useAsr && !asrKey)}
-              on:click={startCloneRecording}
-              ><Mic size={16} /> Record clone voice</button
-            >{/if}
-          {#if cloneStatus}<p role="status">{cloneStatus}</p>{/if}
-        </div>{/if}
+                (useAsr && !asrKey)}><Mic size={16} /></button
+            >
+            <input
+              aria-label="Custom reference voice"
+              title="Choose reference audio"
+              type="file"
+              accept="audio/*"
+              on:change={(e) =>
+                chooseReference(e.currentTarget.files?.[0] || null)}
+            />
+          </div>
+          <div class="reference-recording">
+            <small>Reference recording</small>
+            <audio
+              class="reference-preview"
+              bind:this={referencePreviewPlayer}
+              src={referencePreviewUrl}
+              controls
+              preload="metadata"
+              aria-label="Voice reference playback"
+              on:play={() => cloneTestPlayer?.pause()}
+            ></audio>
+          </div>
+          <label
+            >Reference transcript<textarea
+              rows="2"
+              value={voiceFile
+                ? referenceText
+                : builtinReference?.transcript || ""}
+              readonly={!voiceFile}
+              on:input={(e) => (referenceText = e.currentTarget.value)}
+              placeholder={voiceFile
+                ? "Exact words in reference audio"
+                : "Bundled voice transcript unavailable"}></textarea></label
+          >
+          <div class="voice-name-actions">
+            <label
+              >Clone Custom Voice<input
+                aria-label="Clone Custom Voice"
+                value={protectedVoice ? voice : voiceName}
+                readonly={protectedVoice}
+                on:input={(e) => (voiceName = e.currentTarget.value)}
+                placeholder="Record or choose a reference file"
+              /></label
+            >
+            <button
+              disabled={protectedVoice || !voiceFile || !voiceName.trim()}
+              on:click={addCloneVoice}>Add</button
+            >
+            <button
+              disabled={!savedVoiceId || protectedVoice}
+              on:click={removeCloneVoice}>Delete</button
+            >
+          </div>
+          {#if voiceLibraryStatus}<p role="status">{voiceLibraryStatus}</p>{/if}
+          <div class="voice-test-row">
+            <label
+              >Clone TTS test<textarea rows="1" bind:value={cloneTestText}
+              ></textarea></label
+            >
+            <button
+              disabled={(!voiceFile && !protectedVoice) ||
+                (voiceFile && !referenceText.trim()) ||
+                !cloneTestText.trim() ||
+                !ttsKey}
+              on:click={testCloneVoice}>Send</button
+            >
+          </div>
+        {/if}
+      </fieldset>
+      {#if cloneTestUrl}<audio
+          bind:this={cloneTestPlayer}
+          src={cloneTestUrl}
+          controls
+          aria-label="Cloned voice test playback"
+        ></audio>{/if}
+      {#if cloneRecording}<button
+          aria-label="Stop recording"
+          title="Stop recording"
+          on:click={() => cloneRecorder?.stop()}><MicOff size={16} /></button
+        >{/if}
+      {#if cloneStatus}<p role="status">{cloneStatus}</p>{/if}
       {#if !useTts}<small
           >TTS skipped. Replies are text only; the greeting is not spoken.</small
         >{/if}
@@ -1919,7 +2153,7 @@
           {#if !messages.length}<div class="empty">
               <h1>Your local voice assistant</h1>
               <p>Start a call, then speak or type a message.</p>
-              <small>Audio8 ASR → LFM2.5 → ZipVoice</small>
+              <small>VAD → ASR → LLM → TTS</small>
             </div>{/if}{#each messages as message}<article
               class:user={message.role === "user"}
             >
@@ -2055,10 +2289,10 @@
         </div>
       </section>
       <section class="scenario-dock" aria-label="Demo scenarios">
-        <div class="scenario-title"><strong>Demo scenarios</strong></div>
+        <div class="scenario-title"><strong>Scenarios</strong></div>
         <div class="scenario-panel">
           <label
-            >Scenario<select
+            ><select
               aria-label="Scenario"
               bind:value={scenarioMode}
               disabled={scenarioRunning}
@@ -2201,6 +2435,66 @@
   .demo * {
     box-sizing: border-box;
   }
+  .demo .tts-controls label {
+    margin: 7px 0 3px;
+  }
+  .demo .tts-controls input,
+  .demo .tts-controls select,
+  .demo .tts-controls textarea {
+    padding: 7px;
+    margin-top: 4px;
+  }
+  .voice-name-actions {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    align-items: end;
+    gap: 4px;
+  }
+  .voice-test-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: end;
+    gap: 5px;
+  }
+  .voice-name-actions button,
+  .voice-test-row button {
+    margin-bottom: 3px;
+    padding: 8px 6px;
+  }
+
+  .voice-picker-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: end;
+    gap: 6px;
+  }
+  .voice-capture-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .voice-capture-row input {
+    min-width: 0;
+    width: 100%;
+    font-size: 11px;
+  }
+  .voice-picker-row button,
+  .voice-capture-row button {
+    padding: 7px;
+  }
+  .tts-controls textarea {
+    min-height: 38px;
+  }
+  .stage-settings audio {
+    width: 100%;
+    min-width: 0;
+    height: 34px;
+  }
+  .reference-preview {
+    width: 100%;
+    min-width: 0;
+    height: 36px;
+  }
   .demo aside {
     border-right: 1px solid var(--line);
     padding: 25px 20px;
@@ -2294,9 +2588,6 @@
   }
   .stage-settings fieldset:disabled {
     opacity: 0.5;
-  }
-  .clone-recording {
-    margin-top: 14px;
   }
   .demo fieldset {
     border: 0;

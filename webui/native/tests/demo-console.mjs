@@ -51,6 +51,28 @@ const { chromium } = require("playwright");
   wav.writeUInt16LE(16, 34);
   wav.write("data", 36);
   wav.writeUInt32LE(16000, 40);
+  const sharedVoices = new Map([
+    [
+      "preset-lingCLvocals",
+      {
+        id: "preset-lingCLvocals",
+        name: "lingCLvocals",
+        transcript: "Ling reference transcript",
+        audio: wav.toString("base64"),
+        createdAt: 0,
+      },
+    ],
+    [
+      "preset-wangSG9s",
+      {
+        id: "preset-wangSG9s",
+        name: "wangSG9s",
+        transcript: "Wang reference transcript",
+        audio: wav.toString("base64"),
+        createdAt: 0,
+      },
+    ],
+  ]);
   await page.route(/\/(v1|llm)\//, async (route) => {
     const url = new URL(route.request().url());
     const body =
@@ -85,6 +107,14 @@ const { chromium } = require("playwright");
         "The demo must wait for the worker to be ready before chat",
       );
       assert.equal(url.searchParams.get("autoload"), "true");
+    }
+    if (url.pathname === "/v1/ui/voice-preview")
+      return route.fulfill({ contentType: "audio/wav", body: wav });
+    if (url.pathname === "/v1/ui/voices") {
+      if (route.request().method() === "POST") sharedVoices.set(body.id, body);
+      if (route.request().method() === "DELETE")
+        sharedVoices.delete(url.searchParams.get("id"));
+      return route.fulfill({ json: { voices: [...sharedVoices.values()] } });
     }
     let json = {};
     if (url.pathname.endsWith("models-root"))
@@ -340,7 +370,7 @@ const { chromium } = require("playwright");
   );
   assert.equal(
     await page.getByLabel("Reference transcript", { exact: true }).inputValue(),
-    "你好我是語音助手 請問您需要什麼服務 如果需要轉接請按分機號碼",
+    "Ling reference transcript",
   );
   assert.equal(
     await page
@@ -599,6 +629,108 @@ const { chromium } = require("playwright");
       (r) => r.path === "/v1/models/load" && r.body.id === "demo-qwen3-asr",
     ),
   );
+  assert.match(
+    await page.getByLabel("Clone Custom Voice", { exact: true }).inputValue(),
+    /^\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}-mic$/,
+  );
+  assert.equal(
+    await page
+      .getByRole("button", { name: "Record clone voice" })
+      .textContent(),
+    "",
+  );
+  await page
+    .getByLabel("Clone Custom Voice", { exact: true })
+    .fill("Shared test voice");
+  await page.getByRole("button", { name: "Add", exact: true }).click();
+  await page
+    .getByText("Voice saved on the server for all clients.", { exact: true })
+    .waitFor();
+  assert.equal(sharedVoices.size, 3);
+  const savedId = [...sharedVoices.keys()].find(
+    (id) => !id.startsWith("preset-"),
+  );
+  await page.reload();
+  await page.getByLabel("Saved voices", { exact: true }).selectOption(savedId);
+  assert.match(
+    await page
+      .getByLabel("Voice reference playback", { exact: true })
+      .getAttribute("src"),
+    /^blob:/,
+  );
+  assert.equal(
+    await page.getByLabel("Reference transcript", { exact: true }).inputValue(),
+    "語音測試",
+  );
+  assert.equal(
+    await page.getByLabel("Clone TTS test", { exact: true }).inputValue(),
+    "這裡是複製聲音TTS的測試",
+  );
+  await page
+    .getByRole("region", { name: "TTS settings", exact: true })
+    .getByRole("button", { name: "Send", exact: true })
+    .click();
+  await page
+    .getByLabel("Cloned voice test playback", { exact: true })
+    .waitFor();
+  assert.ok(
+    requests.some(
+      (r) =>
+        r.path === "/v1/audio/speech" &&
+        r.body.input === "這裡是複製聲音TTS的測試" &&
+        r.body.voice_ref &&
+        r.body.reference_text === "語音測試",
+    ),
+  );
+  await page.getByRole("button", { name: "Delete", exact: true }).click();
+  await page
+    .getByText("Voice deleted from the server.", { exact: true })
+    .waitFor();
+  assert.equal(sharedVoices.size, 2);
+  assert.equal(
+    await page.getByLabel("Built-in voice", { exact: true }).count(),
+    0,
+  );
+  await page
+    .getByLabel("Saved voices", { exact: true })
+    .selectOption("preset-wangSG9s");
+  assert.equal(
+    await page.getByLabel("Reference transcript", { exact: true }).inputValue(),
+    "Wang reference transcript",
+  );
+  assert.equal(
+    await page
+      .getByRole("button", { name: "Delete", exact: true })
+      .isDisabled(),
+    true,
+  );
+  assert.equal(
+    await page
+      .getByLabel("Clone Custom Voice", { exact: true })
+      .getAttribute("readonly"),
+    "",
+  );
+  assert.equal(
+    await page
+      .getByLabel("Voice reference playback", { exact: true })
+      .getAttribute("src"),
+    "/v1/ui/voice-preview?voice=wangSG9s",
+  );
+  await page
+    .getByLabel("Saved voices", { exact: true })
+    .selectOption("preset-lingCLvocals");
+  await page.locator('input[type="file"]').first().setInputFiles({
+    name: "reference.wav",
+    mimeType: "audio/wav",
+    buffer: wav,
+  });
+  await page
+    .getByText("Transcript ready · review before calling", { exact: true })
+    .waitFor();
+  assert.match(
+    await page.getByLabel("Clone Custom Voice", { exact: true }).inputValue(),
+    /-reference\.wav$/,
+  );
   await page.reload();
   await page.getByText("SESSION_ENDED", { exact: true }).waitFor();
   assert.deepEqual(errors, []);
@@ -764,7 +896,7 @@ const { chromium } = require("playwright");
   assert.equal(await page.locator("details.scenario-panel").count(), 0);
   await page
     .locator(".scenario-title")
-    .getByText("Demo scenarios", { exact: true })
+    .getByText("Scenarios", { exact: true })
     .waitFor();
   const eventBox = await page.locator(".events").boundingBox(),
     scenarioBox = await page.locator(".scenario-dock").boundingBox();
@@ -827,8 +959,8 @@ const { chromium } = require("playwright");
 
   // Changing the assistant voice reverses the technician voice automatically.
   await page
-    .getByLabel("Built-in voice", { exact: true })
-    .selectOption("wangSG9s");
+    .getByLabel("Saved voices", { exact: true })
+    .selectOption("preset-wangSG9s");
   scenarioOffset = requests.length;
   await page.locator(".scenario-script > summary").click();
   await page
