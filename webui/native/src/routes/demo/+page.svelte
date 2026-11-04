@@ -1,6 +1,12 @@
 <script lang="ts">
   import { onMount, onDestroy, tick } from "svelte";
   import PanelDivider from "$lib/PanelDivider.svelte";
+  import { catalog, modelModes } from "$lib/catalog";
+  import {
+    playSpeechStream,
+    type SpeechStreamSummary,
+  } from "$lib/speech-stream";
+  import { readHotwordsCsv, writeHotwordsCsv } from "$lib/hotwords";
   import { Mic, MicOff, Phone, PhoneOff, Send, Trash2 } from "@lucide/svelte";
   import logo from "../../../static/logo_cloud.svg?raw";
   import "../../app.css";
@@ -400,7 +406,36 @@
     voiceFile: File | null = null,
     referenceText = defaultReferenceText,
     referencePath = "";
-  let hotwords = "";
+  let hotwords = "",
+    savingHotwords = false,
+    hotwordsStatus = "";
+  let ttsStreaming = false;
+  $: ttsSupportsStreaming = (
+    modelModes[selectedTts?.family || ""] || []
+  ).includes("streaming");
+  $: streamingTts = useTts && ttsStreaming && ttsSupportsStreaming;
+  function streamingSpeechBody(body: Record<string, unknown>) {
+    const chunkedText = catalog.some(
+      (entry) =>
+        entry.family === selectedTts?.family &&
+        entry.request_options?.includes("text_chunk_size"),
+    );
+    return chunkedText
+      ? {
+          ...body,
+          options: {
+            text_chunk_size: "80",
+            ...((body.options as Record<string, unknown>) || {}),
+          },
+        }
+      : body;
+  }
+  function setTtsStreaming(enabled: boolean) {
+    ttsStreaming = enabled;
+    try {
+      localStorage.setItem("geovision.demo.tts-streaming", String(enabled));
+    } catch {}
+  }
   let greeting = "您好，這裡是 GeoVision IVR，請問需要什麼協助？";
   let filesReady = false,
     savingGreeting = false,
@@ -530,8 +565,18 @@
     cloneBusy = true;
     cloneStatus = "Generating cloned voice…";
     const started = performance.now();
+    let previewContext: AudioContext | null = null;
     try {
-      const model = await load(ttsKey, aborter.signal);
+      if (streamingTts) {
+        previewContext = new AudioContext();
+        await previewContext.resume();
+      }
+      const model = await load(
+        ttsKey,
+        aborter.signal,
+        true,
+        previewContext ? "streaming" : "offline",
+      );
       const body: Record<string, unknown> = { model, input: cloneTestText };
       if (voiceFile) {
         body.voice_ref = await uploadWav(
@@ -540,8 +585,23 @@
         );
         body.reference_text = referenceText;
       } else body.voice = voice;
-      const result = await synthesizeSpeech(body, aborter.signal);
+      const result = previewContext
+        ? await playSpeechStream(
+            previewContext,
+            streamingSpeechBody(body),
+            aborter.signal,
+            {
+              collectAudio: true,
+              onFirstAudio: (wallMs) => {
+                cloneStatus = "Playing cloned voice · streaming";
+                record("TTS_FIRST_AUDIO", "Cloned voice first chunk", wallMs);
+              },
+            },
+          )
+        : await synthesizeSpeech(body, aborter.signal);
       if (aborter.signal.aborted) return;
+      if (!result.audio)
+        throw new Error("The model produced no reference test audio.");
       cloneTestUrl = URL.createObjectURL(result.audio);
       record(
         "CLONE_TEST_TTS_COMPLETED",
@@ -551,7 +611,7 @@
       );
       await tick();
       try {
-        await cloneTestPlayer?.play();
+        if (!previewContext) await cloneTestPlayer?.play();
         cloneStatus = "Cloned voice test ready.";
       } catch {
         cloneStatus = "Press play below to hear the cloned voice.";
@@ -560,6 +620,7 @@
       if (!aborter.signal.aborted)
         cloneStatus = `Voice test failed: ${cause instanceof Error ? cause.message : cause}`;
     } finally {
+      if (previewContext) await previewContext.close().catch(() => undefined);
       cloneBusy = false;
     }
   }
@@ -581,6 +642,7 @@
     referenceText,
     greeting,
     cloneRecording || cloneBusy,
+    streamingTts,
   );
   let inputBars = Array(36).fill(2),
     outputBars = Array(36).fill(2);
@@ -656,13 +718,18 @@
     }
     return encodePcm16Wav(buffer);
   }
-  async function load(key: string, signal: AbortSignal, announce = true) {
+  async function load(
+    key: string,
+    signal: AbortSignal,
+    announce = true,
+    mode = "offline",
+  ) {
     const model = audioModels.find((m) => m.key === key);
     if (!model)
       throw new Error(
         "The selected model is no longer available. Refresh models.",
       );
-    const id = `demo-${model.id}`;
+    const id = `demo-${model.id}${mode === "streaming" ? "-streaming" : ""}`;
     if (announce) status = `Loading ${model.label}…`;
     await endpointJson(
       "",
@@ -674,7 +741,7 @@
           family: model.family,
           path: model.path,
           task: model.task,
-          mode: "offline",
+          mode,
           load_options: model.load_options || {},
           session_options: model.session_options || {},
         }),
@@ -867,29 +934,37 @@
             "Choose a TTS model with two built-in voices for the scenario.",
           );
         operationStarted = performance.now();
-        const id = await load(ttsKey, signal);
+        const id = await load(
+          ttsKey,
+          signal,
+          true,
+          streamingTts ? "streaming" : "offline",
+        );
         status = "Synthesizing technician voice";
-        const synthesis = await synthesizeSpeech(
-          {
-            model: id,
-            input: maintenanceSpeechText(text),
-            voice: technicianVoice,
-            response_format: "wav",
-          },
-          signal,
-        );
-        record(
-          "TECHNICIAN_TTS_COMPLETED",
-          technicianVoice,
-          performance.now() - operationStarted,
-          synthesis.rtf,
-        );
-        const wallMs = await playAudio(
-          synthesis.audio,
-          generation,
-          "technician",
-          signal,
-        );
+        const body = {
+          model: id,
+          input: maintenanceSpeechText(text),
+          voice: technicianVoice,
+        };
+        let wallMs: number | null;
+        if (streamingTts)
+          wallMs = (await streamTts(body, generation, signal, "technician"))
+            .playbackMs;
+        else {
+          const synthesis = await synthesizeSpeech(body, signal);
+          record(
+            "TECHNICIAN_TTS_COMPLETED",
+            technicianVoice,
+            performance.now() - operationStarted,
+            synthesis.rtf,
+          );
+          wallMs = await playAudio(
+            synthesis.audio,
+            generation,
+            "technician",
+            signal,
+          );
+        }
         if (signal.aborted || generation !== epoch) return;
         record("TECHNICIAN_PLAYED", text, wallMs);
       }
@@ -959,7 +1034,12 @@
       record("CONVERSATION_ITEM_ADDED", `ASSISTANT · ${reply}`);
       if (useTts) {
         operationStarted = performance.now();
-        const ttsId = await load(ttsKey, signal);
+        const ttsId = await load(
+          ttsKey,
+          signal,
+          true,
+          streamingTts ? "streaming" : "offline",
+        );
         status = "Synthesizing";
         const body: Record<string, unknown> = {
           model: ttsId,
@@ -972,21 +1052,25 @@
         } else {
           body.voice = voice;
         }
-        const synthesis = await synthesizeSpeech(body, signal);
-        if (generation !== epoch) return;
-        record(
-          "TTS_COMPLETED",
-          selectedTts?.label || "Speech synthesized",
-          performance.now() - operationStarted,
-          synthesis.rtf,
-        );
-        operationStarted = performance.now();
-        const playbackMs = await playAudio(
-          synthesis.audio,
-          generation,
-          "assistant",
-          signal,
-        );
+        let playbackMs: number | null;
+        if (streamingTts)
+          playbackMs = (await streamTts(body, generation, signal)).playbackMs;
+        else {
+          const synthesis = await synthesizeSpeech(body, signal);
+          if (generation !== epoch) return;
+          record(
+            "TTS_COMPLETED",
+            selectedTts?.label || "Speech synthesized",
+            performance.now() - operationStarted,
+            synthesis.rtf,
+          );
+          playbackMs = await playAudio(
+            synthesis.audio,
+            generation,
+            "assistant",
+            signal,
+          );
+        }
         if (generation !== epoch || signal.aborted) return;
         record("PLAYBACK_COMPLETED", "Assistant reply played", playbackMs);
       } else record("TTS_SKIPPED", "Text response only");
@@ -1008,16 +1092,38 @@
   }
   async function loadCsvFiles() {
     try {
-      const [savedGreeting, savedPrompt] = await Promise.all([
+      const [savedGreeting, savedPrompt, savedHotwords] = await Promise.all([
         endpointJson<{ content: string }>("", "ui/greetings"),
         endpointJson<{ content: string }>("", "ui/prompt"),
+        endpointJson<{ content: string }>("", "ui/hotwords"),
       ]);
       greeting = readGreetingCsv(savedGreeting.content);
       prompt = savedPrompt.content;
+      hotwords = readHotwordsCsv(savedHotwords.content);
+      hotwordsStatus = "Loaded hotwords.csv";
       filesReady = true;
       fileStatus = "Loaded greetings.csv and prompt.csv";
     } catch (cause) {
       fileStatus = `CSV load failed: ${cause instanceof Error ? cause.message : cause}`;
+    }
+  }
+  async function saveHotwordsCsv() {
+    savingHotwords = true;
+    try {
+      const result = await endpointJson<{ content: string }>(
+        "",
+        "ui/hotwords",
+        {
+          method: "POST",
+          body: JSON.stringify({ content: writeHotwordsCsv(hotwords) }),
+        },
+      );
+      hotwords = readHotwordsCsv(result.content);
+      hotwordsStatus = "Saved hotwords.csv";
+    } catch (cause) {
+      hotwordsStatus = `Hotwords save failed: ${cause instanceof Error ? cause.message : cause}`;
+    } finally {
+      savingHotwords = false;
     }
   }
   async function saveGreetingCsv() {
@@ -1031,7 +1137,7 @@
       );
       greeting = readGreetingCsv(saved.content);
       fileStatus = "Saved greetings.csv";
-      if (useTts) await prepareGreeting();
+      if (useTts && !streamingTts) await prepareGreeting();
     } catch (cause) {
       fileStatus = `Greeting save failed: ${cause instanceof Error ? cause.message : cause}`;
     } finally {
@@ -1050,6 +1156,68 @@
       fileStatus = `Prompt save failed: ${cause instanceof Error ? cause.message : cause}`;
     } finally {
       savingPrompt = false;
+    }
+  }
+  async function streamTts(
+    body: Record<string, unknown>,
+    generation: number,
+    signal: AbortSignal,
+    role: "assistant" | "technician" = "assistant",
+    leadInSeconds = 0.06,
+  ): Promise<SpeechStreamSummary> {
+    const ctx = context;
+    if (!ctx || signal.aborted || generation !== epoch)
+      throw new DOMException("Call ended", "AbortError");
+    const streamAnalyser = ctx.createAnalyser();
+    streamAnalyser.fftSize = 512;
+    streamAnalyser.connect(ctx.destination);
+    analyser = streamAnalyser;
+    let began = false;
+    try {
+      return await playSpeechStream(ctx, streamingSpeechBody(body), signal, {
+        destination: streamAnalyser,
+        leadInSeconds,
+        onFirstAudio: (wallMs) => {
+          began = true;
+          speaking = true;
+          playbackRole = role;
+          status =
+            role === "technician"
+              ? "Technician speaking · streaming"
+              : "Speaking · streaming";
+          record(
+            role === "technician"
+              ? "TECHNICIAN_STATE_CHANGED"
+              : "AGENT_STATE_CHANGED",
+            "thinking → speaking",
+          );
+          record("TTS_FIRST_AUDIO", "First streamed audio chunk", wallMs);
+        },
+        onSynthesized: (summary) =>
+          record(
+            role === "technician"
+              ? "TECHNICIAN_TTS_COMPLETED"
+              : "TTS_COMPLETED",
+            `${selectedTts?.label || "Speech"} · streaming · ${summary.chunks} chunks`,
+            summary.wallMs,
+            summary.rtf,
+          ),
+      });
+    } finally {
+      streamAnalyser.disconnect();
+      if (analyser === streamAnalyser) analyser = null;
+      if (generation === epoch) {
+        speaking = false;
+        playbackRole = "assistant";
+        if (role === "technician") inputBars = Array(36).fill(2);
+        if (began)
+          record(
+            role === "technician"
+              ? "TECHNICIAN_STATE_CHANGED"
+              : "AGENT_STATE_CHANGED",
+            "speaking → listening",
+          );
+      }
     }
   }
   async function synthesizeSpeech(
@@ -1228,6 +1396,7 @@
     _text: string,
     _greeting: string,
     cloning: boolean,
+    streaming: boolean,
   ) {
     clearTimeout(greetingTimer);
     if (!ready) {
@@ -1249,6 +1418,11 @@
     const key = greetingFingerprint();
     if (key === preparedKey) {
       greetingStatus = "Greeting ready · instant playback";
+      return;
+    }
+    if (streaming) {
+      greetingAborter?.abort();
+      greetingStatus = "Greeting will stream after connection";
       return;
     }
     if (
@@ -1748,20 +1922,46 @@
       draw();
       if (useTts && greeting.trim()) {
         record("GREETING_REQUESTED", greeting);
-        const audio = await prepareGreeting();
-        if (generation !== epoch) return;
-        if (!audio)
-          throw new Error(greetingStatus || "Greeting synthesis failed.");
-        messages = [{ role: "assistant", content: greeting }];
-        await tick();
-        if (generation !== epoch || !connected) return;
-        const playbackMs = await playAudio(
-          audio,
-          generation,
-          "assistant",
-          controller?.signal,
-          0.3,
-        );
+        let playbackMs: number | null;
+        if (
+          streamingTts &&
+          !(preparedKey === greetingFingerprint() && preparedGreeting)
+        ) {
+          greetingAborter?.abort();
+          const id = await load(ttsKey, controller.signal, true, "streaming");
+          const body: Record<string, unknown> = { model: id, input: greeting };
+          if (referencePath && supportsReference) {
+            body.voice_ref = referencePath;
+            body.reference_text = referenceText;
+          } else body.voice = voice;
+          messages = [{ role: "assistant", content: greeting }];
+          await tick();
+          if (generation !== epoch || !connected) return;
+          playbackMs = (
+            await streamTts(
+              body,
+              generation,
+              controller.signal,
+              "assistant",
+              0.3,
+            )
+          ).playbackMs;
+        } else {
+          const audio = await prepareGreeting();
+          if (generation !== epoch) return;
+          if (!audio)
+            throw new Error(greetingStatus || "Greeting synthesis failed.");
+          messages = [{ role: "assistant", content: greeting }];
+          await tick();
+          if (generation !== epoch || !connected) return;
+          playbackMs = await playAudio(
+            audio,
+            generation,
+            "assistant",
+            controller.signal,
+            0.3,
+          );
+        }
         if (generation !== epoch) return;
         record("GREETING_PLAYED", greeting, playbackMs);
         busy = false;
@@ -1844,6 +2044,10 @@
       );
       if (savedWidth > 0 && Number.isFinite(savedWidth))
         setSidebarWidth(savedWidth);
+    } catch {}
+    try {
+      ttsStreaming =
+        localStorage.getItem("geovision.demo.tts-streaming") === "true";
     } catch {}
     restorePanelLayout();
     void loadSystemInfo();
@@ -2033,6 +2237,11 @@
             bind:value={hotwords}
             placeholder="X光機、設備代碼、人名…"></textarea></label
         >
+        <button disabled={savingHotwords} on:click={saveHotwordsCsv}
+          >{savingHotwords ? "Saving…" : "Save hotwords.csv"}</button
+        >
+        {#if hotwordsStatus}<small role="status">{hotwordsStatus}</small>{/if}
+
         {#if selectedAsr?.family === "audio8_asr"}<small
             >Audio8 ASR currently uses a fixed transcription prompt; context
             biasing requires a model that supports it.</small
@@ -2132,6 +2341,22 @@
                 >{model.label}</option
               >{/each}</select
           ></label
+        >
+        <label class="tts-streaming-switch"
+          ><span>Streaming</span><input
+            type="checkbox"
+            role="switch"
+            aria-label="TTS streaming"
+            checked={streamingTts}
+            disabled={!ttsSupportsStreaming}
+            on:change={(e) => setTtsStreaming(e.currentTarget.checked)}
+          />
+          <span>{streamingTts ? "On" : "Off"}</span></label
+        >
+        <small
+          >{ttsSupportsStreaming
+            ? "Play chunks as speech is generated."
+            : "This model supports offline speech only."}</small
         >
         {#if supportsReference}
           <div class="voice-picker-row">
@@ -2840,6 +3065,15 @@
   .stage-switch span {
     font-size: 11px;
     min-width: 17px;
+  }
+  .demo label.tts-streaming-switch {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .demo .tts-streaming-switch input {
+    width: 16px;
+    margin: 0;
   }
   .stage-settings fieldset:disabled {
     opacity: 0.5;

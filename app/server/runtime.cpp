@@ -219,6 +219,8 @@ HttpResponse ServerState::handle_request(const HttpRequest & request, bool use_f
             if (extra.method == "POST" && extra.path == "/v1/ui/knowledge") return handle_knowledge_save(extra.body);
             if (extra.method == "GET" && extra.path == "/v1/ui/prompt") return handle_prompt_get("prompt.csv");
             if (extra.method == "POST" && extra.path == "/v1/ui/prompt") return handle_prompt_save(extra.body);
+            if (extra.method == "GET" && extra.path == "/v1/ui/hotwords") return handle_prompt_get("hotwords.csv");
+            if (extra.method == "POST" && extra.path == "/v1/ui/hotwords") return handle_prompt_save(extra.body, "hotwords.csv");
             if (extra.method == "GET" && extra.path == "/v1/ui/hotword") return handle_prompt_get("hotword.csv");
             if (extra.method == "POST" && extra.path == "/v1/ui/hotword") return handle_prompt_save(extra.body, "hotword.csv");
             if (extra.method == "GET" && extra.path == "/v1/ui/greetings") return handle_prompt_get("greetings.csv");
@@ -1270,12 +1272,7 @@ HttpResponse ServerState::handle_speech_stream(
                     buffers.push_back(named.audio);
                 }
                 for (const auto & audio : buffers) {
-                    const auto pcm = encode_pcm16_samples(audio);
-                    write_sse(
-                        writer,
-                        "{\"type\":\"speech.audio.delta\",\"audio\":" +
-                            json_quote(base64_encode(pcm)) +
-                            "}");
+                    write_sse(writer, speech_audio_delta_json(audio));
                     wrote_audio = true;
                 }
             },

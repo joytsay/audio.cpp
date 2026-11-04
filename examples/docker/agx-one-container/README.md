@@ -477,3 +477,16 @@ are not required. JetPack 6.2.1 is inferred for L4T 36.4.4. Unknown releases sho
 the detected L4T version without guessing a JetPack version. When the model is
 unavailable, the header falls back to the host's `/etc/os-release` `PRETTY_NAME`
 (or `NAME` and `VERSION`), also mounted read-only.
+
+In the demo TTS section, **Streaming** plays incoming audio chunks while the model
+continues generating speech. The switch is available only for model families
+that support streaming and is remembered after refresh. Cached greetings still
+play immediately; uncached greetings, replies, scenario voices, and cloned-voice
+tests use streaming when enabled. Long text uses the model's native chunking
+(with an 80-character budget where supported). Hangup cancels both the request
+and queued audio. Streaming is off by default.
+
+The demo ASR context loads from `hotwords.csv`. **Save hotwords.csv** writes the
+one-column `context` CSV back to the server; its Docker bind mount preserves edits
+across container restarts. `hotword.csv` remains available for the existing SIP
+and other legacy consumers. Context only affects ASR models that support it.

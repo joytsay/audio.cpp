@@ -90,6 +90,7 @@ void write_sse(HttpStreamWriter &writer, const std::string &json);
 void write_sse_done(HttpStreamWriter &writer);
 bool bool_field(const engine::io::json::Value &object, const std::string &key,
                 bool default_value);
+std::string speech_audio_delta_json(const engine::runtime::AudioBuffer & audio);
 HttpResponse sse_response(std::function<void(HttpStreamWriter &)> stream);
 HttpResponse
 chunked_audio_response(std::function<void(HttpStreamWriter &)> stream);

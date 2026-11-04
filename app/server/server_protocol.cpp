@@ -714,6 +714,13 @@ bool bool_field(const Value &object, const std::string &key,
   throw std::runtime_error(key + " must be a boolean");
 }
 
+std::string speech_audio_delta_json(const engine::runtime::AudioBuffer & audio) {
+  const auto pcm = encode_pcm16_samples(audio);
+  return "{\"type\":\"speech.audio.delta\",\"audio\":" + json_quote(base64_encode(pcm)) +
+      ",\"sample_rate\":" + std::to_string(audio.sample_rate) +
+      ",\"channels\":" + std::to_string(audio.channels) + ",\"format\":\"pcm_s16le\"}";
+}
+
 HttpResponse sse_response(std::function<void(HttpStreamWriter &)> stream) {
   HttpResponse response;
   response.status = 200;

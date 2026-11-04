@@ -33,6 +33,7 @@ interface PackageEntry {
 
 interface PackageSpec {
   family: string;
+  modes?: string[];
   capabilities?: Record<string, string[]>;
   packages?: Array<Omit<PackageEntry, 'family'>>;
   options?: {
@@ -58,6 +59,7 @@ const packages: PackageEntry[] = Object.values(specModules).flatMap((spec) =>
 );
 
 const specsByFamily = new Map(Object.values(specModules).map((spec) => [spec.family, spec]));
+export const modelModes = Object.fromEntries(Object.values(specModules).map(spec => [spec.family, spec.modes || []])) as Record<string, string[]>;
 export const modelCapabilities = Object.fromEntries(Object.values(specModules).map(spec =>
   [spec.family, [...new Set(Object.values(spec.capabilities || {}).flat())]])) as Record<string, string[]>;
 const exposeAllGgufPackageFamilies = new Set([

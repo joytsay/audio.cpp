@@ -27,6 +27,7 @@ const { chromium } = require("playwright");
   const page = await context.newPage(),
     errors = [],
     requests = [];
+  let longStreamAudio = false;
   let vadCalls = 0,
     noLlmModels = false;
   let llmState = "unloaded",
@@ -35,6 +36,7 @@ const { chromium } = require("playwright");
     checkingAudioHighlights = false;
   const highlightedTurns = [];
   let greetingsCsv = 'greeting\n"您好，這裡是 GeoVision IVR。"\n';
+  let hotwordsCsv = 'context\n"Technical terms: 台積電, X光機"\n';
   let promptCsv = "你是現場維修保養的語音助理。";
   const llmId = "LiquidAI_LFM2.5-1.2B-Instruct-Q4_K_M.gguf";
   page.on("pageerror", (e) => errors.push(e.message));
@@ -107,6 +109,23 @@ const { chromium } = require("playwright");
         "The demo must wait for the worker to be ready before chat",
       );
       assert.equal(url.searchParams.get("autoload"), "true");
+    }
+    if (url.pathname === "/v1/audio/speech" && body.stream) {
+      assert.equal(body.stream_format, "sse");
+      assert.equal(body.response_format, "pcm");
+      assert.ok(body.model.endsWith("-streaming"));
+      const pcm = longStreamAudio ? Buffer.alloc(32000 * 4) : wav.subarray(44);
+      const delta = {
+        type: "speech.audio.delta",
+        audio: pcm.toString("base64"),
+        sample_rate: 16000,
+        channels: 1,
+        format: "pcm_s16le",
+      };
+      return route.fulfill({
+        contentType: "text/event-stream",
+        body: `data: ${JSON.stringify(delta)}\n\ndata: ${JSON.stringify({ type: "speech.audio.done", timing: { ttft_ms: 12 } })}\n\ndata: [DONE]\n\n`,
+      });
     }
     if (url.pathname === "/v1/ui/voice-preview")
       return route.fulfill({ contentType: "audio/wav", body: wav });
@@ -246,7 +265,10 @@ const { chromium } = require("playwright");
         file: true,
         directory: false,
       };
-    else if (url.pathname.endsWith("/ui/greetings")) {
+    else if (url.pathname.endsWith("/ui/hotwords")) {
+      if (route.request().method() === "POST") hotwordsCsv = body.content;
+      json = { content: hotwordsCsv };
+    } else if (url.pathname.endsWith("/ui/greetings")) {
       if (route.request().method() === "POST") greetingsCsv = body.content;
       json = { content: greetingsCsv };
     } else if (url.pathname.endsWith("/ui/prompt")) {
@@ -398,7 +420,16 @@ const { chromium } = require("playwright");
     greetingBox.y < vadBox.y,
     "Call greeting must precede model settings",
   );
+  assert.equal(
+    await page.getByLabel("ASR hotwords / context").inputValue(),
+    "Technical terms: 台積電, X光機",
+  );
   await page.getByLabel("ASR hotwords / context").fill("X光機");
+  await page
+    .getByRole("button", { name: "Save hotwords.csv", exact: true })
+    .click();
+  await page.getByText("Saved hotwords.csv", { exact: true }).waitFor();
+  assert.equal(hotwordsCsv, 'context\n"X光機"\n');
   await page.getByLabel("System prompt").fill("請簡短回覆。");
   await page.getByRole("button", { name: "Save prompt.csv" }).click();
   await page.getByText("Saved prompt.csv", { exact: true }).waitFor();
@@ -1179,6 +1210,86 @@ const { chromium } = require("playwright");
     "Stopping input playback must cancel remaining transcription and examples",
   );
   await page.getByRole("button", { name: "Hang up" }).click();
+  assert.equal(
+    requests.filter((r) => r.path === "/v1/audio/speech" && r.body.stream)
+      .length,
+    0,
+    "Streaming off keeps the existing offline path",
+  );
+  await page
+    .getByRole("switch", { name: "TTS streaming", exact: true })
+    .check();
+  await page.reload();
+  await page.getByRole("button", { name: "Start call", exact: true }).waitFor();
+  assert.equal(
+    await page
+      .getByRole("switch", { name: "TTS streaming", exact: true })
+      .isChecked(),
+    true,
+  );
+  assert.equal(
+    await page.getByLabel("ASR hotwords / context").inputValue(),
+    "X光機",
+  );
+  await page.getByRole("switch", { name: "Enable ASR", exact: true }).uncheck();
+  const streamOffset = requests.length;
+  await page.getByRole("button", { name: "Start call", exact: true }).click();
+  await page
+    .getByLabel("Message", { exact: true })
+    .fill("Streaming reply test");
+  await page.getByRole("button", { name: "Send message", exact: true }).click();
+  await page.getByText("Ready for text", { exact: true }).waitFor();
+  const streamed = requests
+    .slice(streamOffset)
+    .filter((r) => r.path === "/v1/audio/speech" && r.body.stream);
+  assert.equal(
+    streamed.length,
+    2,
+    "Uncached greeting and assistant reply stream",
+  );
+  assert.equal(streamed[1].body.options.text_chunk_size, "80");
+  assert.equal(
+    await page
+      .getByRole("switch", { name: "TTS streaming", exact: true })
+      .isDisabled(),
+    true,
+  );
+  await page.getByRole("button", { name: "Hang up", exact: true }).click();
+  await page
+    .getByRole("region", { name: "TTS settings", exact: true })
+    .getByLabel("Custom reference voice", { exact: true })
+    .setInputFiles({
+      name: "stream-ref.wav",
+      mimeType: "audio/wav",
+      buffer: wav,
+    });
+  await page
+    .getByLabel("Reference transcript", { exact: true })
+    .fill("測試參考");
+  await page
+    .getByRole("region", { name: "TTS settings", exact: true })
+    .getByRole("button", { name: "Send", exact: true })
+    .click();
+  await page
+    .getByLabel("Cloned voice test playback", { exact: true })
+    .waitFor();
+  const cloneStream = requests
+    .filter((r) => r.path === "/v1/audio/speech" && r.body.stream)
+    .at(-1);
+  assert.ok(cloneStream.body.voice_ref);
+  assert.equal(cloneStream.body.reference_text, "測試參考");
+  longStreamAudio = true;
+  await page.getByRole("button", { name: "Start call", exact: true }).click();
+  await page.getByText("Speaking · streaming", { exact: true }).waitFor();
+  await page.getByRole("button", { name: "Hang up", exact: true }).click();
+  await page.getByRole("button", { name: "Start call", exact: true }).waitFor();
+  await page.waitForTimeout(150);
+  assert.equal(
+    await page.getByRole("alert").count(),
+    0,
+    "Hangup cancels buffered streaming audio cleanly",
+  );
+  assert.deepEqual(errors, []);
   await page.setViewportSize({ width: 390, height: 844 });
   assert.equal(
     await page.evaluate(
@@ -1187,7 +1298,7 @@ const { chromium } = require("playwright");
     false,
   );
   console.log(
-    "PASS downloaded-model dropdowns, actual LLM IDs, unlinked branding, CSV saves, cached greeting, ASR hotwords, clone recording/transcript, voice/text calls, history, runtime measurements, stage switches/bypasses/manual turns, deduplicated model aliases, LFM download, greeting text/reference isolation, fixed equal-width scenarios panel, audio scenario, three-turn maintenance simulation, distinct technician/assistant voices, CSP-safe preview then explicit send, chat audio players, ordered five-example autoplay, queue highlighting/cancellation, RTF reporting/persistence, legacy ASR event migration, compact audio chooser, incomplete LLM detection/resume, explicit model loading/readiness before chat, mobile layout",
+    "PASS downloaded-model dropdowns, actual LLM IDs, unlinked branding, CSV saves, cached greeting, ASR hotwords, clone recording/transcript, voice/text calls, history, runtime measurements, stage switches/bypasses/manual turns, deduplicated model aliases, LFM download, greeting text/reference isolation, fixed equal-width scenarios panel, audio scenario, three-turn maintenance simulation, distinct technician/assistant voices, CSP-safe preview then explicit send, chat audio players, ordered five-example autoplay, queue highlighting/cancellation, RTF reporting/persistence, legacy ASR event migration, compact audio chooser, incomplete LLM detection/resume, explicit model loading/readiness before chat, TTS streaming switch/persistence/greeting/reply/clone/cancellation, hotwords CSV persistence/default load, mobile layout",
   );
   await browser.close();
 })().catch((e) => {

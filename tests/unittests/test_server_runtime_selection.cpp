@@ -2,6 +2,7 @@
 // Exercise frontend forwarding too; no test hook in the original runtime is needed.
 #include "runtime.h"
 #include "server_ui.h"
+#include "server_protocol.h"
 #include "sip_settings.h"
 #include "engine/framework/io/json.h"
 
@@ -12,6 +13,15 @@
 
 int main() {
     try {
+        {
+            engine::runtime::AudioBuffer audio;
+            audio.sample_rate = 24000; audio.channels = 2;
+            audio.samples = {0.25f, -0.25f, 0.5f, -0.5f};
+            const auto event = engine::io::json::parse(minitts::server::speech_audio_delta_json(audio));
+            if (event.require("sample_rate").as_i64() != 24000 || event.require("channels").as_i64() != 2 ||
+                event.require("format").as_string() != "pcm_s16le" || event.require("audio").as_string().empty())
+                throw std::runtime_error("streaming speech lost its PCM format metadata");
+        }
         {
             const auto root = std::filesystem::temp_directory_path() /
                 ("jetson-info-test-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
@@ -90,6 +100,7 @@ int main() {
             struct Cleanup { std::filesystem::path path; ~Cleanup() { std::filesystem::remove_all(path); } } cleanup{root};
             std::filesystem::create_directories(root / "model_specs");
             { std::ofstream initial(root / "greetings.csv"); initial << "greeting\nHello\n"; }
+            { std::ofstream initial(root / "hotwords.csv"); initial << "context\nX光機\n"; }
             minitts::server::ServerConfig csv_config;
             csv_config.backend = engine::core::BackendType::Cpu;
             csv_config.ui_management = true;
@@ -105,6 +116,15 @@ int main() {
                 const auto loaded = forwarded ? csv_state.forward_to_core(request) : csv_state.handle(request);
                 if (loaded.status != 200 || engine::io::json::parse(loaded.body).require("content").as_string() !=
                     "greeting\nWelcome to GeoVision IVR\n") throw std::runtime_error("greeting CSV roundtrip failed");
+                request.path = "/v1/ui/hotwords";
+                request.method = "POST";
+                request.body = R"({"content":"context\n\"台積電, X光機\"\n"})";
+                const auto hotwords_saved = forwarded ? csv_state.forward_to_core(request) : csv_state.handle(request);
+                if (hotwords_saved.status != 200) throw std::runtime_error("hotwords CSV save failed");
+                request.method = "GET";
+                const auto hotwords_loaded = forwarded ? csv_state.forward_to_core(request) : csv_state.handle(request);
+                if (hotwords_loaded.status != 200 || engine::io::json::parse(hotwords_loaded.body).require("content").as_string() != "context\n\"台積電, X光機\"\n")
+                    throw std::runtime_error("hotwords CSV did not persist and reload");
                 std::ifstream persisted(root / "greetings.csv");
                 if (std::string(std::istreambuf_iterator<char>(persisted), {}) != "greeting\nWelcome to GeoVision IVR\n")
                     throw std::runtime_error("greeting CSV was not persisted");
@@ -187,7 +207,7 @@ int main() {
         minitts::server::ServerState live(live_config, std::filesystem::current_path());
         // The shared dispatcher must retain dev's routes and their UI guards.
         for (bool forwarded : {false, true}) {
-            for (const std::string path : {"/v1/ui/voices", "/v1/ui/knowledge", "/v1/ui/prompt", "/v1/ui/hotword", "/v1/ui/greetings"}) {
+            for (const std::string path : {"/v1/ui/voices", "/v1/ui/knowledge", "/v1/ui/prompt", "/v1/ui/hotword", "/v1/ui/hotwords", "/v1/ui/greetings"}) {
                 minitts::server::HttpRequest request;
                 request.method = "POST";
                 request.path = path;

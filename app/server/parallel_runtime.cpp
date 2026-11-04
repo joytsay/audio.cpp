@@ -1063,12 +1063,7 @@ HttpResponse ParallelServerState::handle_speech_stream(
                     buffers.push_back(named.audio);
                 }
                 for (const auto & audio : buffers) {
-                    const auto pcm = encode_pcm16_samples(audio);
-                    write_sse(
-                        writer,
-                        "{\"type\":\"speech.audio.delta\",\"audio\":" +
-                            json_quote(base64_encode(pcm)) +
-                            "}");
+                    write_sse(writer, speech_audio_delta_json(audio));
                     wrote_audio = true;
                 }
             },
