@@ -24,7 +24,6 @@ class FakeContext {
  constructor() {this.origin=performance.now();this.starts=[];this.stops=0;this.destination={};}
  get currentTime() {return (performance.now()-this.origin)/1000;}
  async resume() {}
- async decodeAudioData() {return new FakeBuffer(1,240,24000);}
  createBuffer(c,n,sr) {return new FakeBuffer(c,n,sr);}
  createBufferSource() {
   const ctx=this; let timer;
@@ -59,14 +58,14 @@ try {
  const cancelled=playSpeechStream(cancelledCtx,{input:"Test speech"},aborter.signal);
  setTimeout(()=>aborter.abort(),10);
  await assert.rejects(cancelled,{name:'AbortError'});assert.equal(cancelledCtx.stops,1,'abort stops scheduled audio');
- const wavRequests=[];
- globalThis.fetch=async(url,init)=>{wavRequests.push(JSON.parse(init.body));return Response.json({audio:Buffer.from('wav fixture').toString('base64'),timing:{rtf:0.5}});};
- const wavCtx=new FakeContext();
- const wavSummary=await playSpeechStream(wavCtx,{input:'第一行\n第二行\n第三行\n第四行\n第五行'},new AbortController().signal,{transport:'wav',playbackRate:0.9,collectAudio:true});
- assert.deepEqual(wavRequests.map(r=>r.input),['第一行\n第二行','第三行\n第四行','第五行']);
- assert.ok(wavRequests.every(r=>r.stream===false && r.response_format==='json'));
- assert.equal(wavSummary.textGroups,3);assert.equal(wavSummary.rtf,0.5);
- assert.ok(wavCtx.starts[1].when >= wavCtx.starts[0].when+0.01/0.9+0.219);
+ const groupRequests=[];
+ globalThis.fetch=async(url,init)=>{groupRequests.push(JSON.parse(init.body));return response([delta,done]);};
+ const groupCtx=new FakeContext();
+ const groupSummary=await playSpeechStream(groupCtx,{input:'第一行\n第二行\n第三行\n第四行\n第五行'},new AbortController().signal,{playbackRate:0.9,collectAudio:true});
+ assert.deepEqual(groupRequests.map(r=>r.input),['第一行\n第二行','第三行\n第四行','第五行']);
+ assert.ok(groupRequests.every(r=>r.stream===true && r.response_format==='pcm'));
+ assert.equal(groupSummary.textGroups,3);assert.equal(groupSummary.rtf,0.4);
+ assert.ok(groupCtx.starts[1].when >= groupCtx.starts[0].when+(2/24000)/0.9+0.219);
  await assert.rejects(playSpeechStream(new FakeContext(),{input:'test'},new AbortController().signal,{playbackRate:0.2}),/Playback speed/);
  const textCompiled=buildSync({entryPoints:[fileURLToPath(new URL('../src/lib/speech-text.ts',import.meta.url))],bundle:true,platform:'node',format:'esm',write:false});
  const {splitSpeechText}=await import(`data:text/javascript;base64,${Buffer.from(textCompiled.outputFiles[0].text).toString('base64')}`);
@@ -75,6 +74,6 @@ try {
  assert.ok(groups.length>1);assert.ok(groups.every(g=>[...g].length<=120 && g.split('\n').length<=2));
  assert.equal(groups.join('').replace(/\s/g,''),longText.replace(/\s/g,''));
  assert.equal(groups.filter(g=>g.includes('SN14778725')).length>0,true);
- console.log('PASS two-line length-limited groups, WAV fallback, playback speed, pauses and invalid speed');
+ console.log('PASS two-line length-limited groups, native PCM streaming, playback speed, pauses and invalid speed');
  console.log('PASS PCM metadata/stereo decoding, fragmented SSE, playback before completion, contiguous scheduling, replay WAV, errors, truncation and cancellation');
 } finally {globalThis.fetch=originalFetch;delete globalThis.document;}

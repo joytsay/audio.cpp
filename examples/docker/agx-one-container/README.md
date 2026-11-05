@@ -491,9 +491,8 @@ continues generating speech. The switch is available only for model families
 that support streaming and is remembered after refresh. Cached greetings still
 play immediately; uncached greetings, replies, scenario voices, and cloned-voice
 tests use streaming when enabled. Text is split into groups of at most two
-nonempty lines and 120 characters, with short pauses between groups. VoxCPM1
-uses progressive offline WAV batches to bypass the native streaming path
-reported to produce static; other models use native PCM streaming. Playback speed defaults
+nonempty lines and 120 characters, with short pauses between groups. All
+streaming-capable models, including VoxCPM1, use native PCM streaming. Playback speed defaults
 to 0.9× and is included in **Save model settings**. Hangup cancels both the request
 and queued audio. Streaming is off by default.
 

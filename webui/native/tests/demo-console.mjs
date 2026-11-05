@@ -1747,14 +1747,14 @@ const { chromium } = require("playwright");
   replyText = "第一行\n第二行\n第三行\n第四行\n第五行";
   await page.getByRole("button", { name: "Start call", exact: true }).click();
   await page.getByText("Ready for text", { exact: true }).waitFor();
-  await page.getByLabel("Message", { exact: true }).fill("Test WAV batches");
+  await page.getByLabel("Message", { exact: true }).fill("Test native streaming");
   await page.getByRole("button", { name: "Send message", exact: true }).click();
   await page.getByText("Ready for text", { exact: true }).waitFor();
   const voxRequests = requests.slice(voxOffset);
   const voxSpeech = voxRequests.filter((r) => r.path === "/v1/audio/speech");
   assert.ok(
     voxSpeech.every(
-      (r) => r.body.stream === false && r.body.response_format === "json",
+      (r) => r.body.stream === true && r.body.response_format === "pcm",
     ),
   );
   assert.deepEqual(
@@ -1768,13 +1768,13 @@ const { chromium } = require("playwright");
       (r) =>
         r.path === "/v1/models/load" &&
         r.body.family === "voxcpm1" &&
-        r.body.mode === "offline",
+        r.body.mode === "streaming",
     ),
   );
   await page.getByRole("button", { name: "Hang up", exact: true }).click();
   assert.deepEqual(errors, []);
   console.log(
-    "PASS VoxCPM1 offline WAV batching, two-line playback and server-saved playback speed",
+    "PASS VoxCPM1 native PCM streaming, two-line playback and server-saved playback speed",
   );
   console.log(
     "PASS downloaded-model dropdowns, actual LLM IDs, unlinked branding, CSV saves, cached greeting, ASR hotwords, clone recording/transcript, voice/text calls, history, runtime measurements, stage switches/bypasses/manual turns, deduplicated model aliases, LFM download, greeting text/reference isolation, fixed equal-width scenarios panel, audio scenario, three-turn maintenance simulation, distinct technician/assistant voices, CSP-safe preview then explicit send, chat audio players, ordered five-example autoplay, renumbered scenarios 0/1/2, three WAV previews/explicit send/ordered autoplay/highlighting, queue highlighting/cancellation, RTF reporting/persistence, legacy ASR event migration, compact audio chooser, incomplete LLM detection/resume, explicit model loading/readiness before chat, TTS streaming switch/persistence/greeting/reply/clone/cancellation, hotwords CSV persistence/default load, spoken numeral/date/code normalization before LLM and Traditional assistant display/TTS, global model settings across browser contexts, saved draft voice, unavailable model/voice handling, mobile layout",

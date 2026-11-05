@@ -750,10 +750,7 @@
     hotwordsStatus = "";
   let ttsStreaming = false,
     ttsPlaybackRate = 0.9;
-  let ttsStreamTransport: "pcm" | "wav";
-  $: ttsStreamTransport = selectedTts?.family === "voxcpm1" ? "wav" : "pcm";
-  $: ttsRunMode =
-    streamingTts && ttsStreamTransport === "pcm" ? "streaming" : "offline";
+  $: ttsRunMode = streamingTts ? "streaming" : "offline";
   $: ttsSupportsStreaming = (
     modelModes[selectedTts?.family || ""] || []
   ).includes("streaming");
@@ -936,7 +933,6 @@
             aborter.signal,
             {
               collectAudio: true,
-              transport: ttsStreamTransport,
               playbackRate: ttsPlaybackRate,
               onFirstAudio: (wallMs) => {
                 cloneStatus = "Playing cloned voice · streaming";
@@ -1532,7 +1528,6 @@
       return await playSpeechStream(ctx, streamingSpeechBody(body), signal, {
         destination: streamAnalyser,
         leadInSeconds,
-        transport: ttsStreamTransport,
         playbackRate: ttsPlaybackRate,
         onFirstAudio: (wallMs) => {
           began = true;
@@ -2808,9 +2803,7 @@
         </div>
         <small
           >{ttsSupportsStreaming
-            ? ttsStreamTransport === "wav"
-              ? "Play two-line WAV batches as they are generated."
-              : "Play two-line speech groups as they are generated."
+            ? "Play two-line speech groups as they are generated."
             : "This model supports offline speech only."}</small
         >
         {#if supportsReference}

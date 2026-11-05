@@ -126,28 +126,7 @@ async function* speechBuffers(
   ctx: AudioContext,
   body: Record<string, unknown>,
   signal: AbortSignal,
-  transport: "pcm" | "wav",
 ): AsyncGenerator<{ buffer?: AudioBuffer; rtf?: number | null }> {
-  if (transport === "wav") {
-    const response = await fetch(new URL("v1/audio/speech", document.baseURI), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ...body, stream: false, response_format: "json" }),
-      signal,
-    });
-    if (!response.ok)
-      throw new Error(
-        (await response.text()) ||
-          `Speech synthesis failed: ${response.status}`,
-      );
-    const result = await response.json();
-    if (typeof result.audio !== "string")
-      throw new Error("The TTS model returned no WAV audio.");
-    const bytes = Uint8Array.from(atob(result.audio), (c) => c.charCodeAt(0));
-    const buffer = await ctx.decodeAudioData(bytes.buffer);
-    yield { buffer, rtf: reportedRtf(result) };
-    return;
-  }
   for await (const event of speechStreamEvents(body, signal)) {
     if (event.type === "speech.audio.done") {
       yield { rtf: reportedRtf(event) };
@@ -185,7 +164,6 @@ export async function playSpeechStream(
     destination?: AudioNode;
     leadInSeconds?: number;
     collectAudio?: boolean;
-    transport?: "pcm" | "wav";
     playbackRate?: number;
     groupPauseSeconds?: number;
     onFirstAudio?: (wallMs: number) => void;
@@ -234,7 +212,6 @@ export async function playSpeechStream(
         ctx,
         { ...body, input: texts[group] },
         signal,
-        options.transport || "pcm",
       )) {
         if (signal.aborted)
           throw signal.reason || new DOMException("Cancelled", "AbortError");
