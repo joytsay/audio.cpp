@@ -57,3 +57,4 @@ docs/FALCON_H1_0.1B_PORT_PLAN.md
 # Global demo configuration is persisted locally, not committed.
 /ui-settings/*
 !/ui-settings/.gitkeep
+/assets/resources/scenarios/*.wav

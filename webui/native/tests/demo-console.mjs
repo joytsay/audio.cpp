@@ -949,9 +949,9 @@ const { chromium } = require("playwright");
   await page.getByRole("switch", { name: "Enable TTS", exact: true }).check();
   let scenarioOffset = requests.length;
   await page
-    .getByRole("button", { name: "Run Scenario 2", exact: true })
+    .getByRole("button", { name: "Run Scenario 1", exact: true })
     .click();
-  await page.getByText("Scenario 2 complete", { exact: true }).waitFor();
+  await page.getByText("Scenario 1 complete", { exact: true }).waitFor();
   let scenarioRequests = requests.slice(scenarioOffset);
   const scenarioChats = scenarioRequests.filter(
     (r) => r.path === "/llm/v1/chat/completions",
@@ -1031,7 +1031,7 @@ const { chromium } = require("playwright");
     });
   scenarioOffset = requests.length;
   await page.getByRole("button", { name: "Send audio", exact: true }).click();
-  await page.getByText("Scenario 1 complete", { exact: true }).waitFor();
+  await page.getByText("Scenario 0 complete", { exact: true }).waitFor();
   assert.ok(
     requests
       .slice(scenarioOffset)
@@ -1083,7 +1083,7 @@ const { chromium } = require("playwright");
     "Previewing a clip must not send it",
   );
   await page.getByRole("button", { name: "Send audio", exact: true }).click();
-  await page.getByText("Scenario 1 complete", { exact: true }).waitFor();
+  await page.getByText("Scenario 0 complete", { exact: true }).waitFor();
   await page
     .getByLabel("Audio message: 中央監控站2.mp3", { exact: true })
     .waitFor();
@@ -1219,6 +1219,112 @@ const { chromium } = require("playwright");
     "Stopping input playback must cancel remaining transcription and examples",
   );
   await page.getByRole("button", { name: "Hang up" }).click();
+  assert.deepEqual(
+    await page
+      .getByLabel("Scenario", { exact: true })
+      .locator("option")
+      .allTextContents(),
+    [
+      "Scenario 0 · audio examples",
+      "Scenario 1 · 現場維修保養後的語音回報",
+      "Scenario 2 · maintenance audio",
+    ],
+  );
+  await page
+    .getByLabel("Scenario", { exact: true })
+    .selectOption("maintenance-audio");
+  const maintenanceAudioNames = [
+    "scenario2-1.wav",
+    "scenario2-2.wav",
+    "scenario2-3.wav",
+  ];
+  assert.deepEqual(
+    await page.locator(".example-chips button").allTextContents(),
+    maintenanceAudioNames,
+  );
+  await page.getByText("No audio selected", { exact: true }).waitFor();
+  const selectionOffset = requests.length;
+  await page
+    .getByRole("button", { name: "scenario2-1.wav", exact: true })
+    .click();
+  await page.getByLabel("Selected audio preview", { exact: true }).waitFor();
+  assert.equal(
+    await page
+      .getByRole("button", { name: "scenario2-1.wav", exact: true })
+      .getAttribute("aria-pressed"),
+    "true",
+  );
+  assert.equal(
+    requests
+      .slice(selectionOffset)
+      .filter((r) => r.path === "/v1/audio/transcriptions/details").length,
+    0,
+    "Selecting a WAV only opens its preview",
+  );
+  await page
+    .getByLabel("Selected audio preview", { exact: true })
+    .evaluate((audio) => audio.play());
+  await page.waitForFunction(
+    () => document.querySelector(".scenario-preview")?.ended,
+  );
+  await page.getByRole("button", { name: "Send audio", exact: true }).click();
+  await page
+    .getByText("Scenario 2 complete", { exact: true })
+    .waitFor({ timeout: 90000 });
+  assert.deepEqual(
+    await page.locator(".transcript .audio-message-name").allTextContents(),
+    ["scenario2-1.wav"],
+  );
+  await page.getByRole("button", { name: "Hang up", exact: true }).click();
+  const maintenanceQueueOffset = requests.length;
+  highlightedTurns.length = 0;
+  checkingAudioHighlights = true;
+  await page
+    .getByRole("button", { name: "Play all 3 examples", exact: true })
+    .click();
+  await page
+    .getByText("All 3 examples complete", { exact: true })
+    .waitFor({ timeout: 90000 });
+  checkingAudioHighlights = false;
+  assert.deepEqual(
+    await page.locator(".transcript .audio-message-name").allTextContents(),
+    maintenanceAudioNames,
+  );
+  assert.deepEqual(
+    highlightedTurns.map((name) => name.trim()),
+    maintenanceAudioNames,
+  );
+  assert.equal(
+    requests
+      .slice(maintenanceQueueOffset)
+      .filter((r) => r.path === "/v1/audio/transcriptions/details").length,
+    3,
+  );
+  assert.equal(
+    requests
+      .slice(maintenanceQueueOffset)
+      .filter((r) => r.path === "/llm/v1/chat/completions").length,
+    3,
+  );
+  assert.equal(
+    requests
+      .slice(maintenanceQueueOffset)
+      .filter(
+        (r) =>
+          r.path === "/v1/audio/speech" &&
+          r.body.input === "您好，請問需要什麼協助？",
+      ).length,
+    3,
+  );
+  assert.deepEqual(await page.evaluate(() => window.cspViolations), []);
+  await page.getByRole("button", { name: "Hang up", exact: true }).click();
+  await page.getByLabel("Scenario", { exact: true }).selectOption("audio");
+  await page.getByText("No audio selected", { exact: true }).waitFor();
+  assert.equal(
+    await page.locator(".scenario-preview").count(),
+    0,
+    "Switching scenarios clears the previous audio selection",
+  );
   assert.equal(
     requests.filter((r) => r.path === "/v1/audio/speech" && r.body.stream)
       .length,
@@ -1500,7 +1606,7 @@ const { chromium } = require("playwright");
   );
   await freshContext.close();
   console.log(
-    "PASS downloaded-model dropdowns, actual LLM IDs, unlinked branding, CSV saves, cached greeting, ASR hotwords, clone recording/transcript, voice/text calls, history, runtime measurements, stage switches/bypasses/manual turns, deduplicated model aliases, LFM download, greeting text/reference isolation, fixed equal-width scenarios panel, audio scenario, three-turn maintenance simulation, distinct technician/assistant voices, CSP-safe preview then explicit send, chat audio players, ordered five-example autoplay, queue highlighting/cancellation, RTF reporting/persistence, legacy ASR event migration, compact audio chooser, incomplete LLM detection/resume, explicit model loading/readiness before chat, TTS streaming switch/persistence/greeting/reply/clone/cancellation, hotwords CSV persistence/default load, global model settings across browser contexts, saved draft voice, unavailable model/voice handling, mobile layout",
+    "PASS downloaded-model dropdowns, actual LLM IDs, unlinked branding, CSV saves, cached greeting, ASR hotwords, clone recording/transcript, voice/text calls, history, runtime measurements, stage switches/bypasses/manual turns, deduplicated model aliases, LFM download, greeting text/reference isolation, fixed equal-width scenarios panel, audio scenario, three-turn maintenance simulation, distinct technician/assistant voices, CSP-safe preview then explicit send, chat audio players, ordered five-example autoplay, renumbered scenarios 0/1/2, three WAV previews/explicit send/ordered autoplay/highlighting, queue highlighting/cancellation, RTF reporting/persistence, legacy ASR event migration, compact audio chooser, incomplete LLM detection/resume, explicit model loading/readiness before chat, TTS streaming switch/persistence/greeting/reply/clone/cancellation, hotwords CSV persistence/default load, global model settings across browser contexts, saved draft voice, unavailable model/voice handling, mobile layout",
   );
   await browser.close();
 })().catch((e) => {

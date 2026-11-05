@@ -34,6 +34,7 @@ webui/native/dist/
 !knowledge/**/*.md
 !knowledge/*.md
 *.wav
+!assets/resources/scenarios/*.wav
 
 # SIP builds need only these source files and bundled voice references.
 !examples/

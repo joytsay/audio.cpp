@@ -38,6 +38,9 @@
   import employeeAudio from "../../../../../assets/resources/員工檢查哨.mp3?url";
   import lobbyAudio from "../../../../../assets/resources/大廳.mp3?url";
   import vehicleAudio from "../../../../../assets/resources/車輛檢查哨.mp3?url";
+  import maintenanceAudio1 from "../../../../../assets/resources/scenarios/scenario2-1.wav?url";
+  import maintenanceAudio2 from "../../../../../assets/resources/scenarios/scenario2-2.wav?url";
+  import maintenanceAudio3 from "../../../../../assets/resources/scenarios/scenario2-3.wav?url";
 
   import {
     endpointJson,
@@ -418,12 +421,13 @@
     audioUrls.clear();
     chatAudioElements = {};
   }
-  let scenarioMode: "audio" | "maintenance" = "audio";
+  let scenarioMode: "audio" | "maintenance" | "maintenance-audio" = "audio";
   let scenarioPreviewUrl = "",
     selectedExampleName = "",
     activeExampleName = "",
     exampleLoading = false;
   let scenarioPreviewPlayer: HTMLAudioElement | null = null;
+  let scenarioUploadInput: HTMLInputElement | undefined;
   let scenarioFile: File | null = null,
     scenarioAudioName = "",
     scenarioStatus = "";
@@ -438,13 +442,35 @@
     scenarioStep = 0,
     scenarioToken = 0;
   let playbackRole: "assistant" | "technician" | "caller" = "assistant";
-  const scenarioAudioExamples = [
+  const locationAudioExamples = [
     { name: "中央監控站2.mp3", url: centralAudio },
     { name: "中控室.mp3", url: controlAudio },
     { name: "員工檢查哨.mp3", url: employeeAudio },
     { name: "大廳.mp3", url: lobbyAudio },
     { name: "車輛檢查哨.mp3", url: vehicleAudio },
   ];
+  const maintenanceAudioExamples: AudioExample[] = [
+    { name: "scenario2-1.wav", url: maintenanceAudio1 },
+    { name: "scenario2-2.wav", url: maintenanceAudio2 },
+    { name: "scenario2-3.wav", url: maintenanceAudio3 },
+  ];
+  $: scenarioAudioExamples =
+    scenarioMode === "maintenance-audio"
+      ? maintenanceAudioExamples
+      : locationAudioExamples;
+  $: isAudioScenario = scenarioMode !== "maintenance";
+  $: scenarioNumber =
+    scenarioMode === "maintenance-audio"
+      ? 2
+      : scenarioMode === "maintenance"
+        ? 1
+        : 0;
+  function changeScenario() {
+    setScenarioFile(null);
+    if (scenarioUploadInput) scenarioUploadInput.value = "";
+    scenarioStatus = "";
+    scenarioStep = 0;
+  }
   $: technicianVoice = voiceChoices.find((id) => id !== voice) || "";
   let events: Event[] = [],
     messages: DemoMessage[] = [];
@@ -1916,15 +1942,14 @@
     if (!response.ok)
       throw new Error(`Example audio failed: ${response.status}`);
     return new File([await response.blob()], example.name, {
-      type: "audio/mpeg",
+      type:
+        response.headers.get("Content-Type") ||
+        (example.name.endsWith(".wav") ? "audio/wav" : "audio/mpeg"),
     });
   }
   async function runScenario(stepOnly?: number, examples?: AudioExample[]) {
     if (scenarioRunning || busy || detecting || starting) return;
-    if (
-      scenarioMode === "audio" &&
-      ((!scenarioFile && !examples?.length) || !useAsr)
-    )
+    if (isAudioScenario && ((!scenarioFile && !examples?.length) || !useAsr))
       return;
     if (scenarioMode === "maintenance" && useTts && !technicianVoice) {
       scenarioStatus = "Two built-in voices are required.";
@@ -1940,7 +1965,7 @@
     try {
       if (!connected) await call();
       if (!connected || token !== scenarioToken) return;
-      if (scenarioMode === "audio") {
+      if (isAudioScenario) {
         const queue = examples || [null];
         for (let index = 0; index < queue.length; index++) {
           if (!connected || token !== scenarioToken) break;
@@ -1951,7 +1976,7 @@
           if (!connected || token !== scenarioToken) break;
           setScenarioFile(file, example?.name || selectedExampleName);
           activeExampleName = example?.name || selectedExampleName;
-          scenarioStatus = `Scenario 1 · ${index + 1}/${queue.length} · ${file.name}`;
+          scenarioStatus = `Scenario ${scenarioNumber} · ${index + 1}/${queue.length} · ${file.name}`;
           await respond("", file, epoch, {
             playInputAudio: true,
             audioName: file.name,
@@ -1962,8 +1987,8 @@
         if (!error && token === scenarioToken)
           scenarioStatus =
             queue.length > 1
-              ? "All 5 examples complete"
-              : "Scenario 1 complete";
+              ? `All ${queue.length} examples complete`
+              : `Scenario ${scenarioNumber} complete`;
       } else {
         if (stepOnly === undefined) {
           releaseChatAudio();
@@ -1978,7 +2003,7 @@
         for (let index = first; index < last; index++) {
           if (!connected || token !== scenarioToken) break;
           scenarioStep = index;
-          scenarioStatus = `Scenario 2 · ${index + 1}/3 · ${maintenanceScenarioSteps[index].title}`;
+          scenarioStatus = `Scenario 1 · ${index + 1}/3 · ${maintenanceScenarioSteps[index].title}`;
           input = maintenanceScenarioSteps[index].message;
           await tick();
           if (token !== scenarioToken || !connected) break;
@@ -1990,7 +2015,7 @@
         }
         if (!error && token === scenarioToken)
           scenarioStatus =
-            stepOnly === undefined ? "Scenario 2 complete" : "Turn complete";
+            stepOnly === undefined ? "Scenario 1 complete" : "Turn complete";
       }
       if (error) scenarioStatus = error;
     } catch (cause) {
@@ -3046,14 +3071,18 @@
             ><select
               aria-label="Scenario"
               bind:value={scenarioMode}
-              disabled={scenarioRunning}
-              ><option value="audio">Scenario 1 · audio examples</option><option
+              disabled={scenarioRunning || exampleLoading}
+              on:change={changeScenario}
+              ><option value="audio">Scenario 0 · audio examples</option><option
                 value="maintenance"
-                >Scenario 2 · 現場維修保養後的語音回報</option
+                >Scenario 1 · 現場維修保養後的語音回報</option
+              >
+              <option value="maintenance-audio"
+                >Scenario 2 · maintenance audio</option
               ></select
             ></label
           >
-          {#if scenarioMode === "audio"}
+          {#if isAudioScenario}
             <div class="scenario-upload">
               <strong title={scenarioAudioName || "No audio selected"}
                 >{scenarioAudioName || "No audio selected"}</strong
@@ -3062,6 +3091,7 @@
               <label class="audio-choice"
                 >Choose audio<input
                   class="audio-file-input"
+                  bind:this={scenarioUploadInput}
                   aria-label="Choose scenario audio"
                   type="file"
                   accept=".wav,.mp3,.flac,audio/*"
@@ -3114,7 +3144,7 @@
                 !useAsr ||
                 (!connected && !canCall)}
               on:click={() => runScenario(undefined, scenarioAudioExamples)}
-              >Play all 5 examples</button
+              >Play all {scenarioAudioExamples.length} examples</button
             >
           {:else}
             <p>
@@ -3130,7 +3160,7 @@
                 starting ||
                 (!connected && !canCall) ||
                 (useTts && !technicianVoice)}
-              on:click={() => runScenario()}>Run Scenario 2</button
+              on:click={() => runScenario()}>Run Scenario 1</button
             >
             <details class="scenario-script">
               <summary
