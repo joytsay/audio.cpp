@@ -458,11 +458,6 @@ VoxCPM1SessionBase::run_streaming_request(
         "VoxCPM1 run_streaming requires a streaming session");
   }
   validate_request(request);
-  // Declared before release_guard on purpose: the decoder's streaming graph is
-  // built against this state's tensors, and release_guard drops that graph via
-  // decoder_->release_runtime_memory(). Reverse destruction order then frees
-  // the graph before the state it points into, on return and on exceptions.
-  AudioVAEStreamingDecodeState streaming_state;
   auto release_runtime_memory = [this](VoxCPM1SessionBase *self) {
     if (self != nullptr) {
       self->release_request_runtime_memory();
@@ -503,21 +498,41 @@ VoxCPM1SessionBase::run_streaming_request(
   double decoder_ms = 0.0;
   size_t emitted_chunks = 0;
 
-  // Carry AudioVAE decoder convolution state across streamed patches so the
-  // boundary between consecutive chunks stays continuous instead of resetting.
-  bool use_streaming_decode = decoder_->supports_streaming_decode();
-  if (use_streaming_decode) {
-    use_streaming_decode =
-        decoder_->initialize_streaming_decode_state(streaming_state);
+  // Reuse the offline causal decoder with a bounded feature history. The
+  // separate stateful graph can introduce tonal noise and boundary clicks.
+  // Work backwards through the decoder to cover its entire receptive field:
+  // final kernel 7, three residual kernels 7 at dilations 1/3/9 per block,
+  // then the transposed convolution (kernel = 2 * stride), and first kernel 7.
+  int64_t context_frames = 6;
+  for (auto it = assets_->config.audio_vae.decoder_rates.rbegin();
+       it != assets_->config.audio_vae.decoder_rates.rend(); ++it) {
+    context_frames += 6 * (1 + 3 + 9);
+    context_frames = (context_frames + 2 * *it - 1 + *it - 1) / *it;
   }
+  context_frames += 6;
+  const int64_t patch_size = assets_->config.patch_size;
+  const int64_t context_patches = (context_frames + patch_size - 1) / patch_size;
+  const int64_t patch_elements = patch_size * assets_->config.audio_vae.latent_dim;
+  const int64_t samples_per_patch = patch_size *
+      product(assets_->config.audio_vae.decoder_rates);
+  std::vector<float> decode_history;
 
   auto emit_chunk = [&](const VoxCPM1StreamingChunk &chunk) {
     const auto decoder_start = Clock::now();
-    auto audio = use_streaming_decode
-        ? decoder_->decode_streaming_step(chunk.decode_features,
-                                          streaming_state)
-        : decoder_->decode_features(chunk.decode_features,
-                                    chunk.decode_patches);
+    decode_history.insert(decode_history.end(), chunk.decode_features.begin(),
+                          chunk.decode_features.end());
+    const int64_t history_patches =
+        static_cast<int64_t>(decode_history.size()) / patch_elements;
+    auto audio = decoder_->decode_features(decode_history, history_patches);
+    const int64_t new_samples = chunk.decode_patches * samples_per_patch;
+    if (new_samples > static_cast<int64_t>(audio.samples.size())) {
+      throw std::runtime_error("VoxCPM1 streaming decoder output is too short");
+    }
+    audio.samples.erase(audio.samples.begin(), audio.samples.end() - new_samples);
+    if (history_patches > context_patches) {
+      decode_history.erase(decode_history.begin(),
+          decode_history.end() - context_patches * patch_elements);
+    }
     decoder_ms += engine::debug::elapsed_ms(decoder_start, Clock::now());
     if (emitted_chunks == 0) {
       merged.sample_rate = audio.sample_rate;

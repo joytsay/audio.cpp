@@ -72,6 +72,12 @@ the existing reference-audio or continuation-prompt behavior.
 
 **Streaming output:**
 
+Streaming decodes each new feature patch with the offline AudioVAE graph and a
+bounded history covering the decoder's causal receptive field. Only the new
+patch's samples are emitted, so context is neither replayed nor crossfaded.
+This avoids the separate stateful decoder graph; it uses more decoder work per
+chunk in exchange for matching the offline decoding path.
+
 ```bash
 ./build/linux-cpu-release/bin/audiocpp_cli \
   --task tts \
