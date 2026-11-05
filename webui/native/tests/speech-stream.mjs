@@ -67,6 +67,43 @@ try {
  assert.equal(groupSummary.textGroups,3);assert.equal(groupSummary.rtf,0.4);
  assert.ok(groupCtx.starts[1].when >= groupCtx.starts[0].when+(2/24000)/0.9+0.219);
  await assert.rejects(playSpeechStream(new FakeContext(),{input:'test'},new AbortController().signal,{playbackRate:0.2}),/Playback speed/);
+ // Simulate VoxCPM patch jitter with a controlled audio clock. Initial and
+ // underrun reserves must queue before starting, preserving every PCM sample.
+ class ClockContext extends FakeContext {
+  now=0;
+  get currentTime() {return this.now;}
+ }
+ const jitterCtx=new ClockContext(), jitterAbort=new AbortController();
+ const patch={...delta,channels:1,sample_rate:16000,audio:Buffer.alloc(1600*2).toString('base64')};
+ let wireController, jitterFirst=false;
+ globalThis.fetch=async()=>new Response(new ReadableStream({start(controller){wireController=controller;}}));
+ const jitterPlay=playSpeechStream(jitterCtx,{input:'buffered stream'},jitterAbort.signal,{bufferSeconds:0.3,collectAudio:true,onFirstAudio(){jitterFirst=true;}});
+ const send=async(event,time)=>{jitterCtx.now=time;wireController.enqueue(new TextEncoder().encode(wire(event)));await new Promise(resolve=>setTimeout(resolve,0));};
+ await new Promise(resolve=>setTimeout(resolve,0));
+ await send(patch,0);await send(patch,0.12);
+ assert.equal(jitterCtx.starts.length,0,'wait for the startup reserve');
+ await send(patch,0.24);
+ assert.equal(jitterFirst,true);assert.equal(jitterCtx.starts.length,3,'start before synthesis finishes');
+ await send(patch,0.39);
+ assert.equal(jitterCtx.starts.length,4);
+ for(let i=1;i<4;i++)assert.ok(Math.abs(jitterCtx.starts[i].when-jitterCtx.starts[i-1].when-0.1)<1e-9,'jitter must not insert gaps');
+ await send(patch,1);await send(patch,1.12);
+ assert.equal(jitterCtx.starts.length,4,'underrun rebuilds a reserve instead of playing each late patch');
+ await send(patch,1.24);
+ assert.equal(jitterCtx.starts.length,7);
+ await send(patch,1.3);await send(done,1.3);wireController.close();
+ const jitterSummary=await jitterPlay;
+ assert.equal(jitterSummary.chunks,8);assert.equal(jitterCtx.starts.length,8);
+ assert.equal(jitterSummary.audio.size,44+8*3200,'all PCM samples are retained');
+ globalThis.fetch=async()=>response([patch,done]);
+ const shortCtx=new FakeContext();
+ assert.equal((await playSpeechStream(shortCtx,{input:'short'},new AbortController().signal,{bufferSeconds:0.32})).chunks,1,'short replies flush at end of stream');
+ const bufferedAbort=new AbortController(), bufferedCtx=new FakeContext();
+ globalThis.fetch=async()=>new Response(new ReadableStream({start(controller){controller.enqueue(new TextEncoder().encode(wire(patch)));bufferedAbort.signal.addEventListener('abort',()=>controller.error(new DOMException('Cancelled','AbortError')));}}));
+ const bufferedPlay=playSpeechStream(bufferedCtx,{input:'cancel buffered'},bufferedAbort.signal,{bufferSeconds:0.32});
+ await new Promise(resolve=>setTimeout(resolve,0));bufferedAbort.abort();
+ await assert.rejects(bufferedPlay,{name:'AbortError'});assert.equal(bufferedCtx.starts.length,0);
+ console.log('PASS startup buffering, delayed patches, gap-free scheduling, underrun rebuffering, short reply drain, PCM preservation and buffered cancellation');
  const textCompiled=buildSync({entryPoints:[fileURLToPath(new URL('../src/lib/speech-text.ts',import.meta.url))],bundle:true,platform:'node',format:'esm',write:false});
  const {splitSpeechText}=await import(`data:text/javascript;base64,${Buffer.from(textCompiled.outputFiles[0].text).toString('base64')}`);
  const longText='備註：SN14778725，製造日期2010年12月3日，電容值6460MF。'.repeat(10);

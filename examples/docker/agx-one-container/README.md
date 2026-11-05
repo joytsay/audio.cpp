@@ -492,7 +492,11 @@ that support streaming and is remembered after refresh. Cached greetings still
 play immediately; uncached greetings, replies, scenario voices, and cloned-voice
 tests use streaming when enabled. Text is split into groups of at most two
 nonempty lines and 120 characters, with short pauses between groups. All
-streaming-capable models, including VoxCPM1, use native PCM streaming. Playback speed defaults
+streaming-capable models, including VoxCPM1, use native PCM streaming. VoxCPM1
+queues a 320 ms audio reserve before starting each group and after playback
+underruns to absorb uneven patch delivery. Short groups drain when generation
+finishes. This adds startup buffering without switching to offline synthesis.
+Playback speed defaults
 to 0.9× and is included in **Save model settings**. Hangup cancels both the request
 and queued audio. Streaming is off by default.
 

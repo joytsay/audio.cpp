@@ -933,6 +933,7 @@
             aborter.signal,
             {
               collectAudio: true,
+              bufferSeconds: selectedTts?.family === "voxcpm1" ? 0.32 : 0,
               playbackRate: ttsPlaybackRate,
               onFirstAudio: (wallMs) => {
                 cloneStatus = "Playing cloned voice · streaming";
@@ -1530,6 +1531,7 @@
       return await playSpeechStream(ctx, streamingSpeechBody(body), signal, {
         destination: streamAnalyser,
         leadInSeconds,
+        bufferSeconds: selectedTts?.family === "voxcpm1" ? 0.32 : 0,
         playbackRate: ttsPlaybackRate,
         onFirstAudio: (wallMs) => {
           began = true;

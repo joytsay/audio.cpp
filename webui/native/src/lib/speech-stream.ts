@@ -154,7 +154,7 @@ export interface SpeechStreamSummary {
   audio?: Blob;
 }
 
-// Schedule each decoded chunk immediately, while reading/generating the next.
+// Buffer a short reserve when requested, while generation continues.
 // The shared audio clock keeps chunks ordered without overlapping playback.
 export async function playSpeechStream(
   ctx: AudioContext,
@@ -163,6 +163,7 @@ export async function playSpeechStream(
   options: {
     destination?: AudioNode;
     leadInSeconds?: number;
+    bufferSeconds?: number;
     collectAudio?: boolean;
     playbackRate?: number;
     groupPauseSeconds?: number;
@@ -174,6 +175,9 @@ export async function playSpeechStream(
   const rate = options.playbackRate ?? 1;
   if (!Number.isFinite(rate) || rate < 0.7 || rate > 1.25)
     throw new Error("Playback speed must be between 0.7 and 1.25.");
+  const bufferSeconds = options.bufferSeconds ?? 0;
+  if (!Number.isFinite(bufferSeconds) || bufferSeconds < 0 || bufferSeconds > 2)
+    throw new Error("Streaming buffer must be between 0 and 2 seconds.");
   const texts = splitSpeechText(String(body.input || ""));
   let weightedRtf = 0,
     rtfDuration = 0,
@@ -181,6 +185,7 @@ export async function playSpeechStream(
   let nextStart = 0,
     firstAudio = 0,
     chunks = 0,
+    scheduledChunks = 0,
     rtf: number | null = null;
   let format: { sampleRate: number; channels: number } | undefined;
   const sources = new Map<AudioBufferSourceNode, () => void>();
@@ -208,6 +213,39 @@ export async function playSpeechStream(
       let groupDuration = 0,
         groupRtf: number | null = null,
         groupChunks = 0;
+      const pending: AudioBuffer[] = [];
+      let pendingSeconds = 0,
+        buffering = true;
+      const flushPending = () => {
+        for (const buffer of pending) {
+          if (!scheduledChunks) {
+            firstAudio = performance.now();
+            nextStart = ctx.currentTime + (options.leadInSeconds ?? 0.06);
+            options.onFirstAudio?.(firstAudio - started);
+          }
+          scheduledChunks++;
+          const source = ctx.createBufferSource();
+          source.buffer = buffer;
+          source.playbackRate.value = rate;
+          source.connect(options.destination || ctx.destination);
+          playback.push(
+            new Promise<void>((resolve) => {
+              sources.set(source, resolve);
+              source.onended = () => {
+                sources.delete(source);
+                source.disconnect();
+                resolve();
+              };
+            }),
+          );
+          const when = Math.max(nextStart, ctx.currentTime + 0.015);
+          source.start(when);
+          nextStart = when + buffer.duration / rate;
+        }
+        pending.length = 0;
+        pendingSeconds = 0;
+        buffering = false;
+      };
       for await (const event of speechBuffers(
         ctx,
         { ...body, input: texts[group] },
@@ -243,30 +281,15 @@ export async function playSpeechStream(
         groupChunks++;
         groupDuration += buffer.duration;
         if (options.collectAudio) captured.push(buffer);
-        if (!chunks) {
-          firstAudio = performance.now();
-          nextStart = ctx.currentTime + (options.leadInSeconds ?? 0.06);
-          options.onFirstAudio?.(firstAudio - started);
-        }
         chunks++;
-        const source = ctx.createBufferSource();
-        source.buffer = buffer;
-        source.playbackRate.value = rate;
-        source.connect(options.destination || ctx.destination);
-        playback.push(
-          new Promise<void>((resolve) => {
-            sources.set(source, resolve);
-            source.onended = () => {
-              sources.delete(source);
-              source.disconnect();
-              resolve();
-            };
-          }),
-        );
-        const when = Math.max(nextStart, ctx.currentTime + 0.015);
-        source.start(when);
-        nextStart = when + buffer.duration / rate;
+        pending.push(buffer);
+        pendingSeconds += buffer.duration / rate;
+        // A late chunk must rebuild a reserve instead of restarting playback
+        // for every tiny patch. Normal arrivals keep the existing audio clock.
+        if (nextStart < ctx.currentTime + 0.015) buffering = true;
+        if (!buffering || pendingSeconds >= bufferSeconds) flushPending();
       }
+      flushPending(); // Drain short utterances and the last partial reserve.
       if (!groupChunks)
         throw new Error(
           "The streaming model produced no audio for a text group.",
