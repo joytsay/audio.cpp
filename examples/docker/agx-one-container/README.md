@@ -516,6 +516,9 @@ Local panel sizes and event history remain browser preferences.
 
 The demo shows the assistant waveform on the left and microphone/caller waveform
 on the right. Use the panel buttons to hide the settings sidebar, Session,
-Events, or Scenarios. Restore buttons stay in the Console header. Hiding panels
+Events, or Scenarios. The full-width header keeps the GeoVision logo visible
+when settings are hidden. Events and Scenarios retain clickable title bars
+when collapsed; click a title to reopen its contents. The Session restore
+button stays in the Console header. Hiding panels
 does not stop calls or scenario playback; shown/hidden state is remembered in
 the browser alongside panel sizes.

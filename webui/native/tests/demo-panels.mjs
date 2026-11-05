@@ -34,25 +34,28 @@ try {
  assert.equal(await page.getByRole('region',{name:'Session details',exact:true}).isVisible(),true);
  for(const [panel,other] of [['events','scenarios'],['scenarios','events']]) {
   await page.getByRole('button',{name:`Hide ${panel}`,exact:true}).click();
-  assert.equal(await page.locator(`#demo-${panel}`).isVisible(),false);
-  const box=await page.locator(`#demo-${other}`).boundingBox(), container=await page.locator('.bottom-panels').boundingBox();
-  assert.ok(Math.abs(box.width-container.width)<2,'remaining bottom panel must expand');
+  assert.equal(await page.locator(`#demo-${panel}`).isVisible(),true);
+  assert.equal(await page.locator(`#demo-${panel}-content`).isVisible(),false);
   assert.equal(await page.getByRole('separator',{name:'Resize events and scenarios',exact:true}).isVisible(),false);
   await page.getByRole('button',{name:`Show ${panel}`,exact:true}).click();
  }
  await page.getByRole('button',{name:'Hide settings',exact:true}).click();
  assert.equal(await page.locator('#demo-settings').isVisible(),false);
  assert.ok((await page.locator('main').boundingBox()).x<1);
+ assert.equal(await page.locator('.brand').isVisible(),true);
+ const header=await page.locator('.top-bar').boundingBox();
+ assert.equal(header.x,0);assert.equal(header.width,1584);
  await page.getByRole('button',{name:'Show settings',exact:true}).click();
  assert.equal(await page.getByLabel('System prompt',{exact:true}).inputValue(),'Draft kept while hidden');
  for(const panel of ['settings','session','events','scenarios'])await page.getByRole('button',{name:`Hide ${panel}`,exact:true}).click();
- assert.equal(await page.locator('.bottom-panels').isVisible(),false);
+ assert.equal(await page.locator('.bottom-panels').isVisible(),true);
+ assert.ok((await page.locator('.bottom-panels').boundingBox()).height<=55);
  assert.equal(await page.getByRole('separator',{name:'Resize bottom panels',exact:true}).isVisible(),false);
  assert.ok((await page.locator('.conversation').boundingBox()).height>originalConversation.height);
  await page.reload();await page.getByText('Using default model settings',{exact:true}).waitFor({state:'attached'});
  for(const panel of ['settings','session','events','scenarios']) {
   assert.equal(await page.getByRole('button',{name:`Show ${panel}`,exact:true}).isVisible(),true);
-  assert.equal(await page.locator(panel==='session'?'#demo-session-details':`#demo-${panel}`).isVisible(),false);
+  assert.equal(await page.locator(panel==='session'?'#demo-session-details':panel==='settings'?'#demo-settings':`#demo-${panel}-content`).isVisible(),false);
  }
  await page.screenshot({path:'/tmp/geovision-panels-hidden.png'});
  for(const panel of ['settings','session','events','scenarios'])await page.getByRole('button',{name:`Show ${panel}`,exact:true}).click();

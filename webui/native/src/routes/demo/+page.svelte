@@ -2424,10 +2424,56 @@
   class:no-settings={!visiblePanels.settings}
   style:--sidebar-width={`${sidebarWidth}px`}
 >
-  <aside id="demo-settings" hidden={!visiblePanels.settings}>
+    <header class="top-bar">
     <div class="brand">
       <span class="gv">{@html logo}</span><span>GeoVision IVR</span>
     </div>
+      <div class="console-title">
+        <button
+          class="panel-toggle"
+          aria-label={visiblePanels.settings
+            ? "Hide settings"
+            : "Show settings"}
+          title={visiblePanels.settings ? "Hide settings" : "Show settings"}
+          aria-controls="demo-settings"
+          aria-expanded={visiblePanels.settings}
+          data-panel-toggle="settings"
+          on:click={() => togglePanel("settings")}
+        >
+          {#if visiblePanels.settings}<PanelLeftClose
+              size={17}
+            />{:else}<PanelLeftOpen size={17} />{/if}
+        </button>
+        <strong>Coversation</strong><span
+          class="badge"
+          title={systemDescription || undefined}
+          >LOCAL IVR DEMO{systemModel ? ` on ${systemModel}` : ""}</span
+        >
+      </div>
+      <div class="header-actions">
+        <div class="panel-restores" aria-label="Hidden panels">
+          {#if !visiblePanels.session}<button
+              class="panel-toggle"
+              aria-label="Show session"
+              title="Show session"
+              aria-controls="demo-session-details"
+              aria-expanded="false"
+              data-panel-toggle="session"
+              on:click={() => togglePanel("session")}
+              ><PanelRightOpen size={17} /></button
+            >{/if}
+        </div>
+        <div class="connection">
+          <i class:online={connected}></i>{connected
+            ? "CONNECTED"
+            : starting
+              ? "CONNECTING"
+              : "DISCONNECTED"}
+        </div>
+      </div>
+    </header>
+  <aside id="demo-settings" hidden={!visiblePanels.settings}>
+
     <section
       class="stage-settings greeting-settings"
       aria-label="Call greeting settings"
@@ -2883,71 +2929,7 @@
     style:--wave-height={`${waveHeight}px`}
     style:--composer-height={`${composerHeight}px`}
   >
-    <header>
-      <div class="console-title">
-        <button
-          class="panel-toggle"
-          aria-label={visiblePanels.settings
-            ? "Hide settings"
-            : "Show settings"}
-          title={visiblePanels.settings ? "Hide settings" : "Show settings"}
-          aria-controls="demo-settings"
-          aria-expanded={visiblePanels.settings}
-          data-panel-toggle="settings"
-          on:click={() => togglePanel("settings")}
-        >
-          {#if visiblePanels.settings}<PanelLeftClose
-              size={17}
-            />{:else}<PanelLeftOpen size={17} />{/if}
-        </button>
-        <strong>Console</strong><span
-          class="badge"
-          title={systemDescription || undefined}
-          >LOCAL IVR DEMO{systemModel ? ` on ${systemModel}` : ""}</span
-        >
-      </div>
-      <div class="header-actions">
-        <div class="panel-restores" aria-label="Hidden panels">
-          {#if !visiblePanels.session}<button
-              class="panel-toggle"
-              aria-label="Show session"
-              title="Show session"
-              aria-controls="demo-session-details"
-              aria-expanded="false"
-              data-panel-toggle="session"
-              on:click={() => togglePanel("session")}
-              ><PanelRightOpen size={17} /></button
-            >{/if}
-          {#if !visiblePanels.events}<button
-              class="panel-toggle"
-              aria-label="Show events"
-              title="Show events"
-              aria-controls="demo-events"
-              aria-expanded="false"
-              data-panel-toggle="events"
-              on:click={() => togglePanel("events")}
-              ><PanelBottomOpen size={17} /></button
-            >{/if}
-          {#if !visiblePanels.scenarios}<button
-              class="panel-toggle"
-              aria-label="Show scenarios"
-              title="Show scenarios"
-              aria-controls="demo-scenarios"
-              aria-expanded="false"
-              data-panel-toggle="scenarios"
-              on:click={() => togglePanel("scenarios")}
-              ><ListMusic size={17} /></button
-            >{/if}
-        </div>
-        <div class="connection">
-          <i class:online={connected}></i>{connected
-            ? "CONNECTED"
-            : starting
-              ? "CONNECTING"
-              : "DISCONNECTED"}
-        </div>
-      </div>
-    </header>
+
     <section class="session" class:no-session={!visiblePanels.session}>
       <div class="conversation">
         <div class="wave-area">
@@ -3137,32 +3119,27 @@
     </div>
     <div
       class="bottom-panels"
-      class:one-bottom-panel={!visiblePanels.events || !visiblePanels.scenarios}
+      class:collapsed={!visiblePanels.events && !visiblePanels.scenarios}
       data-resize-container
-      hidden={!visiblePanels.events && !visiblePanels.scenarios}
     >
-      <section class="events" id="demo-events" hidden={!visiblePanels.events}>
+      <section class="events" id="demo-events">
         <div class="events-title">
-          <div class="panel-heading">
-            <button
-              class="panel-toggle"
-              aria-label="Hide events"
-              title="Hide events"
-              aria-controls="demo-events"
-              aria-expanded="true"
-              data-hide-panel="events"
-              on:click={() => togglePanel("events")}
-              ><EyeOff size={15} /></button
-            ><strong>Events <span>{events.length}</span></strong>
-          </div>
-          <button
+          <button class="panel-heading title-toggle"
+            aria-label={visiblePanels.events ? "Hide events" : "Show events"}
+            aria-controls="demo-events-content" aria-expanded={visiblePanels.events}
+            data-panel-toggle="events" data-hide-panel="events"
+            on:click={() => togglePanel("events")}>
+            {#if visiblePanels.events}<EyeOff size={15} />{:else}<PanelBottomOpen size={15} />{/if}
+            <strong>Events <span>{events.length}</span></strong>
+          </button>
+          <button hidden={!visiblePanels.events}
             on:click={() => {
               events = [];
               localStorage.removeItem(historyKey);
             }}><Trash2 size={14} /> Clear events</button
           >
         </div>
-        <div class="event-scroll">
+        <div class="event-scroll" id="demo-events-content" hidden={!visiblePanels.events}>
           <table>
             <thead
               ><tr
@@ -3207,21 +3184,16 @@
         class="scenario-dock"
         id="demo-scenarios"
         aria-label="Demo scenarios"
-        hidden={!visiblePanels.scenarios}
       >
-        <div class="scenario-title panel-heading">
-          <button
-            class="panel-toggle"
-            aria-label="Hide scenarios"
-            title="Hide scenarios"
-            aria-controls="demo-scenarios"
-            aria-expanded="true"
-            data-hide-panel="scenarios"
-            on:click={() => togglePanel("scenarios")}
-            ><EyeOff size={15} /></button
-          ><strong>Scenarios</strong>
-        </div>
-        <div class="scenario-panel">
+        <button class="scenario-title panel-heading title-toggle"
+          aria-label={visiblePanels.scenarios ? "Hide scenarios" : "Show scenarios"}
+          aria-controls="demo-scenarios-content" aria-expanded={visiblePanels.scenarios}
+          data-panel-toggle="scenarios" data-hide-panel="scenarios"
+          on:click={() => togglePanel("scenarios")}>
+          {#if visiblePanels.scenarios}<EyeOff size={15} />{:else}<PanelBottomOpen size={15} />{/if}
+          <strong>Scenarios</strong>
+        </button>
+        <div class="scenario-panel" id="demo-scenarios-content" hidden={!visiblePanels.scenarios}>
           <label
             ><select
               aria-label="Scenario"
@@ -3362,6 +3334,7 @@
   .demo {
     display: grid;
     grid-template-columns: var(--sidebar-width, 290px) minmax(0, 1fr);
+    grid-template-rows: 65px minmax(0, 1fr);
     position: relative;
     min-height: 100vh;
     font-family: Inter, system-ui, sans-serif;
@@ -3372,7 +3345,7 @@
   .sidebar-divider {
     position: absolute;
     left: calc(var(--sidebar-width, 290px) - 4px);
-    top: 0;
+    top: 65px;
     bottom: 0;
     width: 8px;
     z-index: 5;
@@ -3402,9 +3375,16 @@
     grid-template-rows: minmax(0, 1fr);
     min-height: 320px;
   }
-  .bottom-panels.one-bottom-panel {
-    grid-template-columns: minmax(0, 1fr);
+  .bottom-panels.collapsed { height: 54px; }
+  .bottom-panels > .scenario-dock { grid-column: 3; }
+  .demo .title-toggle {
+    background: transparent; border: 0; border-radius: 0;
+    color: inherit; text-align: left; cursor: pointer; margin: 0;
   }
+  .events-title .title-toggle { flex: 1; align-self: stretch; font-size: 13px; }
+  .demo .title-toggle:hover { background: var(--panel-2); }
+  .demo .top-bar { grid-column: 1 / -1; gap: 24px; }
+  .top-bar .brand { margin: 0; }
   .console-title {
     display: flex;
     align-items: center;
@@ -3507,7 +3487,7 @@
   .demo aside {
     border-right: 1px solid var(--line);
     padding: 25px 20px;
-    max-height: 100vh;
+    max-height: calc(100vh - 65px);
     overflow: auto;
   }
   .brand {
@@ -3663,7 +3643,7 @@
   }
   .demo main {
     min-width: 0;
-    height: 100vh;
+    height: calc(100vh - 65px);
     display: flex;
     flex-direction: column;
     padding: 0;
@@ -4183,10 +4163,9 @@
       grid-template-rows: minmax(280px, 1fr) auto;
       min-height: 540px;
     }
-    .bottom-panels.one-bottom-panel {
-      grid-template-rows: minmax(0, 1fr);
-      height: 260px;
-    }
+    .bottom-panels { grid-template-rows: auto auto; }
+    .bottom-panels > .scenario-dock { grid-column: 1; }
+    .bottom-panels.collapsed { height: 108px; }
     .demo {
       grid-template-columns: var(--sidebar-width, 290px) minmax(0, 1fr);
     }
@@ -4214,9 +4193,11 @@
       grid-template-columns: 1fr 1fr;
       gap: 0 15px;
     }
-    .brand {
-      margin-bottom: 15px;
-    }
+    .top-bar .brand { font-size: 15px; gap: 6px; }
+    .demo .top-bar { gap: 10px; }
+    .top-bar .console-title { gap: 6px; }
+    .top-bar .console-title strong { display: none; }
+    .top-bar .connection { font-size: 8px; letter-spacing: 0; }
     .sidebar-foot {
       display: none;
     }
