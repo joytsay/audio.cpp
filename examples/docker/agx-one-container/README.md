@@ -536,9 +536,10 @@ spoken-digit readout for TTS while preserving the displayed identifiers.
 
 In maintenance Scenarios 1 and 2, ASR text also uses the scenario terminology
 mappings and equipment-code separators before it appears in chat. Recognized
-work-order, note, and successful-startup turns use a structured readback from
-user transcripts, rather than generating maintenance facts from prompt examples
-(`LLM_SKIPPED` in Events). Serial numbers stay paired with their reported dates
+work-order, note, and successful-startup turns send structured grounding from
+user transcripts along with the conversation to the LLM. The LLM generates the
+reply (`LLM_COMPLETED` in Events); the grounding supplies the reported facts
+and confirmation flow instead of filling fields from prompt examples. Serial numbers stay paired with their reported dates
 and capacitance values. Missing fields are requested instead of filled from
 examples; the final confirmation uses the work-order title from this call.
 Unrecognized letters in a part number are preserved, not guessed from hotwords.
