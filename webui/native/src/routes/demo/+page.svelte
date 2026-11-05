@@ -33,6 +33,7 @@
   import { readGreetingCsv, writeGreetingCsv } from "$lib/greetings";
   import { recognitionContext } from "$lib/asr-context";
   import { reportedRtf, rtfLabel } from "$lib/response-timing";
+  import { normalizeTranscript } from "$lib/transcript";
   import { uploadWav, pathStatus } from "$lib/api";
   import {
     listVoices,
@@ -208,6 +209,8 @@
     }
     if (typeof saved.tts_streaming === "boolean")
       ttsStreaming = saved.tts_streaming;
+    if (typeof saved.tts_playback_rate === "number")
+      ttsPlaybackRate = saved.tts_playback_rate;
     if (saved.tts_voice_id !== undefined) {
       selectSavedVoice(saved.tts_voice_id);
       if (
@@ -250,6 +253,12 @@
         throw new Error(
           "Enter a valid VAD threshold and turn window before saving.",
         );
+      if (
+        !Number.isFinite(ttsPlaybackRate) ||
+        ttsPlaybackRate < 0.7 ||
+        ttsPlaybackRate > 1.25
+      )
+        throw new Error("Playback speed must be between 0.7 and 1.25.");
       if (voiceFile && !savedVoiceId) {
         const id = createLocalId(),
           name = voiceName.trim() || voiceFile.name;
@@ -291,6 +300,7 @@
         vad_window_ms: windowMs,
         llm_model: llm,
         tts_streaming: ttsStreaming,
+        tts_playback_rate: ttsPlaybackRate,
         tts_voice_id: savedVoiceId,
         tts_reference_text: voiceFile ? referenceText : "",
         tts_test_text: cloneTestText,
@@ -564,6 +574,9 @@
     (!useLlm || (selectedLlm && !llmNeedsDownload)) &&
     (!useTts ||
       (selectedTts &&
+        Number.isFinite(ttsPlaybackRate) &&
+        ttsPlaybackRate >= 0.7 &&
+        ttsPlaybackRate <= 1.25 &&
         greeting.trim() &&
         (!savedVoiceId ||
           protectedVoice ||
@@ -731,7 +744,12 @@
   let hotwords = "",
     savingHotwords = false,
     hotwordsStatus = "";
-  let ttsStreaming = false;
+  let ttsStreaming = false,
+    ttsPlaybackRate = 0.9;
+  let ttsStreamTransport: "pcm" | "wav";
+  $: ttsStreamTransport = selectedTts?.family === "voxcpm1" ? "wav" : "pcm";
+  $: ttsRunMode =
+    streamingTts && ttsStreamTransport === "pcm" ? "streaming" : "offline";
   $: ttsSupportsStreaming = (
     modelModes[selectedTts?.family || ""] || []
   ).includes("streaming");
@@ -897,7 +915,7 @@
         ttsKey,
         aborter.signal,
         true,
-        previewContext ? "streaming" : "offline",
+        previewContext ? ttsRunMode : "offline",
       );
       const body: Record<string, unknown> = { model, input: cloneTestText };
       if (voiceFile) {
@@ -914,6 +932,8 @@
             aborter.signal,
             {
               collectAudio: true,
+              transport: ttsStreamTransport,
+              playbackRate: ttsPlaybackRate,
               onFirstAudio: (wallMs) => {
                 cloneStatus = "Playing cloned voice · streaming";
                 record("TTS_FIRST_AUDIO", "Cloned voice first chunk", wallMs);
@@ -933,6 +953,7 @@
       );
       await tick();
       try {
+        if (cloneTestPlayer) cloneTestPlayer.playbackRate = ttsPlaybackRate;
         if (!previewContext) await cloneTestPlayer?.play();
         cloneStatus = "Cloned voice test ready.";
       } catch {
@@ -1220,7 +1241,7 @@
           },
           signal,
         );
-        text = result.text?.trim();
+        text = normalizeTranscript(result.text || "", hotwords).trim();
         if (!text) {
           record(
             "ASR_EMPTY",
@@ -1256,12 +1277,7 @@
             "Choose a TTS model with two built-in voices for the scenario.",
           );
         operationStarted = performance.now();
-        const id = await load(
-          ttsKey,
-          signal,
-          true,
-          streamingTts ? "streaming" : "offline",
-        );
+        const id = await load(ttsKey, signal, true, ttsRunMode);
         status = "Synthesizing technician voice";
         const body = {
           model: id,
@@ -1352,20 +1368,17 @@
         );
         return;
       }
+      reply = normalizeTranscript(reply, hotwords);
       messages = [...messages, { role: "assistant", content: reply }];
       record("CONVERSATION_ITEM_ADDED", `ASSISTANT · ${reply}`);
       if (useTts) {
         operationStarted = performance.now();
-        const ttsId = await load(
-          ttsKey,
-          signal,
-          true,
-          streamingTts ? "streaming" : "offline",
-        );
+        const ttsId = await load(ttsKey, signal, true, ttsRunMode);
         status = "Synthesizing";
         const body: Record<string, unknown> = {
           model: ttsId,
-          input: options.speakTechnician ? maintenanceSpeechText(reply) : reply,
+          input:
+            scenarioMode === "audio" ? reply : maintenanceSpeechText(reply),
           response_format: "wav",
         };
         if (referencePath && supportsReference) {
@@ -1499,6 +1512,8 @@
       return await playSpeechStream(ctx, streamingSpeechBody(body), signal, {
         destination: streamAnalyser,
         leadInSeconds,
+        transport: ttsStreamTransport,
+        playbackRate: ttsPlaybackRate,
         onFirstAudio: (wallMs) => {
           began = true;
           speaking = true;
@@ -1645,6 +1660,7 @@
     const buffer = await ctx.decodeAudioData(await output.arrayBuffer());
     if (generation !== epoch || context !== ctx || signal?.aborted) return null;
     const node = ctx.createBufferSource();
+    node.playbackRate.value = ttsPlaybackRate;
     if (leadInSeconds > 0) {
       // Render silence first so a newly opened output device does not clip
       // the greeting's first syllable. Keep every sample of the TTS audio.
@@ -1859,7 +1875,7 @@
         aborter.signal,
       );
       if (!aborter.signal.aborted && voiceFile === file) {
-        referenceText = result.text?.trim() || "";
+        referenceText = normalizeTranscript(result.text || "", hotwords).trim();
         record(
           referenceText ? "ASR_COMPLETED" : "ASR_EMPTY",
           `Reference voice: ${referenceText || "No speech recognized"}`,
@@ -2249,7 +2265,7 @@
           !(preparedKey === greetingFingerprint() && preparedGreeting)
         ) {
           greetingAborter?.abort();
-          const id = await load(ttsKey, controller.signal, true, "streaming");
+          const id = await load(ttsKey, controller.signal, true, ttsRunMode);
           const body: Record<string, unknown> = { model: id, input: greeting };
           if (referencePath && supportsReference) {
             body.voice_ref = referencePath;
@@ -2424,56 +2440,53 @@
   class:no-settings={!visiblePanels.settings}
   style:--sidebar-width={`${sidebarWidth}px`}
 >
-    <header class="top-bar">
+  <header class="top-bar">
     <div class="brand">
       <span class="gv">{@html logo}</span><span>GeoVision IVR</span>
     </div>
-      <div class="console-title">
-        <button
-          class="panel-toggle"
-          aria-label={visiblePanels.settings
-            ? "Hide settings"
-            : "Show settings"}
-          title={visiblePanels.settings ? "Hide settings" : "Show settings"}
-          aria-controls="demo-settings"
-          aria-expanded={visiblePanels.settings}
-          data-panel-toggle="settings"
-          on:click={() => togglePanel("settings")}
-        >
-          {#if visiblePanels.settings}<PanelLeftClose
-              size={17}
-            />{:else}<PanelLeftOpen size={17} />{/if}
-        </button>
-        <strong>Coversation</strong><span
-          class="badge"
-          title={systemDescription || undefined}
-          >LOCAL IVR DEMO{systemModel ? ` on ${systemModel}` : ""}</span
-        >
+    <div class="console-title">
+      <button
+        class="panel-toggle"
+        aria-label={visiblePanels.settings ? "Hide settings" : "Show settings"}
+        title={visiblePanels.settings ? "Hide settings" : "Show settings"}
+        aria-controls="demo-settings"
+        aria-expanded={visiblePanels.settings}
+        data-panel-toggle="settings"
+        on:click={() => togglePanel("settings")}
+      >
+        {#if visiblePanels.settings}<PanelLeftClose
+            size={17}
+          />{:else}<PanelLeftOpen size={17} />{/if}
+      </button>
+      <strong>Conversation</strong><span
+        class="badge"
+        title={systemDescription || undefined}
+        >LOCAL IVR DEMO{systemModel ? ` on ${systemModel}` : ""}</span
+      >
+    </div>
+    <div class="header-actions">
+      <div class="panel-restores" aria-label="Hidden panels">
+        {#if !visiblePanels.session}<button
+            class="panel-toggle"
+            aria-label="Show session"
+            title="Show session"
+            aria-controls="demo-session-details"
+            aria-expanded="false"
+            data-panel-toggle="session"
+            on:click={() => togglePanel("session")}
+            ><PanelRightOpen size={17} /></button
+          >{/if}
       </div>
-      <div class="header-actions">
-        <div class="panel-restores" aria-label="Hidden panels">
-          {#if !visiblePanels.session}<button
-              class="panel-toggle"
-              aria-label="Show session"
-              title="Show session"
-              aria-controls="demo-session-details"
-              aria-expanded="false"
-              data-panel-toggle="session"
-              on:click={() => togglePanel("session")}
-              ><PanelRightOpen size={17} /></button
-            >{/if}
-        </div>
-        <div class="connection">
-          <i class:online={connected}></i>{connected
-            ? "CONNECTED"
-            : starting
-              ? "CONNECTING"
-              : "DISCONNECTED"}
-        </div>
+      <div class="connection">
+        <i class:online={connected}></i>{connected
+          ? "CONNECTED"
+          : starting
+            ? "CONNECTING"
+            : "DISCONNECTED"}
       </div>
-    </header>
+    </div>
+  </header>
   <aside id="demo-settings" hidden={!visiblePanels.settings}>
-
     <section
       class="stage-settings greeting-settings"
       aria-label="Call greeting settings"
@@ -2750,20 +2763,34 @@
               >{/each}</select
           ></label
         >
-        <label class="tts-streaming-switch"
-          ><span>Streaming</span><input
-            type="checkbox"
-            role="switch"
-            aria-label="TTS streaming"
-            checked={streamingTts}
-            disabled={!ttsSupportsStreaming}
-            on:change={(e) => setTtsStreaming(e.currentTarget.checked)}
-          />
-          <span>{streamingTts ? "On" : "Off"}</span></label
-        >
+        <div class="tts-playback-options">
+          <label class="tts-streaming-switch"
+            ><span>Streaming</span><input
+              type="checkbox"
+              role="switch"
+              aria-label="TTS streaming"
+              checked={streamingTts}
+              disabled={!ttsSupportsStreaming}
+              on:change={(e) => setTtsStreaming(e.currentTarget.checked)}
+            />
+            <span>{streamingTts ? "On" : "Off"}</span></label
+          >
+          <label class="tts-speed"
+            >Playback speed<input
+              aria-label="Playback speed"
+              type="number"
+              min="0.7"
+              max="1.25"
+              step="0.05"
+              bind:value={ttsPlaybackRate}
+            /></label
+          >
+        </div>
         <small
           >{ttsSupportsStreaming
-            ? "Play chunks as speech is generated."
+            ? ttsStreamTransport === "wav"
+              ? "Play two-line WAV batches as they are generated."
+              : "Play two-line speech groups as they are generated."
             : "This model supports offline speech only."}</small
         >
         {#if supportsReference}
@@ -2929,7 +2956,6 @@
     style:--wave-height={`${waveHeight}px`}
     style:--composer-height={`${composerHeight}px`}
   >
-
     <section class="session" class:no-session={!visiblePanels.session}>
       <div class="conversation">
         <div class="wave-area">
@@ -3124,22 +3150,33 @@
     >
       <section class="events" id="demo-events">
         <div class="events-title">
-          <button class="panel-heading title-toggle"
+          <button
+            class="panel-heading title-toggle"
             aria-label={visiblePanels.events ? "Hide events" : "Show events"}
-            aria-controls="demo-events-content" aria-expanded={visiblePanels.events}
-            data-panel-toggle="events" data-hide-panel="events"
-            on:click={() => togglePanel("events")}>
-            {#if visiblePanels.events}<EyeOff size={15} />{:else}<PanelBottomOpen size={15} />{/if}
+            aria-controls="demo-events-content"
+            aria-expanded={visiblePanels.events}
+            data-panel-toggle="events"
+            data-hide-panel="events"
+            on:click={() => togglePanel("events")}
+          >
+            {#if visiblePanels.events}<EyeOff
+                size={15}
+              />{:else}<PanelBottomOpen size={15} />{/if}
             <strong>Events <span>{events.length}</span></strong>
           </button>
-          <button hidden={!visiblePanels.events}
+          <button
+            hidden={!visiblePanels.events}
             on:click={() => {
               events = [];
               localStorage.removeItem(historyKey);
             }}><Trash2 size={14} /> Clear events</button
           >
         </div>
-        <div class="event-scroll" id="demo-events-content" hidden={!visiblePanels.events}>
+        <div
+          class="event-scroll"
+          id="demo-events-content"
+          hidden={!visiblePanels.events}
+        >
           <table>
             <thead
               ><tr
@@ -3185,15 +3222,27 @@
         id="demo-scenarios"
         aria-label="Demo scenarios"
       >
-        <button class="scenario-title panel-heading title-toggle"
-          aria-label={visiblePanels.scenarios ? "Hide scenarios" : "Show scenarios"}
-          aria-controls="demo-scenarios-content" aria-expanded={visiblePanels.scenarios}
-          data-panel-toggle="scenarios" data-hide-panel="scenarios"
-          on:click={() => togglePanel("scenarios")}>
-          {#if visiblePanels.scenarios}<EyeOff size={15} />{:else}<PanelBottomOpen size={15} />{/if}
+        <button
+          class="scenario-title panel-heading title-toggle"
+          aria-label={visiblePanels.scenarios
+            ? "Hide scenarios"
+            : "Show scenarios"}
+          aria-controls="demo-scenarios-content"
+          aria-expanded={visiblePanels.scenarios}
+          data-panel-toggle="scenarios"
+          data-hide-panel="scenarios"
+          on:click={() => togglePanel("scenarios")}
+        >
+          {#if visiblePanels.scenarios}<EyeOff
+              size={15}
+            />{:else}<PanelBottomOpen size={15} />{/if}
           <strong>Scenarios</strong>
         </button>
-        <div class="scenario-panel" id="demo-scenarios-content" hidden={!visiblePanels.scenarios}>
+        <div
+          class="scenario-panel"
+          id="demo-scenarios-content"
+          hidden={!visiblePanels.scenarios}
+        >
           <label
             ><select
               aria-label="Scenario"
@@ -3375,16 +3424,36 @@
     grid-template-rows: minmax(0, 1fr);
     min-height: 320px;
   }
-  .bottom-panels.collapsed { height: 54px; }
-  .bottom-panels > .scenario-dock { grid-column: 3; }
-  .demo .title-toggle {
-    background: transparent; border: 0; border-radius: 0;
-    color: inherit; text-align: left; cursor: pointer; margin: 0;
+  .bottom-panels.collapsed {
+    height: 54px;
   }
-  .events-title .title-toggle { flex: 1; align-self: stretch; font-size: 13px; }
-  .demo .title-toggle:hover { background: var(--panel-2); }
-  .demo .top-bar { grid-column: 1 / -1; gap: 24px; }
-  .top-bar .brand { margin: 0; }
+  .bottom-panels > .scenario-dock {
+    grid-column: 3;
+  }
+  .demo .title-toggle {
+    background: transparent;
+    border: 0;
+    border-radius: 0;
+    color: inherit;
+    text-align: left;
+    cursor: pointer;
+    margin: 0;
+  }
+  .events-title .title-toggle {
+    flex: 1;
+    align-self: stretch;
+    font-size: 13px;
+  }
+  .demo .title-toggle:hover {
+    background: var(--panel-2);
+  }
+  .demo .top-bar {
+    grid-column: 1 / -1;
+    gap: 24px;
+  }
+  .top-bar .brand {
+    margin: 0;
+  }
   .console-title {
     display: flex;
     align-items: center;
@@ -3574,6 +3643,16 @@
   .stage-switch span {
     font-size: 11px;
     min-width: 17px;
+  }
+  .tts-playback-options {
+    display: flex;
+    gap: 10px;
+    align-items: end;
+    justify-content: space-between;
+  }
+  .demo label.tts-speed {
+    font-size: 10px;
+    max-width: 92px;
   }
   .demo label.tts-streaming-switch {
     display: flex;
@@ -4163,9 +4242,15 @@
       grid-template-rows: minmax(280px, 1fr) auto;
       min-height: 540px;
     }
-    .bottom-panels { grid-template-rows: auto auto; }
-    .bottom-panels > .scenario-dock { grid-column: 1; }
-    .bottom-panels.collapsed { height: 108px; }
+    .bottom-panels {
+      grid-template-rows: auto auto;
+    }
+    .bottom-panels > .scenario-dock {
+      grid-column: 1;
+    }
+    .bottom-panels.collapsed {
+      height: 108px;
+    }
     .demo {
       grid-template-columns: var(--sidebar-width, 290px) minmax(0, 1fr);
     }
@@ -4193,11 +4278,23 @@
       grid-template-columns: 1fr 1fr;
       gap: 0 15px;
     }
-    .top-bar .brand { font-size: 15px; gap: 6px; }
-    .demo .top-bar { gap: 10px; }
-    .top-bar .console-title { gap: 6px; }
-    .top-bar .console-title strong { display: none; }
-    .top-bar .connection { font-size: 8px; letter-spacing: 0; }
+    .top-bar .brand {
+      font-size: 15px;
+      gap: 6px;
+    }
+    .demo .top-bar {
+      gap: 10px;
+    }
+    .top-bar .console-title {
+      gap: 6px;
+    }
+    .top-bar .console-title strong {
+      display: none;
+    }
+    .top-bar .connection {
+      font-size: 8px;
+      letter-spacing: 0;
+    }
     .sidebar-foot {
       display: none;
     }

@@ -490,8 +490,11 @@ In the demo TTS section, **Streaming** plays incoming audio chunks while the mod
 continues generating speech. The switch is available only for model families
 that support streaming and is remembered after refresh. Cached greetings still
 play immediately; uncached greetings, replies, scenario voices, and cloned-voice
-tests use streaming when enabled. Long text uses the model's native chunking
-(with an 80-character budget where supported). Hangup cancels both the request
+tests use streaming when enabled. Text is split into groups of at most two
+nonempty lines and 120 characters, with short pauses between groups. VoxCPM1
+uses progressive offline WAV batches to bypass the native streaming path
+reported to produce static; other models use native PCM streaming. Playback speed defaults
+to 0.9× and is included in **Save model settings**. Hangup cancels both the request
 and queued audio. Streaming is off by default.
 
 The demo ASR context loads from `hotwords.csv`. **Save hotwords.csv** writes the
@@ -522,3 +525,12 @@ when collapsed; click a title to reopen its contents. The Session restore
 button stays in the Console header. Hiding panels
 does not stop calls or scenario playback; shown/hidden state is remembered in
 the browser alongside panel sizes.
+
+Demo transcripts and assistant replies are displayed in Traditional Chinese.
+Spoken dates, times, serials, quantities, and measurements are normalized to
+Arabic digits before the transcript is sent to the LLM. Technical identifiers
+recover separators and case only when their complete letters/digits match a
+single configured hotword. Missing letters, changed digits, and ambiguous
+hotwords are not guessed. `五年一維` remains unchanged. The assistant's normalized
+reply is used for conversation history. Maintenance scenarios use a separate
+spoken-digit readout for TTS while preserving the displayed identifiers.

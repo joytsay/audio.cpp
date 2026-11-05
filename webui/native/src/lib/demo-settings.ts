@@ -31,6 +31,7 @@ export interface DemoSettings {
   vad_window_ms?: number;
   llm_model?: string;
   tts_streaming?: boolean;
+  tts_playback_rate?: number;
   tts_voice_id?: string;
   tts_reference_text?: string;
   tts_test_text?: string;

@@ -1,3 +1,4 @@
+import { splitSpeechText } from "./speech-text";
 import { encodePcm16Wav } from "./audio";
 import { reportedRtf } from "./response-timing";
 
@@ -121,8 +122,53 @@ export function decodeSpeechChunk(event: SpeechChunk): {
   return { samples, sampleRate: event.sample_rate, frames };
 }
 
+async function* speechBuffers(
+  ctx: AudioContext,
+  body: Record<string, unknown>,
+  signal: AbortSignal,
+  transport: "pcm" | "wav",
+): AsyncGenerator<{ buffer?: AudioBuffer; rtf?: number | null }> {
+  if (transport === "wav") {
+    const response = await fetch(new URL("v1/audio/speech", document.baseURI), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...body, stream: false, response_format: "json" }),
+      signal,
+    });
+    if (!response.ok)
+      throw new Error(
+        (await response.text()) ||
+          `Speech synthesis failed: ${response.status}`,
+      );
+    const result = await response.json();
+    if (typeof result.audio !== "string")
+      throw new Error("The TTS model returned no WAV audio.");
+    const bytes = Uint8Array.from(atob(result.audio), (c) => c.charCodeAt(0));
+    const buffer = await ctx.decodeAudioData(bytes.buffer);
+    yield { buffer, rtf: reportedRtf(result) };
+    return;
+  }
+  for await (const event of speechStreamEvents(body, signal)) {
+    if (event.type === "speech.audio.done") {
+      yield { rtf: reportedRtf(event) };
+      continue;
+    }
+    const decoded = decodeSpeechChunk(event);
+    const buffer = ctx.createBuffer(
+      decoded.samples.length,
+      decoded.frames,
+      decoded.sampleRate,
+    );
+    decoded.samples.forEach((samples, channel) =>
+      buffer.getChannelData(channel).set(samples),
+    );
+    yield { buffer };
+  }
+}
+
 export interface SpeechStreamSummary {
   chunks: number;
+  textGroups?: number;
   rtf: number | null;
   wallMs: number;
   playbackMs: number;
@@ -139,11 +185,21 @@ export async function playSpeechStream(
     destination?: AudioNode;
     leadInSeconds?: number;
     collectAudio?: boolean;
+    transport?: "pcm" | "wav";
+    playbackRate?: number;
+    groupPauseSeconds?: number;
     onFirstAudio?: (wallMs: number) => void;
     onSynthesized?: (summary: SpeechStreamSummary) => void;
   } = {},
 ): Promise<SpeechStreamSummary> {
   const started = performance.now();
+  const rate = options.playbackRate ?? 1;
+  if (!Number.isFinite(rate) || rate < 0.7 || rate > 1.25)
+    throw new Error("Playback speed must be between 0.7 and 1.25.");
+  const texts = splitSpeechText(String(body.input || ""));
+  let weightedRtf = 0,
+    rtfDuration = 0,
+    allRtf = true;
   let nextStart = 0,
     firstAudio = 0,
     chunks = 0,
@@ -170,59 +226,85 @@ export async function playSpeechStream(
     if (signal.aborted)
       throw signal.reason || new DOMException("Cancelled", "AbortError");
     await ctx.resume();
-    for await (const event of speechStreamEvents(body, signal)) {
-      if (signal.aborted)
-        throw signal.reason || new DOMException("Cancelled", "AbortError");
-      if (event.type === "speech.audio.done") {
-        rtf = reportedRtf(event);
-        continue;
+    for (let group = 0; group < texts.length; group++) {
+      let groupDuration = 0,
+        groupRtf: number | null = null,
+        groupChunks = 0;
+      for await (const event of speechBuffers(
+        ctx,
+        { ...body, input: texts[group] },
+        signal,
+        options.transport || "pcm",
+      )) {
+        if (signal.aborted)
+          throw signal.reason || new DOMException("Cancelled", "AbortError");
+        if (event.rtf !== undefined) groupRtf = event.rtf;
+        const buffer = event.buffer;
+        if (!buffer) continue;
+        if (
+          format &&
+          (format.sampleRate !== buffer.sampleRate ||
+            format.channels !== buffer.numberOfChannels)
+        )
+          throw new Error("Speech audio format changed within a stream.");
+        format = {
+          sampleRate: buffer.sampleRate,
+          channels: buffer.numberOfChannels,
+        };
+        if (group > 0 && !groupChunks) {
+          const pause = options.groupPauseSeconds ?? 0.22;
+          nextStart += pause;
+          if (options.collectAudio && pause > 0)
+            captured.push(
+              ctx.createBuffer(
+                format.channels,
+                Math.max(1, Math.round(pause * rate * format.sampleRate)),
+                format.sampleRate,
+              ),
+            );
+        }
+        groupChunks++;
+        groupDuration += buffer.duration;
+        if (options.collectAudio) captured.push(buffer);
+        if (!chunks) {
+          firstAudio = performance.now();
+          nextStart = ctx.currentTime + (options.leadInSeconds ?? 0.06);
+          options.onFirstAudio?.(firstAudio - started);
+        }
+        chunks++;
+        const source = ctx.createBufferSource();
+        source.buffer = buffer;
+        source.playbackRate.value = rate;
+        source.connect(options.destination || ctx.destination);
+        playback.push(
+          new Promise<void>((resolve) => {
+            sources.set(source, resolve);
+            source.onended = () => {
+              sources.delete(source);
+              source.disconnect();
+              resolve();
+            };
+          }),
+        );
+        const when = Math.max(nextStart, ctx.currentTime + 0.015);
+        source.start(when);
+        nextStart = when + buffer.duration / rate;
       }
-      const decoded = decodeSpeechChunk(event);
-      if (
-        format &&
-        (format.sampleRate !== decoded.sampleRate ||
-          format.channels !== decoded.samples.length)
-      )
-        throw new Error("Speech audio format changed within a stream.");
-      format = {
-        sampleRate: decoded.sampleRate,
-        channels: decoded.samples.length,
-      };
-      const buffer = ctx.createBuffer(
-        decoded.samples.length,
-        decoded.frames,
-        decoded.sampleRate,
-      );
-      decoded.samples.forEach((samples, channel) =>
-        buffer.getChannelData(channel).set(samples),
-      );
-      if (options.collectAudio) captured.push(buffer);
-      if (!chunks) {
-        firstAudio = performance.now();
-        nextStart = ctx.currentTime + (options.leadInSeconds ?? 0.06);
-        options.onFirstAudio?.(firstAudio - started);
+      if (!groupChunks)
+        throw new Error(
+          "The streaming model produced no audio for a text group.",
+        );
+      if (groupRtf === null) allRtf = false;
+      else {
+        weightedRtf += groupRtf * groupDuration;
+        rtfDuration += groupDuration;
       }
-      chunks++;
-      const source = ctx.createBufferSource();
-      source.buffer = buffer;
-      source.connect(options.destination || ctx.destination);
-      playback.push(
-        new Promise<void>((resolve) => {
-          sources.set(source, resolve);
-          source.onended = () => {
-            sources.delete(source);
-            source.disconnect();
-            resolve();
-          };
-        }),
-      );
-      const when = Math.max(nextStart, ctx.currentTime + 0.015);
-      source.start(when);
-      nextStart = when + buffer.duration;
     }
+    rtf = allRtf && rtfDuration ? weightedRtf / rtfDuration : null;
     if (!chunks) throw new Error("The streaming model produced no audio.");
     const summary: SpeechStreamSummary = {
       chunks,
+      textGroups: texts.length,
       rtf,
       wallMs: performance.now() - started,
       playbackMs: 0,

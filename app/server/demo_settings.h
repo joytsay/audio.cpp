@@ -31,9 +31,14 @@ inline json::Value validate(const json::Value & input) {
             if (!value.is_bool()) throw std::invalid_argument(key + " must be a boolean");
         } else if (std::find(strings.begin(), strings.end(), key) != strings.end()) {
             if (!value.is_string() || value.as_string().size() > 65536) throw std::invalid_argument(key + " must be a string of at most 64 KiB");
-        } else if (key == "vad_threshold" || key == "vad_window_ms") {
+        } else if (key == "vad_threshold" || key == "vad_window_ms" || key == "tts_playback_rate") {
             if (!value.is_number()) throw std::invalid_argument(key + " must be a number");
             const double number = value.as_number();
+            if (key == "tts_playback_rate") {
+                if (!std::isfinite(number) || number < 0.7 || number > 1.25)
+                    throw std::invalid_argument("tts_playback_rate must be between 0.7 and 1.25");
+                continue;
+            }
             if (!std::isfinite(number) || (key == "vad_threshold" ? number < 0.01 || number > 0.99 : number < 300 || number > 2000 || std::floor(number) != number))
                 throw std::invalid_argument(key + " is outside its supported range");
         } else if (std::find(maps.begin(), maps.end(), key) != maps.end()) {
@@ -79,7 +84,7 @@ inline json::Value decode(const std::string & text) {
         if (key == "schema_version") continue;
         if (std::find(booleans.begin(), booleans.end(), key) != booleans.end())
             object[key] = json::Value::make_bool(engine::io::yaml::parse_bool_scalar(value, key));
-        else if (key == "vad_threshold" || key == "vad_window_ms") {
+        else if (key == "vad_threshold" || key == "vad_window_ms" || key == "tts_playback_rate") {
             size_t consumed = 0;
             const double number = std::stod(value, &consumed);
             if (consumed != value.size()) throw std::invalid_argument("Invalid numeric model setting: " + key);

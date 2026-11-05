@@ -15,6 +15,10 @@ const { chromium } = require("playwright");
     headless: true,
     args: [
       "--no-sandbox",
+      "--mute-audio",
+      "--disable-background-timer-throttling",
+      "--disable-renderer-backgrounding",
+      "--disable-backgrounding-occluded-windows",
       "--autoplay-policy=no-user-gesture-required",
       "--use-fake-ui-for-media-stream",
       "--use-fake-device-for-media-stream",
@@ -27,7 +31,10 @@ const { chromium } = require("playwright");
   const page = await context.newPage(),
     errors = [],
     requests = [];
-  let sharedSettings = null;
+  let sharedSettings = null,
+    voxAvailable = false;
+  let transcriptionText = "語音測試",
+    replyText = "您好，請問需要什麼協助？";
   let longStreamAudio = false;
   let vadCalls = 0,
     noLlmModels = false;
@@ -181,6 +188,18 @@ const { chromium } = require("playwright");
     } else if (url.pathname === "/v1/models")
       json = {
         data: [
+          ...(voxAvailable
+            ? [
+                {
+                  id: "voxcpm-test",
+                  family: "voxcpm1",
+                  task: "tts",
+                  mode: "offline",
+                  path: "/models/voxcpm.gguf",
+                  loaded: true,
+                },
+              ]
+            : []),
           {
             id: "configured-silero",
             family: "silero_vad",
@@ -293,10 +312,10 @@ const { chromium } = require("playwright");
           ++vadCalls === 1 ? [{ start_sample: 0, end_sample: 8000 }] : [],
       };
     else if (url.pathname.endsWith("/audio/transcriptions/details"))
-      json = { text: "語音測試", timing: { rtf: 0.024241 } };
+      json = { text: transcriptionText, timing: { rtf: 0.024241 } };
     else if (url.pathname.endsWith("/chat/completions"))
       json = {
-        choices: [{ message: { content: "您好，請問需要什麼協助？" } }],
+        choices: [{ message: { content: replyText } }],
         timings: llmReportsRtf ? { rtf: 0.75 } : { predicted_per_second: 45 },
       };
     else if (url.pathname.endsWith("/audio/speech")) {
@@ -1124,7 +1143,10 @@ const { chromium } = require("playwright");
     .getByRole("button", { name: "Hide scenarios", exact: true })
     .click();
   await page.getByRole("button", { name: "Hide events", exact: true }).click();
-  assert.equal(await page.locator("#demo-scenarios").isVisible(), false);
+  assert.equal(
+    await page.locator("#demo-scenarios-content").isVisible(),
+    false,
+  );
   await page
     .getByRole("button", { name: "Show scenarios", exact: true })
     .click();
@@ -1327,6 +1349,56 @@ const { chromium } = require("playwright");
   );
   assert.deepEqual(await page.evaluate(() => window.cspViolations), []);
   await page.getByRole("button", { name: "Hang up", exact: true }).click();
+  transcriptionText =
+    "我要回報工單，二零二六年六月二日下午十四點，F一五P一二ME，SN一四八六五四一二，電容值六四六零MF。";
+  replyText =
+    "备註：二零BD一五六AOANNANCU，制造日期二零一零年十二月三日，电容值六四六零MF。";
+  await page
+    .getByLabel("ASR hotwords / context")
+    .fill("F15P1/2_ME, 20BD156AOANNANCU");
+  await page
+    .getByRole("button", { name: "scenario2-3.wav", exact: true })
+    .click();
+  const normalizationOffset = requests.length;
+  await page.getByRole("button", { name: "Send audio", exact: true }).click();
+  await page
+    .getByText("Scenario 2 complete", { exact: true })
+    .waitFor({ timeout: 90000 });
+  const expectedUser =
+    "我要回報工單，2026年6月2日下午14:00，F15P1/2_ME，SN14865412，電容值6460MF。";
+  const expectedReply =
+    "備註：20BD156AOANNANCU，製造日期2010年12月3日，電容值6460MF。";
+  assert.equal(
+    await page.locator(".transcript article.user p").last().textContent(),
+    expectedUser,
+  );
+  assert.equal(
+    await page.locator(".transcript article:not(.user) p").last().textContent(),
+    expectedReply,
+  );
+  const normalizedLlm = requests
+    .slice(normalizationOffset)
+    .find((r) => r.path === "/llm/v1/chat/completions");
+  assert.equal(
+    normalizedLlm.body.messages.filter((m) => m.role === "user").at(-1).content,
+    expectedUser,
+    "LLM receives Arabic numerals and canonical identifiers",
+  );
+  assert.ok(
+    requests
+      .slice(normalizationOffset)
+      .some(
+        (r) =>
+          r.path === "/v1/audio/speech" &&
+          r.body.input ===
+            "備註：二零BD一伍六AOANNANCU，製造日期二零一零年十二月三日，電容值六千四百六十MF。",
+      ),
+    "TTS receives the Traditional Chinese maintenance readout",
+  );
+  transcriptionText = "語音測試";
+  replyText = "您好，請問需要什麼協助？";
+  await page.getByRole("button", { name: "Hang up", exact: true }).click();
+  await page.getByLabel("ASR hotwords / context").fill("X光機");
   await page.getByLabel("Scenario", { exact: true }).selectOption("audio");
   await page.getByText("No audio selected", { exact: true }).waitFor();
   assert.equal(
@@ -1459,6 +1531,7 @@ const { chromium } = require("playwright");
   assert.equal(sharedSettings.vad_window_ms, 1000);
   assert.equal(sharedSettings.tts_voice_id, "preset-wangSG9s");
   assert.equal(sharedSettings.tts_streaming, true);
+  assert.equal(sharedSettings.tts_playback_rate, 0.9);
   // A separate browser context has no prior localStorage/session state.
   const freshContext = await browser.newContext({
     viewport: { width: 1584, height: 920 },
@@ -1614,8 +1687,74 @@ const { chromium } = require("playwright");
     true,
   );
   await freshContext.close();
+  voxAvailable = true;
+  sharedSettings = null;
+  longStreamAudio = false;
+  await page.reload();
+  await page.getByRole("button", { name: "Start call", exact: true }).waitFor();
+  await page.getByRole("switch", { name: "Enable ASR", exact: true }).uncheck();
+  await page.getByRole("switch", { name: "Enable LLM", exact: true }).check();
+  await page.getByRole("switch", { name: "Enable TTS", exact: true }).check();
+  await page
+    .getByLabel("TTS", { exact: true })
+    .selectOption("registered:voxcpm-test");
+  await page
+    .getByLabel("Saved voices", { exact: true })
+    .selectOption("preset-lingCLvocals");
+  await page
+    .getByRole("switch", { name: "TTS streaming", exact: true })
+    .check();
+  await page.getByLabel("Playback speed", { exact: true }).fill("0.85");
+  await page
+    .getByRole("button", { name: "Save model settings", exact: true })
+    .click();
+  await page
+    .getByText("Model settings saved on server", { exact: true })
+    .waitFor();
+  assert.equal(sharedSettings.tts_playback_rate, 0.85);
+  await page.reload();
+  await page
+    .getByText("Loaded server model settings", { exact: true })
+    .waitFor();
+  assert.equal(
+    await page.getByLabel("Playback speed", { exact: true }).inputValue(),
+    "0.85",
+  );
+  const voxOffset = requests.length;
+  replyText = "第一行\n第二行\n第三行\n第四行\n第五行";
+  await page.getByRole("button", { name: "Start call", exact: true }).click();
+  await page.getByText("Ready for text", { exact: true }).waitFor();
+  await page.getByLabel("Message", { exact: true }).fill("Test WAV batches");
+  await page.getByRole("button", { name: "Send message", exact: true }).click();
+  await page.getByText("Ready for text", { exact: true }).waitFor();
+  const voxRequests = requests.slice(voxOffset);
+  const voxSpeech = voxRequests.filter((r) => r.path === "/v1/audio/speech");
+  assert.ok(
+    voxSpeech.every(
+      (r) => r.body.stream === false && r.body.response_format === "json",
+    ),
+  );
+  assert.deepEqual(
+    voxSpeech
+      .filter((r) => r.body.input.startsWith("第"))
+      .map((r) => r.body.input),
+    ["第一行\n第二行", "第三行\n第四行", "第五行"],
+  );
+  assert.ok(
+    voxRequests.some(
+      (r) =>
+        r.path === "/v1/models/load" &&
+        r.body.family === "voxcpm1" &&
+        r.body.mode === "offline",
+    ),
+  );
+  await page.getByRole("button", { name: "Hang up", exact: true }).click();
+  assert.deepEqual(errors, []);
   console.log(
-    "PASS downloaded-model dropdowns, actual LLM IDs, unlinked branding, CSV saves, cached greeting, ASR hotwords, clone recording/transcript, voice/text calls, history, runtime measurements, stage switches/bypasses/manual turns, deduplicated model aliases, LFM download, greeting text/reference isolation, fixed equal-width scenarios panel, audio scenario, three-turn maintenance simulation, distinct technician/assistant voices, CSP-safe preview then explicit send, chat audio players, ordered five-example autoplay, renumbered scenarios 0/1/2, three WAV previews/explicit send/ordered autoplay/highlighting, queue highlighting/cancellation, RTF reporting/persistence, legacy ASR event migration, compact audio chooser, incomplete LLM detection/resume, explicit model loading/readiness before chat, TTS streaming switch/persistence/greeting/reply/clone/cancellation, hotwords CSV persistence/default load, global model settings across browser contexts, saved draft voice, unavailable model/voice handling, mobile layout",
+    "PASS VoxCPM1 offline WAV batching, two-line playback and server-saved playback speed",
+  );
+  console.log(
+    "PASS downloaded-model dropdowns, actual LLM IDs, unlinked branding, CSV saves, cached greeting, ASR hotwords, clone recording/transcript, voice/text calls, history, runtime measurements, stage switches/bypasses/manual turns, deduplicated model aliases, LFM download, greeting text/reference isolation, fixed equal-width scenarios panel, audio scenario, three-turn maintenance simulation, distinct technician/assistant voices, CSP-safe preview then explicit send, chat audio players, ordered five-example autoplay, renumbered scenarios 0/1/2, three WAV previews/explicit send/ordered autoplay/highlighting, queue highlighting/cancellation, RTF reporting/persistence, legacy ASR event migration, compact audio chooser, incomplete LLM detection/resume, explicit model loading/readiness before chat, TTS streaming switch/persistence/greeting/reply/clone/cancellation, hotwords CSV persistence/default load, spoken numeral/date/code normalization before LLM and Traditional assistant display/TTS, global model settings across browser contexts, saved draft voice, unavailable model/voice handling, mobile layout",
   );
   await browser.close();
 })().catch((e) => {
