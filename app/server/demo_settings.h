@@ -19,7 +19,7 @@ inline const std::vector<std::string> strings = {
     "vad_model_key", "vad_model_id", "vad_model_family", "vad_model_path", "vad_model_task",
     "asr_model_key", "asr_model_id", "asr_model_family", "asr_model_path", "asr_model_task",
     "tts_model_key", "tts_model_id", "tts_model_family", "tts_model_path", "tts_model_task",
-    "llm_model", "tts_voice_id", "tts_reference_text", "tts_test_text"};
+    "llm_model", "dialogue_source", "tts_voice_id", "tts_reference_text", "tts_test_text"};
 inline const std::vector<std::string> maps = {"vad_load_options", "vad_session_options", "asr_load_options", "asr_session_options", "tts_load_options", "tts_session_options"};
 
 inline json::Value validate(const json::Value & input) {
@@ -31,6 +31,8 @@ inline json::Value validate(const json::Value & input) {
             if (!value.is_bool()) throw std::invalid_argument(key + " must be a boolean");
         } else if (std::find(strings.begin(), strings.end(), key) != strings.end()) {
             if (!value.is_string() || value.as_string().size() > 65536) throw std::invalid_argument(key + " must be a string of at most 64 KiB");
+            if (key == "dialogue_source" && value.as_string() != "prompt.csv" && value.as_string() != "n8n")
+                throw std::invalid_argument("dialogue_source must be prompt.csv or n8n");
         } else if (key == "vad_threshold" || key == "vad_window_ms" || key == "tts_playback_rate") {
             if (!value.is_number()) throw std::invalid_argument(key + " must be a number");
             const double number = value.as_number();

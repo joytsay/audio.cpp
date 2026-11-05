@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy, tick } from "svelte";
+  import { n8nDialogue, type DialogueSource } from "$lib/n8n-dialogue";
   import PanelDivider from "$lib/PanelDivider.svelte";
   import { catalog, modelModes } from "$lib/catalog";
   import {
@@ -202,6 +203,8 @@
     if (typeof saved.vad_threshold === "number")
       threshold = saved.vad_threshold;
     if (typeof saved.vad_window_ms === "number") windowMs = saved.vad_window_ms;
+    if (saved.dialogue_source === "n8n" || saved.dialogue_source === "prompt.csv")
+      dialogueSource = saved.dialogue_source;
     if (saved.llm_model !== undefined) {
       const selected =
         llmModels.find((model) => model.id === saved.llm_model) ||
@@ -303,6 +306,7 @@
         vad_threshold: threshold,
         vad_window_ms: windowMs,
         llm_model: llm,
+        dialogue_source: dialogueSource,
         tts_streaming: ttsStreaming,
         tts_playback_rate: ttsPlaybackRate,
         tts_voice_id: savedVoiceId,
@@ -736,6 +740,7 @@
       stopLlmDownloadWatch();
     }
   }
+  let dialogueSource: DialogueSource = "prompt.csv";
   let prompt =
     "你是現場維修保養的語音助理。請用繁體中文簡短回答，準確保留工單、設備代碼及數字。";
   const defaultReferenceText =
@@ -1316,12 +1321,33 @@
 
       let reply = text;
       const readback =
-        scenarioMode !== "audio" && useLlm
+        scenarioMode !== "audio" && useLlm && dialogueSource === "prompt.csv"
           ? maintenanceReply(text, messages)
           : undefined;
       if (readback !== undefined)
         record("LLM_TRANSCRIPT_GROUNDED", "Maintenance grounding assembled from user transcript fields");
-      if (useLlm) {
+      if (useLlm && dialogueSource === "n8n") {
+        status = "Thinking · n8n";
+        record("AGENT_STATE_CHANGED", "listening → thinking");
+        operationStarted = performance.now();
+        llm = await ensureDemoLlmReady(llmBase(), llm, signal, (message) => {
+          status = message;
+        });
+        if (generation !== epoch || signal.aborted) return;
+        reply = await n8nDialogue({
+          sessionId: run,
+          text,
+          model: llm,
+          messages: messages.filter(message => message.content.trim())
+            .map(({ role, content }) => ({ role, content })),
+        }, signal, { llmBase: llmBase(), onTool: (name, state) => {
+          if (generation !== epoch || signal.aborted) return;
+          status = `n8n MCP · ${name} · ${state}`;
+          record(`MCP_TOOL_${state.toUpperCase()}`, name);
+        } });
+        if (generation !== epoch || signal.aborted) return;
+        record("LLM_COMPLETED", "Local LLM + n8n MCP tools", performance.now() - operationStarted);
+      } else if (useLlm) {
         status = "Thinking";
         record("AGENT_STATE_CHANGED", "listening → thinking");
         operationStarted = performance.now();
@@ -2729,6 +2755,13 @@
               >{/each}</select
           ></label
         >
+        <label>Dialogue source<select aria-label="Dialogue source" bind:value={dialogueSource}>
+          <option value="prompt.csv">prompt.csv</option>
+          <option value="n8n">n8n</option>
+        </select></label>
+        {#if dialogueSource === "n8n"}
+          <small>The local LLM uses tools from the published IVR Maintenance MCP Tools workflow.</small>
+        {:else}
         <label
           >System prompt<textarea rows="4" bind:value={prompt}
           ></textarea></label
@@ -2736,6 +2769,7 @@
         <button disabled={savingPrompt} on:click={savePromptCsv}
           >{savingPrompt ? "Saving…" : "Save prompt.csv"}</button
         >
+        {/if}
         {#if llmNeedsDownload}<button
             disabled={llmDownloading}
             on:click={downloadLfmModel}
@@ -3139,7 +3173,7 @@
           <dt>ASR</dt>
           <dd>{useAsr ? selectedAsr?.label || "—" : "Skipped · text input"}</dd>
           <dt>LLM</dt>
-          <dd>{useLlm ? llm || "—" : "Skipped · passthrough"}</dd>
+          <dd>{useLlm ? (dialogueSource === "n8n" ? `n8n · ${llm || "—"}` : llm || "—") : "Skipped · passthrough"}</dd>
           <dt>TTS</dt>
           <dd>
             {useTts ? selectedTts?.label || "—" : "Skipped · text output"}

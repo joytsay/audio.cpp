@@ -408,6 +408,19 @@ with one nonempty row. Quote the field and double embedded quotes when the
 greeting contains commas, quotes, or newlines. The API stores the supplied
 content verbatim; CSV validation happens in the demo editor.
 
+`GET /v1/ui/demo-settings` reads global demo settings; `POST` accepts
+`{ "settings": { "schema_version": 1, ... } }` and saves them to
+`ui-settings/demo-settings.yaml` when UI management is enabled. The optional
+`dialogue_source` string accepts `prompt.csv` (the default) or `n8n`. In n8n
+mode, the WebUI connects to `/n8n/mcp/ivr-maintenance` using MCP Streamable HTTP,
+discovers the tools exposed by n8n, and passes their schemas to the selected
+local LLM. LLM tool calls are executed through MCP; their results go back to
+the LLM before its final reply reaches TTS. Call ID, current ASR text, and user
+transcripts are bound to the maintenance tools' `context` argument by the client.
+The MCP endpoint is provided by the AGX Compose n8n service through Caddy; it
+is not a native audio server endpoint. See the
+[Scenario 1 workflow setup](../../examples/docker/agx-one-container/n8n/README.md).
+
 ## `GET /v1/audio/voices?model=<id>`
 
 Lists cached voice IDs, configured model preset names, and shared `voice_dir`

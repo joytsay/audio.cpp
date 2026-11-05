@@ -27,7 +27,7 @@ int main() {
             if (missing.status != 200 || !json::parse(missing.body).require("settings").is_null())
                 throw std::runtime_error("first startup must use defaults without creating settings");
             request.method = "POST";
-            request.body = R"({"settings":{"schema_version":1,"vad_enabled":false,"vad_threshold":0.65,"vad_window_ms":1000,"asr_model_key":"package:qwen3-asr:q8","asr_model_task":"asr","asr_session_options":{"audio8_asr.repetition_penalty":"1.1","literal":"true"},"tts_voice_id":"preset-wangSG9s","tts_streaming":true,"tts_playback_rate":0.9,"tts_test_text":"測試\n\"語音\""}})";
+            request.body = R"({"settings":{"schema_version":1,"dialogue_source":"n8n","vad_enabled":false,"vad_threshold":0.65,"vad_window_ms":1000,"asr_model_key":"package:qwen3-asr:q8","asr_model_task":"asr","asr_session_options":{"audio8_asr.repetition_penalty":"1.1","literal":"true"},"tts_voice_id":"preset-wangSG9s","tts_streaming":true,"tts_playback_rate":0.9,"tts_test_text":"測試\n\"語音\""}})";
             const auto saved = srv::demo_settings_response(request, true, root);
             if (saved.status != 200) throw std::runtime_error("settings save failed: " + saved.body);
             const auto path = root / "ui-settings/demo-settings.yaml";
@@ -36,11 +36,11 @@ int main() {
             if (original.find("asr_session_options:\n") == std::string::npos) throw std::runtime_error("settings were not saved as readable YAML");
             request.method = "GET";
             const auto restored = json::parse(srv::demo_settings_response(request, true, root).body).require("settings");
-            if (restored.require("vad_enabled").as_bool() || restored.require("vad_threshold").as_number() != 0.65 || restored.require("tts_playback_rate").as_number() != 0.9 ||
+            if (restored.require("dialogue_source").as_string() != "n8n" || restored.require("vad_enabled").as_bool() || restored.require("vad_threshold").as_number() != 0.65 || restored.require("tts_playback_rate").as_number() != 0.9 ||
                 restored.require("asr_session_options").require("literal").as_string() != "true" ||
                 restored.require("tts_test_text").as_string() != "測試\n\"語音\"")
                 throw std::runtime_error("settings YAML lost types, options, or Unicode text");
-            for (const auto * invalid : {R"({"settings":{"schema_version":1,"tts_playback_rate":0.2}})", R"({"settings":{"schema_version":2}})", R"({"settings":{"schema_version":1,"vad_threshold":2}})", R"({"settings":{"schema_version":1,"vad_enabled":"yes"}})", R"({"settings":{"schema_version":1,"asr_session_options":{"wrong":true}}})"}) {
+            for (const auto * invalid : {R"({"settings":{"schema_version":1,"dialogue_source":"unknown"}})", R"({"settings":{"schema_version":1,"tts_playback_rate":0.2}})", R"({"settings":{"schema_version":2}})", R"({"settings":{"schema_version":1,"vad_threshold":2}})", R"({"settings":{"schema_version":1,"vad_enabled":"yes"}})", R"({"settings":{"schema_version":1,"asr_session_options":{"wrong":true}}})"}) {
                 request.method = "POST"; request.body = invalid;
                 if (srv::demo_settings_response(request, true, root).status != 400 || read() != original)
                     throw std::runtime_error("invalid settings changed the saved YAML");

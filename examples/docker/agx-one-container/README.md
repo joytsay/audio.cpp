@@ -548,3 +548,13 @@ and confirmation flow instead of filling fields from prompt examples. Serial num
 and capacitance values. Missing fields are requested instead of filled from
 examples; the final confirmation uses the work-order title from this call.
 Unrecognized letters in a part number are preserved, not guessed from hotwords.
+
+### n8n MCP tools for the voice assistant
+
+Compose includes `ivr-n8n`. `docker compose up -d --build` automatically imports
+the Maintenance MCP Tools workflow, its Simple Vector Store RAG subworkflow, and
+local credentials after owner-account setup, preserving existing edits. Publish
+both workflows, then select **Dialogue source → n8n** and save model settings.
+The local LLM discovers and calls n8n tools through MCP, then generates the reply
+for TTS. ASR and TTS stay in audio.cpp. See the
+[n8n MCP setup guide](n8n/README.md) for endpoints, tools, and tuning.

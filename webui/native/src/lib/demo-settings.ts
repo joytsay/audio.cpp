@@ -30,6 +30,7 @@ export interface DemoSettings {
   vad_threshold?: number;
   vad_window_ms?: number;
   llm_model?: string;
+  dialogue_source?: "prompt.csv" | "n8n";
   tts_streaming?: boolean;
   tts_playback_rate?: number;
   tts_voice_id?: string;

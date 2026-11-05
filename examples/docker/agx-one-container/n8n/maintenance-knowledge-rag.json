@@ -1,0 +1,242 @@
+{
+  "id": "ivrMaintenanceKnowledge",
+  "name": "IVR Maintenance Knowledge · RAG Tool",
+  "nodes": [
+    {
+      "id": "rag-tool-input",
+      "name": "RAG tool input",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "inputSource": "workflowInputs",
+        "workflowInputs": {
+          "values": [
+            {
+              "name": "query",
+              "type": "string"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "prepare-guidance",
+      "name": "Prepare guidance",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        0
+      ],
+      "parameters": {
+        "jsCode": "const query = $input.first().json.query;\nif (typeof query !== 'string' || !query.trim()) throw new Error('A guidance query is required');\nreturn [{json:{query,knowledge:\"維修內容回報：逐台複誦設備編號、維修項目及各自數量，以「以上是否正確。」結尾，尚未完成工單。\\n\\n確認內容並新增備註：只複誦本輪備註。相同料號合併說明有兩個，各 SN、製造日期及電容值保持配對。以「以上是否正確。」結尾。\\n\\n確認備註及起機測試：使用者確認且起機測試正常後，用對話中實際工單名稱回覆「好的，工單：工單名稱，已輸入完成，謝謝。」不再詢問。\\n\\n每筆資料僅來自使用者回報，保留數字及代碼。不使用範例資料填補欄位。不得恭喜、讚美或提前宣稱完成。\"}}];"
+      }
+    },
+    {
+      "id": "seed-simple-vector-store",
+      "name": "Seed Simple Vector Store",
+      "type": "@n8n/n8n-nodes-langchain.vectorStoreInMemory",
+      "typeVersion": 1.2,
+      "position": [
+        500,
+        0
+      ],
+      "parameters": {
+        "mode": "insert",
+        "memoryKey": {
+          "__rl": true,
+          "mode": "id",
+          "value": "ivr-maintenance-guidance"
+        },
+        "clearStore": true
+      }
+    },
+    {
+      "id": "default-document-loader",
+      "name": "Default Document Loader",
+      "type": "@n8n/n8n-nodes-langchain.documentDefaultDataLoader",
+      "typeVersion": 1.1,
+      "position": [
+        420,
+        240
+      ],
+      "parameters": {
+        "dataType": "json",
+        "jsonMode": "expressionData",
+        "jsonData": "={{ $('Prepare guidance').first().json.knowledge }}",
+        "textSplittingMode": "custom",
+        "options": {}
+      }
+    },
+    {
+      "id": "recursive-text-splitter",
+      "name": "Recursive Text Splitter",
+      "type": "@n8n/n8n-nodes-langchain.textSplitterRecursiveCharacterTextSplitter",
+      "typeVersion": 1,
+      "position": [
+        400,
+        460
+      ],
+      "parameters": {
+        "chunkSize": 200,
+        "chunkOverlap": 40,
+        "options": {}
+      }
+    },
+    {
+      "id": "local-embeddings",
+      "name": "Local Embeddings",
+      "type": "@n8n/n8n-nodes-langchain.embeddingsOpenAi",
+      "typeVersion": 1.1,
+      "position": [
+        700,
+        460
+      ],
+      "parameters": {
+        "model": "Qwen/Qwen3-Embedding-0.6B-GGUF:Q8_0",
+        "options": {
+          "baseURL": "http://192.168.5.151:8084/v1",
+          "batchSize": 8,
+          "encodingFormat": "float"
+        }
+      },
+      "credentials": {
+        "openAiApi": {
+          "id": "configure-local-embeddings",
+          "name": "IVR local embeddings"
+        }
+      }
+    },
+    {
+      "id": "retrieve-guidance",
+      "name": "Retrieve guidance",
+      "type": "@n8n/n8n-nodes-langchain.vectorStoreInMemory",
+      "typeVersion": 1.2,
+      "position": [
+        880,
+        0
+      ],
+      "parameters": {
+        "mode": "load",
+        "memoryKey": {
+          "__rl": true,
+          "mode": "id",
+          "value": "ivr-maintenance-guidance"
+        },
+        "prompt": "={{ $('Prepare guidance').first().json.query }}",
+        "topK": 4,
+        "options": {}
+      },
+      "executeOnce": true
+    },
+    {
+      "id": "return-guidance",
+      "name": "Return guidance",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1140,
+        0
+      ],
+      "parameters": {
+        "jsCode": "const passages = $input.all().map(item => item.json.document?.pageContent).filter(Boolean);\nif (!passages.length) throw new Error('No maintenance guidance retrieved');\nreturn [{json:{passages,source:'Simple Vector Store',scope:'workflow guidance only; work-order facts must come from the user transcript'}}];"
+      }
+    }
+  ],
+  "connections": {
+    "RAG tool input": {
+      "main": [
+        [
+          {
+            "node": "Prepare guidance",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare guidance": {
+      "main": [
+        [
+          {
+            "node": "Seed Simple Vector Store",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Seed Simple Vector Store": {
+      "main": [
+        [
+          {
+            "node": "Retrieve guidance",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Retrieve guidance": {
+      "main": [
+        [
+          {
+            "node": "Return guidance",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Default Document Loader": {
+      "ai_document": [
+        [
+          {
+            "node": "Seed Simple Vector Store",
+            "type": "ai_document",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Recursive Text Splitter": {
+      "ai_textSplitter": [
+        [
+          {
+            "node": "Default Document Loader",
+            "type": "ai_textSplitter",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Local Embeddings": {
+      "ai_embedding": [
+        [
+          {
+            "node": "Seed Simple Vector Store",
+            "type": "ai_embedding",
+            "index": 0
+          },
+          {
+            "node": "Retrieve guidance",
+            "type": "ai_embedding",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "executionTimeout": 120,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "pinData": {},
+  "tags": []
+}

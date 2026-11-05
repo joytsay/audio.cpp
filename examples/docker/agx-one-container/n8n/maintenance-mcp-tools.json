@@ -1,0 +1,217 @@
+{
+  "id": "ivrMaintenanceMcp",
+  "name": "IVR Maintenance MCP Tools",
+  "nodes": [
+    {
+      "id": "maintenance-mcp-trigger",
+      "name": "Maintenance MCP Server",
+      "type": "@n8n/n8n-nodes-langchain.mcpTrigger",
+      "typeVersion": 2,
+      "position": [
+        600,
+        0
+      ],
+      "parameters": {
+        "path": "ivr-maintenance",
+        "authentication": "none",
+        "instructions": "Maintenance voice assistant tools. First retrieve guidance, then read back current reported details. The audio.cpp client binds ASR context. Do not invent work-order facts. This workflow creates simulated conversation drafts, not external tickets."
+      },
+      "webhookId": "ivr-maintenance"
+    },
+    {
+      "id": "lookup-maintenance-guidance",
+      "name": "lookup_maintenance_guidance",
+      "type": "@n8n/n8n-nodes-langchain.toolWorkflow",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        240
+      ],
+      "parameters": {
+        "name": "lookup_maintenance_guidance",
+        "description": "Retrieve maintenance reporting rules from the local RAG Simple Vector Store. Call this before processing a maintenance report. Does not provide work-order facts.",
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "value": "ivrMaintenanceKnowledge",
+          "mode": "id"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "query": "={{ $fromAI('query', 'Maintenance reporting stage or rule to retrieve', 'string') }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "query",
+              "displayName": "query",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        }
+      }
+    },
+    {
+      "id": "get_report_draft",
+      "name": "get_report_draft",
+      "type": "@n8n/n8n-nodes-langchain.toolCode",
+      "typeVersion": 1.1,
+      "position": [
+        300,
+        240
+      ],
+      "parameters": {
+        "name": "get_report_draft",
+        "description": "Inspect the simulated maintenance draft reconstructed only from this call's user transcripts.",
+        "language": "javaScript",
+        "specifyInputSchema": true,
+        "schemaType": "manual",
+        "inputSchema": "{\"type\":\"object\",\"properties\":{\"context\":{\"type\":\"object\",\"description\":\"Real call context automatically attached by the audio.cpp MCP client.\",\"properties\":{\"sessionId\":{\"type\":\"string\"},\"current\":{\"type\":\"string\"},\"user_transcripts\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}}},\"required\":[\"sessionId\",\"current\",\"user_transcripts\"],\"additionalProperties\":false}},\"required\":[\"context\"],\"additionalProperties\":false}",
+        "jsCode": "const context = query.context;\nif (!context || typeof context.current !== 'string' || !Array.isArray(context.user_transcripts) || !context.user_transcripts.every(t => typeof t === 'string')) throw new Error('ASR context is required');\nconst history = context.user_transcripts.map(content => ({role:'user',content}));\nfunction workOrder(text) {\n  if (!/回報工單/.test(text)) return;\n  const header = text.split(\"\\n\")[0];\n  return header.match(\n    /([A-Za-z0-9][A-Za-z0-9_/-]*\\s+VFD[^。\\n]*?(?:備品與維修|維修))/i\n  )?.[1];\n}\nfunction maintenanceReply(current, history) {\n  if (/回報工單/.test(current)) {\n    const items = current.split(\"\\n\").filter((line) => /五年一維/.test(line));\n    if (items.length) return items.join(\"\\n\\n\") + \"\\n\\n\\u4EE5\\u4E0A\\u662F\\u5426\\u6B63\\u78BA\\u3002\";\n    return `\\u5DF2\\u6536\\u5230\\uFF1A${current}\n\n\\u8ACB\\u88DC\\u5145\\u8A2D\\u5099\\u7DE8\\u865F\\u3001\\u7DAD\\u4FEE\\u9805\\u76EE\\u53CA\\u6578\\u91CF\\u3002`;\n  }\n  if (/備註/.test(current)) {\n    const records = [\n      ...current.matchAll(\n        /([A-Za-z0-9][A-Za-z0-9_/-]*)\\s*[，,。:：]*\\s*SN：(\\d+)\\s*[，,。]*\\s*製造日期：(\\d{4}年\\d{1,2}月\\d{1,2}日)\\s*[，,。]*\\s*電容值：(\\d+(?:\\.\\d+)?MF)/gi\n      )\n    ];\n    if (records.length && records.length === [...current.matchAll(/SN：/g)].length) {\n      const groups = /* @__PURE__ */ new Map();\n      for (const [, part, sn, date, capacitance] of records) {\n        const rows = groups.get(part) || [];\n        rows.push(`SN\\uFF1A${sn} \\u88FD\\u9020\\u65E5\\u671F\\uFF1A${date} \\u96FB\\u5BB9\\u503C\\uFF1A${capacitance}`);\n        groups.set(part, rows);\n      }\n      return [...groups].map(\n        ([part, rows]) => `${part}\\u6709${rows.length === 2 ? \"\\u5169\" : rows.length}\\u500B\\uFF0C\\u5206\\u5225\\u70BA\n\n${rows.join(\"\\n\\n\")}`\n      ).join(\"\\n\\n\") + \"\\n\\n\\u4EE5\\u4E0A\\u662F\\u5426\\u6B63\\u78BA\\u3002\";\n    }\n    return `\\u672C\\u8F2A\\u5099\\u8A3B\\uFF1A\n${current.replace(/^正確[，,\\s]*請幫我備註[：:，,\\s]*/, \"\")}\n\n\\u8ACB\\u78BA\\u8A8D\\u6BCF\\u7B46\\u6599\\u865F\\u3001SN\\u3001\\u88FD\\u9020\\u65E5\\u671F\\u53CA\\u96FB\\u5BB9\\u503C\\u662F\\u5426\\u5B8C\\u6574\\u3002`;\n  }\n  if (/正確/.test(current) && /起機測試正常/.test(current)) {\n    const latest = [...history].reverse().find(\n      (message) => message.role === \"user\" && /回報工單/.test(message.content)\n    );\n    const title = latest && workOrder(latest.content);\n    return title ? `\\u597D\\u7684\\uFF0C\\u5DE5\\u55AE\\uFF1A${title}\\uFF0C\\u5DF2\\u8F38\\u5165\\u5B8C\\u6210\\uFF0C\\u8B1D\\u8B1D\\u3002` : \"\\u8D77\\u6A5F\\u6E2C\\u8A66\\u6B63\\u5E38\\uFF0C\\u5DF2\\u8A18\\u9304\\u3002\\u8ACB\\u63D0\\u4F9B\\u5DE5\\u55AE\\u540D\\u7A31\\u4EE5\\u5B8C\\u6210\\u56DE\\u5831\\u3002\";\n  }\n  return void 0;\n}\n\nconst report = [...context.user_transcripts].reverse().find(t => /回報工單/.test(t));\nreturn JSON.stringify({sessionId:context.sessionId,status:'conversation_draft',workOrder:report ? workOrder(report) : null,reportedTurns:context.user_transcripts,persisted:false});"
+      }
+    },
+    {
+      "id": "read_back_maintenance",
+      "name": "read_back_maintenance",
+      "type": "@n8n/n8n-nodes-langchain.toolCode",
+      "typeVersion": 1.1,
+      "position": [
+        600,
+        240
+      ],
+      "parameters": {
+        "name": "read_back_maintenance",
+        "description": "Read back the equipment, maintenance items and quantities in the current ASR report, then ask 以上是否正確。 Do not complete the report.",
+        "language": "javaScript",
+        "specifyInputSchema": true,
+        "schemaType": "manual",
+        "inputSchema": "{\"type\":\"object\",\"properties\":{\"context\":{\"type\":\"object\",\"description\":\"Real call context automatically attached by the audio.cpp MCP client.\",\"properties\":{\"sessionId\":{\"type\":\"string\"},\"current\":{\"type\":\"string\"},\"user_transcripts\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}}},\"required\":[\"sessionId\",\"current\",\"user_transcripts\"],\"additionalProperties\":false}},\"required\":[\"context\"],\"additionalProperties\":false}",
+        "jsCode": "const context = query.context;\nif (!context || typeof context.current !== 'string' || !Array.isArray(context.user_transcripts) || !context.user_transcripts.every(t => typeof t === 'string')) throw new Error('ASR context is required');\nconst history = context.user_transcripts.map(content => ({role:'user',content}));\nfunction workOrder(text) {\n  if (!/回報工單/.test(text)) return;\n  const header = text.split(\"\\n\")[0];\n  return header.match(\n    /([A-Za-z0-9][A-Za-z0-9_/-]*\\s+VFD[^。\\n]*?(?:備品與維修|維修))/i\n  )?.[1];\n}\nfunction maintenanceReply(current, history) {\n  if (/回報工單/.test(current)) {\n    const items = current.split(\"\\n\").filter((line) => /五年一維/.test(line));\n    if (items.length) return items.join(\"\\n\\n\") + \"\\n\\n\\u4EE5\\u4E0A\\u662F\\u5426\\u6B63\\u78BA\\u3002\";\n    return `\\u5DF2\\u6536\\u5230\\uFF1A${current}\n\n\\u8ACB\\u88DC\\u5145\\u8A2D\\u5099\\u7DE8\\u865F\\u3001\\u7DAD\\u4FEE\\u9805\\u76EE\\u53CA\\u6578\\u91CF\\u3002`;\n  }\n  if (/備註/.test(current)) {\n    const records = [\n      ...current.matchAll(\n        /([A-Za-z0-9][A-Za-z0-9_/-]*)\\s*[，,。:：]*\\s*SN：(\\d+)\\s*[，,。]*\\s*製造日期：(\\d{4}年\\d{1,2}月\\d{1,2}日)\\s*[，,。]*\\s*電容值：(\\d+(?:\\.\\d+)?MF)/gi\n      )\n    ];\n    if (records.length && records.length === [...current.matchAll(/SN：/g)].length) {\n      const groups = /* @__PURE__ */ new Map();\n      for (const [, part, sn, date, capacitance] of records) {\n        const rows = groups.get(part) || [];\n        rows.push(`SN\\uFF1A${sn} \\u88FD\\u9020\\u65E5\\u671F\\uFF1A${date} \\u96FB\\u5BB9\\u503C\\uFF1A${capacitance}`);\n        groups.set(part, rows);\n      }\n      return [...groups].map(\n        ([part, rows]) => `${part}\\u6709${rows.length === 2 ? \"\\u5169\" : rows.length}\\u500B\\uFF0C\\u5206\\u5225\\u70BA\n\n${rows.join(\"\\n\\n\")}`\n      ).join(\"\\n\\n\") + \"\\n\\n\\u4EE5\\u4E0A\\u662F\\u5426\\u6B63\\u78BA\\u3002\";\n    }\n    return `\\u672C\\u8F2A\\u5099\\u8A3B\\uFF1A\n${current.replace(/^正確[，,\\s]*請幫我備註[：:，,\\s]*/, \"\")}\n\n\\u8ACB\\u78BA\\u8A8D\\u6BCF\\u7B46\\u6599\\u865F\\u3001SN\\u3001\\u88FD\\u9020\\u65E5\\u671F\\u53CA\\u96FB\\u5BB9\\u503C\\u662F\\u5426\\u5B8C\\u6574\\u3002`;\n  }\n  if (/正確/.test(current) && /起機測試正常/.test(current)) {\n    const latest = [...history].reverse().find(\n      (message) => message.role === \"user\" && /回報工單/.test(message.content)\n    );\n    const title = latest && workOrder(latest.content);\n    return title ? `\\u597D\\u7684\\uFF0C\\u5DE5\\u55AE\\uFF1A${title}\\uFF0C\\u5DF2\\u8F38\\u5165\\u5B8C\\u6210\\uFF0C\\u8B1D\\u8B1D\\u3002` : \"\\u8D77\\u6A5F\\u6E2C\\u8A66\\u6B63\\u5E38\\uFF0C\\u5DF2\\u8A18\\u9304\\u3002\\u8ACB\\u63D0\\u4F9B\\u5DE5\\u55AE\\u540D\\u7A31\\u4EE5\\u5B8C\\u6210\\u56DE\\u5831\\u3002\";\n  }\n  return void 0;\n}\n\nif (!/回報工單/.test(context.current)) throw new Error('Current transcript is not a maintenance report');\nreturn JSON.stringify({proposed_reply:maintenanceReply(context.current,history),status:'awaiting_maintenance_confirmation',persisted:false});"
+      }
+    },
+    {
+      "id": "read_back_notes",
+      "name": "read_back_notes",
+      "type": "@n8n/n8n-nodes-langchain.toolCode",
+      "typeVersion": 1.1,
+      "position": [
+        900,
+        240
+      ],
+      "parameters": {
+        "name": "read_back_notes",
+        "description": "Read back the current notes, preserving each part/SN/manufacturing-date/capacitance pairing, then ask 以上是否正確。",
+        "language": "javaScript",
+        "specifyInputSchema": true,
+        "schemaType": "manual",
+        "inputSchema": "{\"type\":\"object\",\"properties\":{\"context\":{\"type\":\"object\",\"description\":\"Real call context automatically attached by the audio.cpp MCP client.\",\"properties\":{\"sessionId\":{\"type\":\"string\"},\"current\":{\"type\":\"string\"},\"user_transcripts\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}}},\"required\":[\"sessionId\",\"current\",\"user_transcripts\"],\"additionalProperties\":false}},\"required\":[\"context\"],\"additionalProperties\":false}",
+        "jsCode": "const context = query.context;\nif (!context || typeof context.current !== 'string' || !Array.isArray(context.user_transcripts) || !context.user_transcripts.every(t => typeof t === 'string')) throw new Error('ASR context is required');\nconst history = context.user_transcripts.map(content => ({role:'user',content}));\nfunction workOrder(text) {\n  if (!/回報工單/.test(text)) return;\n  const header = text.split(\"\\n\")[0];\n  return header.match(\n    /([A-Za-z0-9][A-Za-z0-9_/-]*\\s+VFD[^。\\n]*?(?:備品與維修|維修))/i\n  )?.[1];\n}\nfunction maintenanceReply(current, history) {\n  if (/回報工單/.test(current)) {\n    const items = current.split(\"\\n\").filter((line) => /五年一維/.test(line));\n    if (items.length) return items.join(\"\\n\\n\") + \"\\n\\n\\u4EE5\\u4E0A\\u662F\\u5426\\u6B63\\u78BA\\u3002\";\n    return `\\u5DF2\\u6536\\u5230\\uFF1A${current}\n\n\\u8ACB\\u88DC\\u5145\\u8A2D\\u5099\\u7DE8\\u865F\\u3001\\u7DAD\\u4FEE\\u9805\\u76EE\\u53CA\\u6578\\u91CF\\u3002`;\n  }\n  if (/備註/.test(current)) {\n    const records = [\n      ...current.matchAll(\n        /([A-Za-z0-9][A-Za-z0-9_/-]*)\\s*[，,。:：]*\\s*SN：(\\d+)\\s*[，,。]*\\s*製造日期：(\\d{4}年\\d{1,2}月\\d{1,2}日)\\s*[，,。]*\\s*電容值：(\\d+(?:\\.\\d+)?MF)/gi\n      )\n    ];\n    if (records.length && records.length === [...current.matchAll(/SN：/g)].length) {\n      const groups = /* @__PURE__ */ new Map();\n      for (const [, part, sn, date, capacitance] of records) {\n        const rows = groups.get(part) || [];\n        rows.push(`SN\\uFF1A${sn} \\u88FD\\u9020\\u65E5\\u671F\\uFF1A${date} \\u96FB\\u5BB9\\u503C\\uFF1A${capacitance}`);\n        groups.set(part, rows);\n      }\n      return [...groups].map(\n        ([part, rows]) => `${part}\\u6709${rows.length === 2 ? \"\\u5169\" : rows.length}\\u500B\\uFF0C\\u5206\\u5225\\u70BA\n\n${rows.join(\"\\n\\n\")}`\n      ).join(\"\\n\\n\") + \"\\n\\n\\u4EE5\\u4E0A\\u662F\\u5426\\u6B63\\u78BA\\u3002\";\n    }\n    return `\\u672C\\u8F2A\\u5099\\u8A3B\\uFF1A\n${current.replace(/^正確[，,\\s]*請幫我備註[：:，,\\s]*/, \"\")}\n\n\\u8ACB\\u78BA\\u8A8D\\u6BCF\\u7B46\\u6599\\u865F\\u3001SN\\u3001\\u88FD\\u9020\\u65E5\\u671F\\u53CA\\u96FB\\u5BB9\\u503C\\u662F\\u5426\\u5B8C\\u6574\\u3002`;\n  }\n  if (/正確/.test(current) && /起機測試正常/.test(current)) {\n    const latest = [...history].reverse().find(\n      (message) => message.role === \"user\" && /回報工單/.test(message.content)\n    );\n    const title = latest && workOrder(latest.content);\n    return title ? `\\u597D\\u7684\\uFF0C\\u5DE5\\u55AE\\uFF1A${title}\\uFF0C\\u5DF2\\u8F38\\u5165\\u5B8C\\u6210\\uFF0C\\u8B1D\\u8B1D\\u3002` : \"\\u8D77\\u6A5F\\u6E2C\\u8A66\\u6B63\\u5E38\\uFF0C\\u5DF2\\u8A18\\u9304\\u3002\\u8ACB\\u63D0\\u4F9B\\u5DE5\\u55AE\\u540D\\u7A31\\u4EE5\\u5B8C\\u6210\\u56DE\\u5831\\u3002\";\n  }\n  return void 0;\n}\n\nif (!/備註/.test(context.current)) throw new Error('Current transcript contains no new notes');\nreturn JSON.stringify({proposed_reply:maintenanceReply(context.current,history),status:'awaiting_notes_confirmation',persisted:false});"
+      }
+    },
+    {
+      "id": "confirm_startup_test",
+      "name": "confirm_startup_test",
+      "type": "@n8n/n8n-nodes-langchain.toolCode",
+      "typeVersion": 1.1,
+      "position": [
+        1200,
+        240
+      ],
+      "parameters": {
+        "name": "confirm_startup_test",
+        "description": "Finish the simulated report only when the current user confirms 起機測試正常. Uses the actual reported work-order title.",
+        "language": "javaScript",
+        "specifyInputSchema": true,
+        "schemaType": "manual",
+        "inputSchema": "{\"type\":\"object\",\"properties\":{\"context\":{\"type\":\"object\",\"description\":\"Real call context automatically attached by the audio.cpp MCP client.\",\"properties\":{\"sessionId\":{\"type\":\"string\"},\"current\":{\"type\":\"string\"},\"user_transcripts\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}}},\"required\":[\"sessionId\",\"current\",\"user_transcripts\"],\"additionalProperties\":false}},\"required\":[\"context\"],\"additionalProperties\":false}",
+        "jsCode": "const context = query.context;\nif (!context || typeof context.current !== 'string' || !Array.isArray(context.user_transcripts) || !context.user_transcripts.every(t => typeof t === 'string')) throw new Error('ASR context is required');\nconst history = context.user_transcripts.map(content => ({role:'user',content}));\nfunction workOrder(text) {\n  if (!/回報工單/.test(text)) return;\n  const header = text.split(\"\\n\")[0];\n  return header.match(\n    /([A-Za-z0-9][A-Za-z0-9_/-]*\\s+VFD[^。\\n]*?(?:備品與維修|維修))/i\n  )?.[1];\n}\nfunction maintenanceReply(current, history) {\n  if (/回報工單/.test(current)) {\n    const items = current.split(\"\\n\").filter((line) => /五年一維/.test(line));\n    if (items.length) return items.join(\"\\n\\n\") + \"\\n\\n\\u4EE5\\u4E0A\\u662F\\u5426\\u6B63\\u78BA\\u3002\";\n    return `\\u5DF2\\u6536\\u5230\\uFF1A${current}\n\n\\u8ACB\\u88DC\\u5145\\u8A2D\\u5099\\u7DE8\\u865F\\u3001\\u7DAD\\u4FEE\\u9805\\u76EE\\u53CA\\u6578\\u91CF\\u3002`;\n  }\n  if (/備註/.test(current)) {\n    const records = [\n      ...current.matchAll(\n        /([A-Za-z0-9][A-Za-z0-9_/-]*)\\s*[，,。:：]*\\s*SN：(\\d+)\\s*[，,。]*\\s*製造日期：(\\d{4}年\\d{1,2}月\\d{1,2}日)\\s*[，,。]*\\s*電容值：(\\d+(?:\\.\\d+)?MF)/gi\n      )\n    ];\n    if (records.length && records.length === [...current.matchAll(/SN：/g)].length) {\n      const groups = /* @__PURE__ */ new Map();\n      for (const [, part, sn, date, capacitance] of records) {\n        const rows = groups.get(part) || [];\n        rows.push(`SN\\uFF1A${sn} \\u88FD\\u9020\\u65E5\\u671F\\uFF1A${date} \\u96FB\\u5BB9\\u503C\\uFF1A${capacitance}`);\n        groups.set(part, rows);\n      }\n      return [...groups].map(\n        ([part, rows]) => `${part}\\u6709${rows.length === 2 ? \"\\u5169\" : rows.length}\\u500B\\uFF0C\\u5206\\u5225\\u70BA\n\n${rows.join(\"\\n\\n\")}`\n      ).join(\"\\n\\n\") + \"\\n\\n\\u4EE5\\u4E0A\\u662F\\u5426\\u6B63\\u78BA\\u3002\";\n    }\n    return `\\u672C\\u8F2A\\u5099\\u8A3B\\uFF1A\n${current.replace(/^正確[，,\\s]*請幫我備註[：:，,\\s]*/, \"\")}\n\n\\u8ACB\\u78BA\\u8A8D\\u6BCF\\u7B46\\u6599\\u865F\\u3001SN\\u3001\\u88FD\\u9020\\u65E5\\u671F\\u53CA\\u96FB\\u5BB9\\u503C\\u662F\\u5426\\u5B8C\\u6574\\u3002`;\n  }\n  if (/正確/.test(current) && /起機測試正常/.test(current)) {\n    const latest = [...history].reverse().find(\n      (message) => message.role === \"user\" && /回報工單/.test(message.content)\n    );\n    const title = latest && workOrder(latest.content);\n    return title ? `\\u597D\\u7684\\uFF0C\\u5DE5\\u55AE\\uFF1A${title}\\uFF0C\\u5DF2\\u8F38\\u5165\\u5B8C\\u6210\\uFF0C\\u8B1D\\u8B1D\\u3002` : \"\\u8D77\\u6A5F\\u6E2C\\u8A66\\u6B63\\u5E38\\uFF0C\\u5DF2\\u8A18\\u9304\\u3002\\u8ACB\\u63D0\\u4F9B\\u5DE5\\u55AE\\u540D\\u7A31\\u4EE5\\u5B8C\\u6210\\u56DE\\u5831\\u3002\";\n  }\n  return void 0;\n}\n\nif (/不正確|不對|有誤|錯誤|尚未確認|未確認/.test(context.current) || !/正確/.test(context.current) || !/起機測試正常/.test(context.current)) throw new Error('User has not confirmed a normal startup test');\nconst proposed_reply = maintenanceReply(context.current,history);\nreturn JSON.stringify({proposed_reply,status:proposed_reply.includes('已輸入完成')?'simulated_complete':'missing_work_order',persisted:false});"
+      }
+    },
+    {
+      "id": "maintenance-mcp-notes",
+      "name": "MCP setup",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        -400
+      ],
+      "parameters": {
+        "width": 1300,
+        "height": 280,
+        "content": "## Voice assistant → local LLM → n8n MCP tools\nPublish this workflow. Production MCP URL: http://192.168.5.151:5678/mcp/ivr-maintenance\nThe demo uses the same-origin proxy: /n8n/mcp/ivr-maintenance\nlookup_maintenance_guidance calls IVR Maintenance Knowledge · RAG Tool; configure its Local Embeddings credential (imported automatically).\nCode tools use JavaScript. ASR context is attached by audio.cpp, not generated by the LLM. Reports are simulated drafts reconstructed from conversation history; no external ticket is written. Instance-level MCP/OAuth is not needed for this workflow trigger."
+      }
+    }
+  ],
+  "connections": {
+    "lookup_maintenance_guidance": {
+      "ai_tool": [
+        [
+          {
+            "node": "Maintenance MCP Server",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "get_report_draft": {
+      "ai_tool": [
+        [
+          {
+            "node": "Maintenance MCP Server",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "read_back_maintenance": {
+      "ai_tool": [
+        [
+          {
+            "node": "Maintenance MCP Server",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "read_back_notes": {
+      "ai_tool": [
+        [
+          {
+            "node": "Maintenance MCP Server",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "confirm_startup_test": {
+      "ai_tool": [
+        [
+          {
+            "node": "Maintenance MCP Server",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "executionTimeout": 180
+  },
+  "pinData": {},
+  "tags": []
+}

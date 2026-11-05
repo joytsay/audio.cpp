@@ -28,6 +28,7 @@ services:
     ports:
       - "8081:8081"
       - "8082:8082"
+      - "8084:8084"
     environment:
       SIP_SETTINGS_DIR: /app/sip-data
       NVIDIA_VISIBLE_DEVICES: all
@@ -40,6 +41,7 @@ services:
       LLAMA_CTX_SIZE: ${LLAMA_CTX_SIZE:-4096}
       LLAMA_GPU_LAYERS: 99
       RAG_EMBEDDING_MODEL: Qwen/Qwen3-Embedding-0.6B-GGUF:Q8_0
+      RAG_EMBEDDING_HOST: 0.0.0.0
       RAG_EMBEDDING_CTX_SIZE: 4096
       RAG_EMBEDDING_GPU_LAYERS: 99
     volumes:
@@ -103,6 +105,33 @@ services:
       - audiocpp-https-data:/data
       - audiocpp-https-config:/config
     restart: unless-stopped
+
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:${N8N_VERSION:-2.46.6}
+    container_name: ivr-n8n
+    init: true
+    entrypoint: ["/bin/sh", "/templates/start-n8n.sh"]
+    restart: unless-stopped
+    ports:
+      - "${N8N_PORT:-5678}:5678"
+    environment:
+      TZ: Asia/Taipei
+      GENERIC_TIMEZONE: Asia/Taipei
+      N8N_SECURE_COOKIE: "false"
+      N8N_DIAGNOSTICS_ENABLED: "false"
+      N8N_PERSONALIZATION_ENABLED: "false"
+      N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: "true"
+      N8N_PROXY_HOPS: 1
+      N8N_EDITOR_BASE_URL: http://${AUDIOCPP_HTTPS_HOST:-192.168.5.151}:${N8N_PORT:-5678}/
+      N8N_WEBHOOK_URL: https://${AUDIOCPP_HTTPS_HOST:-192.168.5.151}:${AUDIOCPP_HTTPS_PORT:-8083}/n8n/
+    volumes:
+      - audiocpp-n8n-data:/home/node/.n8n
+      - ./n8n:/templates:ro
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:5678/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
 
   # Setup uses the CPU-only SIP image. No host C++ installation is necessary.
   sip-setup:
@@ -210,3 +239,4 @@ volumes:
   audiocpp-sip-data:
   audiocpp-https-data:
   audiocpp-https-config:
+  audiocpp-n8n-data:

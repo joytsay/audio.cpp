@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import { installMcpFixture } from "./mcp-browser-fixture.mjs";
 import { createRequire } from "node:module";
 import path from "node:path";
 const require = createRequire(
@@ -393,6 +395,29 @@ const { chromium } = require("playwright");
   assert.ok(await page.locator('link[rel="icon"]').getAttribute("href"));
 
   await page.getByLabel("LLM", { exact: true }).selectOption(llmId);
+  if (process.env.UI_MCP_ONLY === "1") {
+    const fixture = await installMcpFixture(page);
+    await page.getByRole('switch', {name:'Enable ASR',exact:true}).uncheck();
+    await page.getByLabel('Scenario',{exact:true}).selectOption('maintenance-audio');
+    await page.getByLabel('Dialogue source',{exact:true}).selectOption('n8n');
+    await page.getByRole('button',{name:'Start call',exact:true}).click();
+    const turns=JSON.parse(fs.readFileSync(new URL('../../../examples/docker/agx-one-container/n8n/scenario-1-turns.json',import.meta.url)));
+    for (const [turnIndex, turn] of turns.entries()) {
+      await page.getByLabel('Message',{exact:true}).fill(turn.text);
+      await page.getByRole('button',{name:'Send message',exact:true}).click();
+      await page.waitForFunction(expected=>document.querySelector('.transcript article:not(.user):last-child p')?.textContent===expected, turn.expected.replace('有兩個','有2個'));
+      await page.waitForFunction(expected=>[...document.querySelectorAll('.event-scroll td')].filter(cell=>cell.textContent==='TURN_COMPLETED').length>=expected, turnIndex+1);
+    }
+    assert.equal(fixture.calls.length,6);
+    assert.equal(fixture.completions.length,9);
+    assert.ok(requests.some(r=>r.path==='/v1/audio/speech'&&r.body.input.includes('已輸入完成')));
+    assert.ok(await page.getByText('MCP_TOOL_COMPLETED',{exact:true}).count());
+    assert.deepEqual(errors,[]);
+    await browser.close();
+    console.log('PASS browser voice assistant: local LLM → MCP discovery/tools → three maintenance replies → TTS and tool events');
+    return;
+  }
+
   assert.equal(
     await page
       .locator(".brand")
@@ -1374,7 +1399,7 @@ const { chromium } = require("playwright");
   ];
   const expectedReplies = [
     "F15P1H4K-GEX-EF-03 五年一維，更換強排FAN 2個、間面FAN 6個。\n\nF15P1H4K-GEX-EF-04 五年一維，更換強排FAN 2個、間面FAN 4個。\n\n以上是否正確。",
-    "20BD156AOAANNCU有兩個，分別為\n\nSN：14778725 製造日期：2010年12月3日 電容值：6460MF\n\nSN：14865412 製造日期：2010年12月15日 電容值：6780MF\n\n以上是否正確。",
+    "20BD156AOAANNCU有2個，分別為\n\nSN：14778725 製造日期：2010年12月3日 電容值：6460MF\n\nSN：14865412 製造日期：2010年12月15日 電容值：6780MF\n\n以上是否正確。",
     "好的，工單：F15P1/2_ME VFD備品與維修，已輸入完成，謝謝。",
   ];
   for (let turn = 0; turn < rawTurns.length; turn++) {
@@ -1430,6 +1455,23 @@ const { chromium } = require("playwright");
   transcriptionText = "語音測試";
   replyText = "您好，請問需要什麼協助？";
   await page.getByRole("button", { name: "Hang up", exact: true }).click();
+  // The local LLM calls n8n MCP tools, then generates the final voice reply.
+  const workflowReply = "n8n 工作流程回覆：以上是否正確。";
+  const mcpFixture = await installMcpFixture(page, workflowReply);
+  await page.getByLabel('Dialogue source', {exact:true}).selectOption('n8n');
+  transcriptionText = rawTurns[0];
+  const n8nOffset = requests.length;
+  await page.getByRole('button', {name:'Send audio',exact:true}).click();
+  await page.getByText('Scenario 2 complete',{exact:true}).waitFor({timeout:90000});
+  assert.equal(await page.locator('.transcript article:not(.user) p').last().textContent(), workflowReply);
+  const boundContext = mcpFixture.calls.at(-1).arguments.context;
+  assert.ok(boundContext.current.includes('F15P1H4K-GEX-EF-03'));
+  assert.equal(boundContext.user_transcripts.at(-1), boundContext.current);
+  assert.ok(boundContext.sessionId);
+  assert.ok(mcpFixture.completions.length >= 3);
+  await page.getByRole('button',{name:'Hang up',exact:true}).click();
+  await page.getByLabel('Dialogue source',{exact:true}).selectOption('prompt.csv');
+  transcriptionText = "語音測試";
   await page.getByLabel("ASR hotwords / context").fill("X光機");
   await page.getByLabel("Scenario", { exact: true }).selectOption("audio");
   await page.getByText("No audio selected", { exact: true }).waitFor();

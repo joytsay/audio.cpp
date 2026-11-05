@@ -14,6 +14,19 @@ https://{$AUDIOCPP_HTTPS_HOST:192.168.5.151}:443 {
 		reverse_proxy host.docker.internal:8088
 	}
 
+	# Only production webhooks use this prefix. Open the editor on port 5678.
+	handle /n8n/mcp/* {
+		uri strip_prefix /n8n
+		reverse_proxy n8n:5678 {
+			flush_interval -1
+		}
+	}
+
+	handle /n8n/webhook/* {
+		uri strip_prefix /n8n
+		reverse_proxy n8n:5678
+	}
+
 	# Keep llama.cpp requests on the same HTTPS origin, including router APIs.
 	handle_path /llm/* {
 		reverse_proxy voice-ai:8082

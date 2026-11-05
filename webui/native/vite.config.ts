@@ -5,6 +5,7 @@ export default defineConfig({
   plugins: [sveltekit()],
   server: {
     proxy: {
+      '/n8n': { target: 'http://127.0.0.1:5678', rewrite: path => path.replace(/^\/n8n/, '') },
       '/health': 'http://127.0.0.1:8080',
       '/v1': 'http://127.0.0.1:8080'
     }

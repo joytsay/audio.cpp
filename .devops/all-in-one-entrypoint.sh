@@ -39,7 +39,7 @@ fi
 echo "[all-in-one] starting llama.cpp embedding worker: $rag_embedding_model"
 LD_LIBRARY_PATH="/opt/llama.cpp${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" \
 /opt/llama.cpp/llama-server \
-    --host 127.0.0.1 \
+    --host "${RAG_EMBEDDING_HOST:-127.0.0.1}" \
     --port "$rag_embedding_port" \
     -hf "$rag_embedding_model" \
     --embedding \
