@@ -513,3 +513,9 @@ temporary server registration was lost on restart. Missing models or deleted voi
 than replaced silently. The directory bind mount preserves settings across
 container rebuilds; generated YAML is excluded from Git and image build contexts.
 Local panel sizes and event history remain browser preferences.
+
+The demo shows the assistant waveform on the left and microphone/caller waveform
+on the right. Use the panel buttons to hide the settings sidebar, Session,
+Events, or Scenarios. Restore buttons stay in the Console header. Hiding panels
+does not stop calls or scenario playback; shown/hidden state is remembered in
+the browser alongside panel sizes.

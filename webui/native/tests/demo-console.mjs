@@ -1121,6 +1121,15 @@ const { chromium } = require("playwright");
     .getByRole("button", { name: "Play all 5 examples", exact: true })
     .click();
   await page
+    .getByRole("button", { name: "Hide scenarios", exact: true })
+    .click();
+  await page.getByRole("button", { name: "Hide events", exact: true }).click();
+  assert.equal(await page.locator("#demo-scenarios").isVisible(), false);
+  await page
+    .getByRole("button", { name: "Show scenarios", exact: true })
+    .click();
+  await page.getByRole("button", { name: "Show events", exact: true }).click();
+  await page
     .getByText("All 5 examples complete", { exact: true })
     .waitFor({ timeout: 90000 });
   checkingAudioHighlights = false;

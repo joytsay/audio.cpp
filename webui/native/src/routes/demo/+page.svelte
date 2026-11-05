@@ -13,7 +13,20 @@
     type DemoSettings,
     type AudioStage,
   } from "$lib/demo-settings";
-  import { Mic, MicOff, Phone, PhoneOff, Send, Trash2 } from "@lucide/svelte";
+  import {
+    Mic,
+    MicOff,
+    Phone,
+    PhoneOff,
+    Send,
+    Trash2,
+    PanelLeftClose,
+    PanelLeftOpen,
+    PanelRightOpen,
+    PanelBottomOpen,
+    ListMusic,
+    EyeOff,
+  } from "@lucide/svelte";
   import logo from "../../../static/logo_cloud.svg?raw";
   import "../../app.css";
   import { browserDecodeToWav, encodePcm16Wav } from "$lib/audio";
@@ -309,6 +322,40 @@
     } catch {
       /* Keep a generic header when host information is unavailable. */
     }
+  }
+  type DemoPanel = "settings" | "session" | "events" | "scenarios";
+  let visiblePanels: Record<DemoPanel, boolean> = {
+    settings: true,
+    session: true,
+    events: true,
+    scenarios: true,
+  };
+  function restorePanelVisibility() {
+    visiblePanels = { ...visiblePanels, session: window.innerWidth > 1050 };
+    try {
+      const saved = JSON.parse(
+        localStorage.getItem("geovision.demo.panel-visibility") || "{}",
+      );
+      for (const name of Object.keys(visiblePanels) as DemoPanel[])
+        if (typeof saved[name] === "boolean") visiblePanels[name] = saved[name];
+      visiblePanels = { ...visiblePanels };
+    } catch {}
+  }
+  async function togglePanel(name: DemoPanel) {
+    const visible = !visiblePanels[name];
+    visiblePanels = { ...visiblePanels, [name]: visible };
+    try {
+      localStorage.setItem(
+        "geovision.demo.panel-visibility",
+        JSON.stringify(visiblePanels),
+      );
+    } catch {}
+    await tick();
+    const control =
+      name === "settings" || !visible
+        ? `[data-panel-toggle="${name}"]`
+        : `[data-hide-panel="${name}"]`;
+    document.querySelector<HTMLButtonElement>(control)?.focus();
   }
   let detailsWidth = 225,
     bottomHeight = 320,
@@ -2324,6 +2371,7 @@
         localStorage.getItem("geovision.demo.tts-streaming") === "true";
     } catch {}
     restorePanelLayout();
+    restorePanelVisibility();
     void loadSystemInfo();
     void initializeSidebar();
     try {
@@ -2373,9 +2421,10 @@
 <div
   class="demo"
   class:resizing-sidebar={resizingSidebar}
+  class:no-settings={!visiblePanels.settings}
   style:--sidebar-width={`${sidebarWidth}px`}
 >
-  <aside id="demo-settings">
+  <aside id="demo-settings" hidden={!visiblePanels.settings}>
     <div class="brand">
       <span class="gv">{@html logo}</span><span>GeoVision IVR</span>
     </div>
@@ -2805,6 +2854,7 @@
   <!-- svelte-ignore a11y_no_noninteractive_tabindex a11y_no_noninteractive_element_interactions -->
   <div
     class="sidebar-divider"
+    hidden={!visiblePanels.settings}
     role="separator"
     aria-label="Resize sidebar"
     aria-controls="demo-settings"
@@ -2834,24 +2884,78 @@
     style:--composer-height={`${composerHeight}px`}
   >
     <header>
-      <div>
+      <div class="console-title">
+        <button
+          class="panel-toggle"
+          aria-label={visiblePanels.settings
+            ? "Hide settings"
+            : "Show settings"}
+          title={visiblePanels.settings ? "Hide settings" : "Show settings"}
+          aria-controls="demo-settings"
+          aria-expanded={visiblePanels.settings}
+          data-panel-toggle="settings"
+          on:click={() => togglePanel("settings")}
+        >
+          {#if visiblePanels.settings}<PanelLeftClose
+              size={17}
+            />{:else}<PanelLeftOpen size={17} />{/if}
+        </button>
         <strong>Console</strong><span
           class="badge"
           title={systemDescription || undefined}
           >LOCAL IVR DEMO{systemModel ? ` on ${systemModel}` : ""}</span
         >
       </div>
-      <div class="connection">
-        <i class:online={connected}></i>{connected
-          ? "CONNECTED"
-          : starting
-            ? "CONNECTING"
-            : "DISCONNECTED"}
+      <div class="header-actions">
+        <div class="panel-restores" aria-label="Hidden panels">
+          {#if !visiblePanels.session}<button
+              class="panel-toggle"
+              aria-label="Show session"
+              title="Show session"
+              aria-controls="demo-session-details"
+              aria-expanded="false"
+              data-panel-toggle="session"
+              on:click={() => togglePanel("session")}
+              ><PanelRightOpen size={17} /></button
+            >{/if}
+          {#if !visiblePanels.events}<button
+              class="panel-toggle"
+              aria-label="Show events"
+              title="Show events"
+              aria-controls="demo-events"
+              aria-expanded="false"
+              data-panel-toggle="events"
+              on:click={() => togglePanel("events")}
+              ><PanelBottomOpen size={17} /></button
+            >{/if}
+          {#if !visiblePanels.scenarios}<button
+              class="panel-toggle"
+              aria-label="Show scenarios"
+              title="Show scenarios"
+              aria-controls="demo-scenarios"
+              aria-expanded="false"
+              data-panel-toggle="scenarios"
+              on:click={() => togglePanel("scenarios")}
+              ><ListMusic size={17} /></button
+            >{/if}
+        </div>
+        <div class="connection">
+          <i class:online={connected}></i>{connected
+            ? "CONNECTED"
+            : starting
+              ? "CONNECTING"
+              : "DISCONNECTED"}
+        </div>
       </div>
     </header>
-    <section class="session">
+    <section class="session" class:no-session={!visiblePanels.session}>
       <div class="conversation">
         <div class="wave-area">
+          <div class="wave-label">ASSISTANT</div>
+          <div class="wave wave-out" aria-label="Live assistant waveform">
+            {#each outputBars as height}<span style:height={`${height}px`}
+              ></span>{/each}
+          </div>
           <div class="wave-label">
             {speaking && playbackRole !== "assistant"
               ? playbackRole === "technician"
@@ -2861,11 +2965,6 @@
           </div>
           <div class="wave wave-in" aria-label="Live microphone waveform">
             {#each inputBars as height}<span style:height={`${height}px`}
-              ></span>{/each}
-          </div>
-          <div class="wave-label">ASSISTANT</div>
-          <div class="wave wave-out" aria-label="Live assistant waveform">
-            {#each outputBars as height}<span style:height={`${height}px`}
               ></span>{/each}
           </div>
         </div>
@@ -2969,7 +3068,7 @@
           {#if error}<p class="error" role="alert">{error}</p>{/if}
         </div>
       </div>
-      <div class="details-resize panel-resize">
+      <div class="details-resize panel-resize" hidden={!visiblePanels.session}>
         <PanelDivider
           label="Resize session details"
           bind:value={detailsWidth}
@@ -2979,8 +3078,25 @@
           oncommit={savePanelLayout}
         />
       </div>
-      <div class="details">
-        <div class="section-label">SESSION</div>
+      <div
+        class="details"
+        id="demo-session-details"
+        role="region"
+        aria-label="Session details"
+        hidden={!visiblePanels.session}
+      >
+        <div class="panel-heading">
+          <button
+            class="panel-toggle"
+            aria-label="Hide session"
+            title="Hide session"
+            aria-controls="demo-session-details"
+            aria-expanded="true"
+            data-hide-panel="session"
+            on:click={() => togglePanel("session")}><EyeOff size={15} /></button
+          >
+          <div class="section-label">SESSION</div>
+        </div>
         <dl>
           <dt>Transport</dt>
           <dd>HTTPS</dd>
@@ -3005,7 +3121,10 @@
         </p>
       </div>
     </section>
-    <div class="bottom-resize panel-resize">
+    <div
+      class="bottom-resize panel-resize"
+      hidden={!visiblePanels.events && !visiblePanels.scenarios}
+    >
       <PanelDivider
         label="Resize bottom panels"
         orientation="horizontal"
@@ -3016,10 +3135,27 @@
         oncommit={savePanelLayout}
       />
     </div>
-    <div class="bottom-panels" data-resize-container>
-      <section class="events">
+    <div
+      class="bottom-panels"
+      class:one-bottom-panel={!visiblePanels.events || !visiblePanels.scenarios}
+      data-resize-container
+      hidden={!visiblePanels.events && !visiblePanels.scenarios}
+    >
+      <section class="events" id="demo-events" hidden={!visiblePanels.events}>
         <div class="events-title">
-          <strong>Events <span>{events.length}</span></strong><button
+          <div class="panel-heading">
+            <button
+              class="panel-toggle"
+              aria-label="Hide events"
+              title="Hide events"
+              aria-controls="demo-events"
+              aria-expanded="true"
+              data-hide-panel="events"
+              on:click={() => togglePanel("events")}
+              ><EyeOff size={15} /></button
+            ><strong>Events <span>{events.length}</span></strong>
+          </div>
+          <button
             on:click={() => {
               events = [];
               localStorage.removeItem(historyKey);
@@ -3054,7 +3190,10 @@
             </p>{/if}
         </div>
       </section>
-      <div class="events-resize panel-resize">
+      <div
+        class="events-resize panel-resize"
+        hidden={!visiblePanels.events || !visiblePanels.scenarios}
+      >
         <PanelDivider
           label="Resize events and scenarios"
           bind:value={eventsShare}
@@ -3064,8 +3203,24 @@
           oncommit={savePanelLayout}
         />
       </div>
-      <section class="scenario-dock" aria-label="Demo scenarios">
-        <div class="scenario-title"><strong>Scenarios</strong></div>
+      <section
+        class="scenario-dock"
+        id="demo-scenarios"
+        aria-label="Demo scenarios"
+        hidden={!visiblePanels.scenarios}
+      >
+        <div class="scenario-title panel-heading">
+          <button
+            class="panel-toggle"
+            aria-label="Hide scenarios"
+            title="Hide scenarios"
+            aria-controls="demo-scenarios"
+            aria-expanded="true"
+            data-hide-panel="scenarios"
+            on:click={() => togglePanel("scenarios")}
+            ><EyeOff size={15} /></button
+          ><strong>Scenarios</strong>
+        </div>
         <div class="scenario-panel">
           <label
             ><select
@@ -3235,6 +3390,56 @@
   .resizing-sidebar {
     user-select: none;
     cursor: col-resize;
+  }
+  .demo [hidden] {
+    display: none !important;
+  }
+  .demo.no-settings {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .session.no-session {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
+    min-height: 320px;
+  }
+  .bottom-panels.one-bottom-panel {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .console-title {
+    display: flex;
+    align-items: center;
+    min-width: 0;
+    flex: 1;
+    gap: 12px;
+  }
+  .console-title strong {
+    flex-shrink: 0;
+  }
+  .header-actions,
+  .panel-restores,
+  .panel-heading {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .header-actions {
+    flex-shrink: 0;
+    gap: 12px;
+  }
+  .panel-restores:empty {
+    display: none;
+  }
+  .demo .panel-toggle {
+    padding: 5px;
+    flex-shrink: 0;
+    min-width: 28px;
+    min-height: 28px;
+    color: var(--muted);
+    background: transparent;
+  }
+  .demo .panel-toggle:hover {
+    color: var(--text);
+    background: var(--button-bg);
   }
   .demo * {
     box-sizing: border-box;
@@ -3478,7 +3683,10 @@
     font-size: 17px;
   }
   .badge {
-    margin-left: 20px;
+    margin-left: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
     color: var(--muted);
     font-size: 9px;
     letter-spacing: 1.5px;
@@ -3967,10 +4175,17 @@
     }
 
     .details {
-      display: none;
+      max-height: 220px;
+      overflow: auto;
     }
     .session {
       grid-template-columns: 1fr;
+      grid-template-rows: minmax(280px, 1fr) auto;
+      min-height: 540px;
+    }
+    .bottom-panels.one-bottom-panel {
+      grid-template-rows: minmax(0, 1fr);
+      height: 260px;
     }
     .demo {
       grid-template-columns: var(--sidebar-width, 290px) minmax(0, 1fr);
