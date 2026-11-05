@@ -34,6 +34,10 @@
   import { recognitionContext } from "$lib/asr-context";
   import { reportedRtf, rtfLabel } from "$lib/response-timing";
   import { normalizeTranscript } from "$lib/transcript";
+  import {
+    maintenanceTranscript,
+    maintenanceReply,
+  } from "$lib/maintenance-report";
   import { uploadWav, pathStatus } from "$lib/api";
   import {
     listVoices,
@@ -1241,7 +1245,11 @@
           },
           signal,
         );
-        text = normalizeTranscript(result.text || "", hotwords).trim();
+        text = (
+          scenarioMode === "audio"
+            ? normalizeTranscript(result.text || "", hotwords)
+            : maintenanceTranscript(result.text || "", hotwords)
+        ).trim();
         if (!text) {
           record(
             "ASR_EMPTY",
@@ -1262,6 +1270,8 @@
           reportedRtf(result),
         );
       }
+      if (scenarioMode !== "audio")
+        text = maintenanceTranscript(text, hotwords);
       if (generation !== epoch) return;
       if (audioMessageId)
         messages = messages.map((message) =>
@@ -1308,7 +1318,17 @@
       }
 
       let reply = text;
-      if (useLlm) {
+      const readback =
+        scenarioMode !== "audio" && useLlm
+          ? maintenanceReply(text, messages)
+          : undefined;
+      if (readback !== undefined) {
+        reply = readback;
+        record(
+          "LLM_SKIPPED",
+          "Maintenance readback assembled from user transcript fields",
+        );
+      } else if (useLlm) {
         status = "Thinking";
         record("AGENT_STATE_CHANGED", "listening → thinking");
         operationStarted = performance.now();

@@ -975,28 +975,29 @@ const { chromium } = require("playwright");
   const scenarioChats = scenarioRequests.filter(
     (r) => r.path === "/llm/v1/chat/completions",
   );
-  assert.equal(scenarioChats.length, 3);
-  assert.deepEqual(
-    scenarioChats.map(
-      (r) => r.body.messages.filter((m) => m.role === "user").length,
-    ),
-    [1, 2, 3],
+  assert.equal(
+    scenarioChats.length,
+    0,
+    "Structured maintenance readbacks do not ask the LLM to invent fields",
   );
+  const maintenanceReplies = await page
+    .locator(".transcript article:not(.user) p")
+    .allTextContents();
   assert.ok(
-    scenarioChats[0].body.messages
-      .at(-1)
-      .content.includes(
+    maintenanceReplies.some((text) =>
+      text.includes(
         "F15P1H4K-GEX-EF-03 五年一維，更換強排FAN 2個、間面FAN 6個。",
       ),
+    ),
   );
   assert.ok(
-    scenarioChats[1].body.messages
-      .at(-1)
-      .content.includes("SN：14865412 製造日期：2010年12月15日 電容值：6780MF"),
+    maintenanceReplies.some((text) =>
+      text.includes("SN：14865412 製造日期：2010年12月15日 電容值：6780MF"),
+    ),
   );
   assert.equal(
-    scenarioChats[2].body.messages.at(-1).content,
-    "正確，起機測試正常。",
+    maintenanceReplies.at(-1),
+    "好的，工單：F15P1/2_ME VFD備品與維修，已輸入完成，謝謝。",
   );
   const technicianCalls = scenarioRequests.filter(
     (r) => r.path === "/v1/audio/speech" && r.body.voice === "wangSG9s",
@@ -1010,7 +1011,7 @@ const { chromium } = require("playwright");
       (r) =>
         r.path === "/v1/audio/speech" &&
         r.body.voice === "lingCLvocals" &&
-        r.body.input === "您好，請問需要什麼協助？",
+        r.body.input.includes("五年一維"),
     ),
   );
   assert.equal(await page.locator("article.user").count(), 3);
@@ -1349,40 +1350,55 @@ const { chromium } = require("playwright");
   );
   assert.deepEqual(await page.evaluate(() => window.cspViolations), []);
   await page.getByRole("button", { name: "Hang up", exact: true }).click();
-  transcriptionText =
-    "我要回報工單，二零二六年六月二日下午十四點，F一五P一二ME，SN一四八六五四一二，電容值六四六零MF。";
-  replyText =
-    "备註：二零BD一五六AOANNANCU，制造日期二零一零年十二月三日，电容值六四六零MF。";
-  await page
-    .getByLabel("ASR hotwords / context")
-    .fill("F15P1/2_ME, 20BD156AOANNANCU");
+  // The model fixture deliberately contains hallucinated sample fields. None
+  // may reach chat or TTS during structured maintenance readback.
+  replyText = "SN：99999999，制造日期2015年1月1日，电容值9999MF。";
+  await page.getByLabel("ASR hotwords / context").fill("");
   await page
     .getByRole("button", { name: "scenario2-3.wav", exact: true })
     .click();
   const normalizationOffset = requests.length;
-  await page.getByRole("button", { name: "Send audio", exact: true }).click();
-  await page
-    .getByText("Scenario 2 complete", { exact: true })
-    .waitFor({ timeout: 90000 });
-  const expectedUser =
-    "我要回報工單，2026年6月2日下午14:00，F15P1/2_ME，SN14865412，電容值6460MF。";
-  const expectedReply =
-    "備註：20BD156AOANNANCU，製造日期2010年12月3日，電容值6460MF。";
+  const rawTurns = [
+    "我要回報工單，二零二六年六月二日下午十四點，臺積電F一五P一二ME VFD備品與維修，F一五P一H四K GEX-EF零三五年一維更換強排，FAN二個界面FAN六個，F一五P一H四K GEX-EF零四五年一維更換強排FAN二個界面FAN四個。",
+    "正確，請幫我備註：二零BD一五六AOAANNCU，SN一四七七八七二五製造日期，二零一零年十二月三日電容值六四六零MF，二零BD一五六AOAANNCU，SN一四八六五四一二製造日期，二零一零年十二月十五日電容值六七八零MF。",
+    "正確起機測試正常。",
+  ];
+  const expectedReplies = [
+    "F15P1H4K-GEX-EF-03 五年一維，更換強排FAN 2個、間面FAN 6個。\n\nF15P1H4K-GEX-EF-04 五年一維，更換強排FAN 2個、間面FAN 4個。\n\n以上是否正確。",
+    "20BD156AOAANNCU有2個，分別為\n\nSN：14778725 製造日期：2010年12月3日 電容值：6460MF\n\nSN：14865412 製造日期：2010年12月15日 電容值：6780MF\n\n以上是否正確。",
+    "好的，工單：F15P1/2_ME VFD備品與維修，已輸入完成，謝謝。",
+  ];
+  for (let turn = 0; turn < rawTurns.length; turn++) {
+    transcriptionText = rawTurns[turn];
+    await page.getByRole("button", { name: "Send audio", exact: true }).click();
+    await page
+      .getByText("Scenario 2 complete", { exact: true })
+      .waitFor({ timeout: 90000 });
+    assert.equal(
+      await page
+        .locator(".transcript article:not(.user) p")
+        .last()
+        .textContent(),
+      expectedReplies[turn],
+    );
+    if (turn === 0) {
+      assert.equal(
+        await page.locator(".transcript article.user p").last().textContent(),
+        "我要回報工單，2026年6月2日下午14:00台積電F15P1/2_ME VFD備品與維修。\nF15P1H4K-GEX-EF-03 五年一維，更換強排FAN 2個、間面FAN 6個。\nF15P1H4K-GEX-EF-04 五年一維，更換強排FAN 2個、間面FAN 4個。",
+      );
+    }
+    if (turn === 1)
+      assert.ok(
+        (
+          await page.locator(".transcript article.user p").last().textContent()
+        ).includes("SN：14865412製造日期：2010年12月15日電容值：6780MF"),
+      );
+  }
   assert.equal(
-    await page.locator(".transcript article.user p").last().textContent(),
-    expectedUser,
-  );
-  assert.equal(
-    await page.locator(".transcript article:not(.user) p").last().textContent(),
-    expectedReply,
-  );
-  const normalizedLlm = requests
-    .slice(normalizationOffset)
-    .find((r) => r.path === "/llm/v1/chat/completions");
-  assert.equal(
-    normalizedLlm.body.messages.filter((m) => m.role === "user").at(-1).content,
-    expectedUser,
-    "LLM receives Arabic numerals and canonical identifiers",
+    requests
+      .slice(normalizationOffset)
+      .filter((r) => r.path === "/llm/v1/chat/completions").length,
+    0,
   );
   assert.ok(
     requests
@@ -1390,10 +1406,17 @@ const { chromium } = require("playwright");
       .some(
         (r) =>
           r.path === "/v1/audio/speech" &&
-          r.body.input ===
-            "備註：二零BD一伍六AOANNANCU，製造日期二零一零年十二月三日，電容值六千四百六十MF。",
+          r.body.input.includes("SN：一四七七八七二伍"),
       ),
-    "TTS receives the Traditional Chinese maintenance readout",
+    "TTS receives the confirmed maintenance readout",
+  );
+  assert.ok(
+    !requests
+      .slice(normalizationOffset)
+      .some(
+        (r) =>
+          r.path === "/v1/audio/speech" && r.body.input.includes("99999999"),
+      ),
   );
   transcriptionText = "語音測試";
   replyText = "您好，請問需要什麼協助？";
