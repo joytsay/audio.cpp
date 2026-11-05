@@ -44,7 +44,7 @@ assert.equal(
 assert.ok(!reply1.includes("SN") && !reply1.includes("製造日期"));
 assert.equal(
   maintenanceReply(text2, history),
-  `20BD156AOAANNCU有2個，分別為
+  `20BD156AOAANNCU有兩個，分別為
 
 SN：14778725 製造日期：2010年12月3日 電容值：6460MF
 

@@ -321,9 +321,14 @@ const { chromium } = require("playwright");
           const facts = JSON.parse(grounding.content.split("維修依據JSON：")[1]);
           assert.equal(facts.current, body.messages.filter(message => message.role === "user").at(-1).content);
           assert.ok(facts.transcripts.includes(facts.current));
-          return replyText.startsWith("SN：99999999")
-            ? facts.readback.replace("以上是否正確。", "請確認以上資料是否正確。")
-            : facts.readback;
+          // Deliberately return unrelated model prose to verify the UI uses
+          // the transcript-derived readback for structured maintenance turns.
+          if (replyText.startsWith('SN：99999999')) return replyText;
+          if (body.messages[0].content.includes('第一輪逐台複誦')) {
+            assert.ok(body.messages[0].content.includes('以上是否正確。'));
+            return facts.readback;
+          }
+          return facts.readback;
         })() } }],
         timings: llmReportsRtf ? { rtf: 0.75 } : { predicted_per_second: 45 },
       };
@@ -1368,8 +1373,8 @@ const { chromium } = require("playwright");
     "正確起機測試正常。",
   ];
   const expectedReplies = [
-    "F15P1H4K-GEX-EF-03 五年一維，更換強排FAN 2個、間面FAN 6個。\n\nF15P1H4K-GEX-EF-04 五年一維，更換強排FAN 2個、間面FAN 4個。\n\n請確認以上資料是否正確。",
-    "20BD156AOAANNCU有2個，分別為\n\nSN：14778725 製造日期：2010年12月3日 電容值：6460MF\n\nSN：14865412 製造日期：2010年12月15日 電容值：6780MF\n\n請確認以上資料是否正確。",
+    "F15P1H4K-GEX-EF-03 五年一維，更換強排FAN 2個、間面FAN 6個。\n\nF15P1H4K-GEX-EF-04 五年一維，更換強排FAN 2個、間面FAN 4個。\n\n以上是否正確。",
+    "20BD156AOAANNCU有兩個，分別為\n\nSN：14778725 製造日期：2010年12月3日 電容值：6460MF\n\nSN：14865412 製造日期：2010年12月15日 電容值：6780MF\n\n以上是否正確。",
     "好的，工單：F15P1/2_ME VFD備品與維修，已輸入完成，謝謝。",
   ];
   for (let turn = 0; turn < rawTurns.length; turn++) {

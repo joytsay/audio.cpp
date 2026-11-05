@@ -79,7 +79,7 @@ export function maintenanceReply(
         [...groups]
           .map(
             ([part, rows]) =>
-              `${part}有${rows.length}個，分別為\n\n${rows.join("\n\n")}`,
+              `${part}有${rows.length === 2 ? "兩" : rows.length}個，分別為\n\n${rows.join("\n\n")}`,
           )
           .join("\n\n") + "\n\n以上是否正確。"
       );

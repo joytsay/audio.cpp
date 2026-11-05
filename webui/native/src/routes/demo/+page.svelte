@@ -1319,6 +1319,8 @@
         scenarioMode !== "audio" && useLlm
           ? maintenanceReply(text, messages)
           : undefined;
+      if (readback !== undefined)
+        record("LLM_TRANSCRIPT_GROUNDED", "Maintenance grounding assembled from user transcript fields");
       if (useLlm) {
         status = "Thinking";
         record("AGENT_STATE_CHANGED", "listening → thinking");
@@ -1344,7 +1346,7 @@
               messages: [
                 {
                   role: "system",
-                  content: options.speakTechnician
+                  content: scenarioMode === "maintenance-audio" || options.speakTechnician
                     ? maintenanceScenarioPrompt
                     : prompt,
                 },
@@ -1367,7 +1369,9 @@
           },
           signal,
         );
-        reply = chatText(response).trim();
+        // Structured maintenance readbacks are authoritative: the model must
+        // not omit reported fields or advance the confirmation flow early.
+        reply = readback ?? chatText(response).trim();
         if (!reply)
           throw new Error("The language model returned an empty reply.");
         if (generation !== epoch) return;
@@ -2421,7 +2425,10 @@
           .map((event) =>
             event.type === "USER_INPUT_TRANSCRIBED"
               ? { ...event, type: "ASR_COMPLETED" }
-              : event,
+              : event.type === "LLM_SKIPPED" &&
+                  event.summary === "Maintenance readback assembled from user transcript fields"
+                ? { ...event, type: "LLM_TRANSCRIPT_GROUNDED" }
+                : event,
           );
     } catch {}
   });
