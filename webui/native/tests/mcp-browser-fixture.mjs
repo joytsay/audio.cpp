@@ -30,7 +30,7 @@ export async function installMcpFixture(page, fixedReply) {
     let message;
     if(results.length>=2) {
       const output=JSON.parse(results.at(-1).content);
-      message={content:fixedReply||JSON.parse(output.content[0].text).proposed_reply};
+      message={content:fixedReply||output.proposed_reply||JSON.parse(output.content[0].text).proposed_reply};
     } else {
       const name=results.length===0?'lookup_maintenance_guidance':/備註/.test(current)?'read_back_notes':/起機測試正常/.test(current)?'confirm_startup_test':'read_back_maintenance';
       message={content:null,tool_calls:[{id:'call_'+results.length,type:'function',function:{name,arguments:JSON.stringify(name==='lookup_maintenance_guidance'?{query:current}:{})}}]};

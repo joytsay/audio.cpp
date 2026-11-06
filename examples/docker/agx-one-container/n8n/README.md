@@ -24,14 +24,15 @@ docker compose up -d --build
 ```
 
 Automatic setup waits for the n8n owner account, then imports the local
-credentials and these two new workflows, preserving any existing edits:
+credentials and these three workflows, preserving any existing edits:
 
 | Workflow | File | Editor |
 |---|---|---|
 | IVR Maintenance Knowledge · RAG Tool | [maintenance-knowledge-rag.json](maintenance-knowledge-rag.json) | `http://192.168.5.151:5678/workflow/ivrMaintenanceKnowledge` |
+| IVR Work Orders · CSD workbook | [work-orders.json](work-orders.json) | `http://192.168.5.151:5678/workflow/ivrWorkOrders` |
 | IVR Maintenance MCP Tools | [maintenance-mcp-tools.json](maintenance-mcp-tools.json) | `http://192.168.5.151:5678/workflow/ivrMaintenanceMcp` |
 
-**Publish both workflows**, then select **n8n** in the demo's Dialogue source
+**Publish all three workflows**, then select **n8n** in the demo's Dialogue source
 and save model settings. Use a local model with tool/function-call support
 and a compatible chat template, for example the configured Qwen2.5 Instruct
 model. Models that omit tool calls or reject the tools API produce a visible
@@ -78,6 +79,7 @@ server-side proxy rather than embedding them in the WebUI bundle.
 | Tool | Behavior |
 |---|---|
 | `lookup_maintenance_guidance` | Calls the RAG subworkflow to retrieve reporting rules. |
+| `list_work_orders` | Returns all dispatch rows from CSD資料庫.xlsx / 派工, with provenance. |
 | `get_report_draft` | Returns the simulated draft reconstructed from this call's user transcripts. |
 | `read_back_maintenance` | Reads back the reported equipment, work, and quantities, ending with `以上是否正確。` |
 | `read_back_notes` | Groups matching parts while preserving each SN/date/capacitance pairing, ending with `以上是否正確。` |
@@ -97,43 +99,98 @@ the user has not confirmed a normal test. The tools return `proposed_reply`
 and state information to the LLM; the final reply still goes through the local
 LLM rather than being replaced by a browser template.
 
-## RAG components
+For work-order listing queries such as `有哪些工單` or the ASR variant
+`有哪些公單`, the client first offers `list_work_orders` when that tool is
+available, falling back to `get_report_draft` only on older workflows. This keeps process-guidance retrieval from
+being mistaken for a work-order database. Workbook inventory and current-call drafts are separate scopes; the reply
+must identify which source was queried.
+If the model initially emits prose instead of a required tool call, the client
+retries once with an explicit tool-use reminder before reporting failure.
 
-The knowledge subworkflow contains:
+## RAG components and file sources
+
+The knowledge workflow reads the actual project-root files:
+
+1. `prompt.csv` — maintenance rules / SOP text.
+2. `情境模擬_20261105.docx` — Word scenario examples, labelled as examples.
+3. `CSD資料庫.xlsx` — every worksheet: 派工、客戶設備、設備類型、通訊錄.
+4. `(備品維修)PY252-0059-工單-20260602-2工-CL、JC.pdf` — the supplied scanned work report.
+
+Ensure all four files also exist in the **AGX project root**. Word/Excel files
+may be ignored by Git, so syncing code alone might not copy them. Compose mounts
+the files read-only into `ivr-knowledge`; it refuses to create substitute
+folders for missing files. Node.js reads Word/Excel and UTF-8 text; Poppler and
+Tesseract provide local Traditional Chinese + English OCR for scanned PDFs.
+No Python service is used. See [local extraction details](../knowledge/README.md).
 
 ```text
-RAG tool input → Prepare guidance → Seed Simple Vector Store → Retrieve guidance → Return guidance
+RAG tool input → Load knowledge files (http://knowledge:8085/documents)
+                      ↓
+                Prepare guidance → Seed Simple Vector Store → Retrieve guidance → Return guidance
                                       ↑ Document Loader        ↑ Local Embeddings
                                       ↑ Recursive Text Splitter
                                       ↑ Local Embeddings
 ```
 
-The **Default Document Loader** loads static reporting guidance, the
-**Recursive Text Splitter** chunks it, and **Local Embeddings** populates the
-built-in **Simple Vector Store**. **Retrieve guidance** performs semantic
-retrieval for the MCP tool's query. A workflow tool connects this subworkflow
-to the MCP Server Trigger.
+The Default Document Loader, Recursive Text Splitter, Local Embeddings, and
+Simple Vector Store remain native n8n components. Extracted text includes file,
+sheet and row identifiers. `Return guidance` includes retrieved passages and
+source metadata, including OCR/scenario-example labels. The existing execution
+`/executions/1` is a historical run; open the editor and inspect a **new** execution
+after deploying and publishing the updated workflow.
 
-Only workflow guidance is indexed. User transcripts are used by maintenance
-tools and as conversational context, not inserted into the shared knowledge
-store. The small demo reseeds static guidance on every RAG call because Simple
-Vector Store is memory-only and loses vectors on restart. n8n's Docker volume
-persists workflows/credentials, not these vectors. For larger document sets,
-separate ingestion and use persistent vector storage. See the
-[official Simple Vector Store docs](https://docs.n8n.io/integrations/builtin/cluster-nodes/root-nodes/n8n-nodes-langchain.vectorstoreinmemory/).
+The supplied PDF is handwritten and has no text layer. OCR was tested, but its
+recognition is incomplete and can misread codes or quantities. Results explicitly
+require checking the original image. DOCX example values must not be used to
+fill missing PDF details or treated as real workbook orders.
+
+On each RAG call, the extractor checks file metadata and reuses unchanged
+extraction (including OCR). Changed files are read again. n8n reloads the corpus
+into its memory-only Simple Vector Store. Consequently in-place edits to source files do not require editing Code nodes
+or rebuilding the image. Office editors often replace files when saving; after
+such saves, run `docker compose up -d --no-deps --force-recreate knowledge` so
+Docker remounts the new files. Changing file mounts also requires recreation. Larger corpora
+should use separate ingestion and persistent vector storage.
+
+For **complete work-order listings**, the `list_work_orders` MCP tool calls the
+`IVR Work Orders · CSD workbook` subworkflow, which reads all rows from `派工`
+through `http://knowledge:8085/work-orders`. The current workbook contains 12
+dispatch rows. This avoids presenting a top-K RAG result as a complete inventory.
+The model receives file/sheet/row provenance. `get_report_draft` continues to
+represent only the current call, not the workbook inventory.
 
 The local embedding model defaults to `Qwen/Qwen3-Embedding-0.6B-GGUF:Q8_0`.
-The prefilled Local Embeddings credential is supplied by
-[local-credentials.json](local-credentials.json), using the non-secret dummy
-key `local`. Change that model/credential if you change the embedding worker.
-The local LLM is called by audio.cpp's existing UI, so its model comes from
-the sidebar rather than a chat-model node inside the MCP workflow.
+Its credential is imported from `local-credentials.json`, using the dummy key
+`local` and local port 8084. The local LLM remains selected in the IVR sidebar.
+
+### Upgrade an existing published workflow
+
+`docker compose up -d --build` starts the extractor and runs automatic setup.
+For the older bundled RAG source and MCP tools, setup backs up the existing
+workflow under `/home/node/.n8n/ivr-backups`, updates only the file-source/tool
+wiring, and preserves embedding credentials and retrieval settings. The new
+work-order subworkflow is imported automatically. **Republish Knowledge and
+MCP Tools, and publish Work Orders** after the migration. Existing custom
+workflows that no longer have the bundled source nodes can be updated manually
+by importing the supplied templates after exporting edits to keep.
+
+Test questions:
+
+- `有哪些工單？` → `list_work_orders`, sourced from CSD's 派工 sheet.
+- `情境模擬文件中的工單回報，確認內容時應該怎麼回答？` → RAG over the Word examples and prompt.
+- `CSD 裡美光 MTB 的設備型號有哪些？` → RAG over the 客戶設備 sheet.
+- `PDF 工單上有哪些維修項目？請註明 OCR 不確定的內容。` → PDF OCR, with uncertainty stated.
+
+Inspect `Load knowledge files` for seven logical documents (prompt, Word, four
+Excel sheets, PDF), `Retrieve guidance` for matching chunks/scores, and
+`Return guidance` for passages/source metadata. Extractor startup/errors appear
+in `docker compose logs knowledge`.
 
 ## Tune and extend
 
 - Edit **Maintenance MCP Server → Instructions** for tool-use guidance. The
   client includes these instructions in the LLM's conversation.
-- Edit **Prepare guidance** in the RAG workflow to change the knowledge text.
+- Edit the four mounted source files to change the knowledge text.
 - Edit Code Tool descriptions and JavaScript to change maintenance behavior.
 - Add tools connected to the MCP Server Trigger's tool connector. The client
   discovers tools on each turn, so published changes appear without a UI rebuild.
@@ -178,3 +235,20 @@ Tests cover JSON/SSE MCP responses, session headers, tool discovery/calls, real
 maintenance tool code, context binding, cancellation, failures, and the local
 LLM/tool/TTS loop in the browser. They use mocked services; publishing and a live
 n8n execution must still be checked on the AGX.
+
+### Editor cannot connect after a Compose update
+
+n8n must keep the `audiocpp-n8n-data:/home/node/.n8n` database mount and the
+`./n8n:/templates:ro` startup/template mount. The four document mounts belong
+only to the `knowledge` service. The n8n editor starts independently of document
+extraction readiness, so a missing document cannot block opening the editor.
+Apply corrected mount/entrypoint settings without rebuilding model servers:
+
+```sh
+docker compose up -d --no-deps --force-recreate n8n
+docker compose ps n8n
+docker logs --tail 30 ivr-n8n
+```
+
+Then open `http://192.168.5.151:5678`. The existing named database volume is
+retained, including the owner account and saved workflows.

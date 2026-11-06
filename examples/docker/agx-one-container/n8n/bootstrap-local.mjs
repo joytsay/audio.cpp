@@ -36,10 +36,55 @@ export async function exists(kind, id, { run = runCli, files = fs } = {}) {
   }
 }
 
-export async function importMissing({ templates = '/templates', run = runCli, has = exists, files = fs, log = console.log } = {}) {
+async function readWorkflow(id, { run, files }) {
+  const dir = await files.mkdtemp(path.join(os.tmpdir(), 'ivr-n8n-workflow-'));
+  try {
+    const output = path.join(dir, 'workflow.json');
+    await run(['export:workflow', `--id=${id}`, `--output=${output}`]);
+    const data = JSON.parse(await files.readFile(output, 'utf8'));
+    const workflow = (Array.isArray(data) ? data : [data]).find(item => item.id === id);
+    if (!workflow) throw new Error('Cannot read the existing knowledge workflow for migration');
+    return workflow;
+  } finally { await files.rm(dir, { recursive: true, force: true }); }
+}
+
+// Upgrade only the bundled source wiring, leaving model credentials and other
+// settings intact. Every migration is backed up and requires republishing.
+export function promptSourceMigration(existing, template) {
+  if (!existing || existing.nodes.some(node => node.id === 'load-knowledge-files')) return null;
+  const prepare = existing.nodes.find(node => node.id === 'prepare-guidance');
+  if (!prepare || !/knowledge:|knowledgeSource/.test(prepare.parameters?.jsCode || '')) return null;
+  const next = structuredClone(existing);
+  next.nodes = next.nodes.filter(node => !['read-prompt-csv','decode-prompt-text'].includes(node.id));
+  next.nodes.find(node => node.id === 'prepare-guidance').parameters.jsCode =
+    template.nodes.find(node => node.id === 'prepare-guidance').parameters.jsCode;
+  next.nodes.push(structuredClone(template.nodes.find(node => node.id === 'load-knowledge-files')));
+  for (const name of ['Read prompt.csv','Decode prompt text']) delete next.connections[name];
+  for (const name of ['RAG tool input','Load knowledge files']) next.connections[name] = structuredClone(template.connections[name]);
+  next.nodes.find(node => node.name === 'Return guidance').parameters.jsCode =
+    template.nodes.find(node => node.name === 'Return guidance').parameters.jsCode;
+  next.settings = {...next.settings, executionTimeout:300};
+  return next;
+}
+
+export function knowledgeToolMigration(existing, template) {
+  if (!existing || existing.nodes.some(node => node.name === 'list_work_orders')) return null;
+  if (!existing.nodes.some(node => node.id === 'maintenance-mcp-trigger')) return null;
+  const next=structuredClone(existing);
+  next.nodes.push(structuredClone(template.nodes.find(node=>node.name==='list_work_orders')));
+  next.connections.list_work_orders=structuredClone(template.connections.list_work_orders);
+  const lookup=next.nodes.find(node=>node.name==='lookup_maintenance_guidance');
+  if(lookup) lookup.parameters.description=template.nodes.find(node=>node.name==='lookup_maintenance_guidance').parameters.description;
+  const trigger=next.nodes.find(node=>node.id==='maintenance-mcp-trigger');
+  trigger.parameters.instructions=(trigger.parameters.instructions || '')+
+    '\nKnowledge sources now include prompt.csv rules, DOCX examples, all CSD workbook sheets and PDF OCR. Use list_work_orders for actual CSD dispatch orders, get_report_draft for the current call only. Do not treat DOCX examples as actual orders; verify OCR values against the PDF.';
+  return next;
+}
+
+export async function importMissing({ templates = '/templates', run = runCli, has = exists, files = fs, log = console.log, read = readWorkflow, backupDir = '/home/node/.n8n/ivr-backups' } = {}) {
   const credentials = JSON.parse(await files.readFile(path.join(templates, 'local-credentials.json'), 'utf8'));
   const workflows = [];
-  for (const name of ['maintenance-knowledge-rag.json', 'maintenance-mcp-tools.json']) {
+  for (const name of ['maintenance-knowledge-rag.json', 'work-orders.json', 'maintenance-mcp-tools.json']) {
     const file = path.join(templates, name);
     workflows.push({ file, data: JSON.parse(await files.readFile(file, 'utf8')) });
   }
@@ -62,6 +107,24 @@ export async function importMissing({ templates = '/templates', run = runCli, ha
     if (!await has('workflow', workflow.data.id, { run, files })) {
       log(`[ivr-n8n] Importing workflow: ${workflow.data.name} (${workflow.data.id}).`);
       await run(['import:workflow', `--input=${workflow.file}`]);
+    } else if (['ivrMaintenanceKnowledge','ivrMaintenanceMcp'].includes(workflow.data.id)) {
+      const existing = await read(workflow.data.id, { run, files });
+      const migrate = workflow.data.id === 'ivrMaintenanceKnowledge' ? promptSourceMigration : knowledgeToolMigration;
+      const next = migrate(existing, workflow.data);
+      if (next) {
+        await files.mkdir(backupDir, { recursive: true });
+        const backup = path.join(backupDir, `${workflow.data.id}-before-files-${Date.now()}.json`);
+        await files.writeFile(backup, JSON.stringify(existing), { mode: 0o600 });
+        const dir = await files.mkdtemp(path.join(os.tmpdir(), 'ivr-rag-upgrade-'));
+        try {
+          const input = path.join(dir, 'workflow.json');
+          await files.writeFile(input, JSON.stringify(next), { mode: 0o600 });
+          await run(['import:workflow', `--input=${input}`]);
+        } finally { await files.rm(dir, { recursive: true, force: true }); }
+        const installed = await read(workflow.data.id, { run, files });
+        if (migrate(installed, workflow.data)) throw new Error('Knowledge files migration did not complete');
+        log(`[ivr-n8n] Updated ${workflow.data.name} for local knowledge files. Previous workflow saved to ${backup}. Republish the updated workflow.`);
+      }
     }
   }
   for (const credential of credentials) {
@@ -97,7 +160,7 @@ export async function bootstrap({
         log('[ivr-n8n] Owner account is ready; checking the n8n database.');
         await install();
         await files.writeFile(marker, 'Scenario 1 and local credentials imported\n', { mode: 0o600 });
-        log('[ivr-n8n] Scenario 1 is ready. Existing edits were preserved. Publish /workflow/ivrMaintenanceKnowledge and /workflow/ivrMaintenanceMcp.');
+        log('[ivr-n8n] Scenario 1 is ready. Existing edits were preserved. Publish /workflow/ivrMaintenanceKnowledge, /workflow/ivrWorkOrders and /workflow/ivrMaintenanceMcp.');
         return;
       }
     } catch (error) {

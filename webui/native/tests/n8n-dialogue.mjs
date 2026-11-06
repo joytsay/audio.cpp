@@ -43,6 +43,7 @@ function mock({respond,sseMode=false,errorTool=false,paginate=false}={}) {
       else if(request.method==='tools/list')result=paginate&&!request.params.cursor?{tools:schemas.slice(0,1),nextCursor:'page2'}:{tools:paginate?schemas.slice(1):schemas};
       else if(request.method==='tools/call') {
         if(errorTool)result={isError:true,content:[{type:'text',text:'Tool failed'}]};
+        else if(request.params.name==='list_work_orders')result={content:[{type:'text',text:JSON.stringify({source:'CSD資料庫.xlsx',sheet:'派工',count:1,work_orders:[{row:2,fields:{'派工單號':'YCS-16860'}}]})}]};
         else if(request.params.name==='lookup_maintenance_guidance')result={content:[{type:'text',text:'維修和備註需確認，起機測試正常才完成。'}]};
         else {
           const node=nodes.get(request.params.name);assert.ok(node);
@@ -84,7 +85,21 @@ for(let turn=0;turn<3;turn++) {
 }
 const input={sessionId:'call-B',model:'local-model',text:turns[0].text,messages:[{role:'user',content:turns[0].text}]};
 mock({respond:()=>({content:'No tools used'})});
-await assert.rejects(n8nDialogue(input,signal),/did not call an MCP tool/);assert.equal(closed,1);
+await assert.rejects(n8nDialogue(input,signal),/連續兩次未產生 MCP 工具呼叫/);assert.equal(closed,1);
+assert.equal(llm.length,2,'a missing tool call is retried once, not indefinitely');
+mock({respond:(_body,round)=>round===1?{content:'Please provide a work order'}:round===2?{tool_calls:[call('get_report_draft')]}:{content:'本通話尚無工單草稿，尚未連接外部工單系統。'}});
+assert.equal(await n8nDialogue({...input,text:'我想要知道有哪些公單',messages:[{role:'user',content:'我想要知道有哪些公單'}]},signal),'本通話尚無工單草稿，尚未連接外部工單系統。');
+assert.equal(wire.filter(r=>r.method==='tools/call').length,1);
+assert.equal(llm[0].messages[0].content.includes('list_work_orders 未提供時'),true);
+assert.deepEqual(llm[0].tool_choice,{type:'function',function:{name:'get_report_draft'}});
+assert.deepEqual(llm[0].tools.map(t=>t.function.name),['get_report_draft']);
+schemas.push({name:'list_work_orders',description:'List the actual CSD dispatch sheet',inputSchema:{type:'object',properties:{query:{type:'string'}},required:['query']}});
+mock({respond:(_body,round)=>round===1?{tool_calls:[call('list_work_orders',{query:'有哪些工單'})]}:{content:'CSD資料庫.xlsx／派工：YCS-16860。'}});
+assert.equal(await n8nDialogue({...input,text:'有哪些公單',messages:[{role:'user',content:'有哪些公單'}]},signal),'CSD資料庫.xlsx／派工：YCS-16860。');
+assert.deepEqual(llm[0].tools.map(t=>t.function.name),['list_work_orders']);
+assert.equal(wire.filter(r=>r.method==='tools/call')[0].params.name,'list_work_orders');
+assert.equal(JSON.parse(llm[1].messages.find(m=>m.role==='tool').content).source,'CSD資料庫.xlsx','tool data should not be buried in an escaped MCP envelope');
+schemas.pop();
 mock({respond:()=>({tool_calls:[call('not_advertised')]})});
 await assert.rejects(n8nDialogue(input,signal),/unadvertised/);
 assert.equal(wire.filter(r=>r.method==='tools/call').length,0);
@@ -119,8 +134,19 @@ assert.equal(nodes.get('Maintenance MCP Server').parameters.path,'ivr-maintenanc
 assert.equal(nodes.get('lookup_maintenance_guidance').parameters.workflowId.value,rag.id);
 for(const type of ['documentDefaultDataLoader','textSplitterRecursiveCharacterTextSplitter','embeddingsOpenAi','vectorStoreInMemory'])assert.ok(rag.nodes.some(n=>n.type.endsWith('.'+type)));
 const preparation=rag.nodes.find(n=>n.name==='Prepare guidance').parameters.jsCode;
-const indexed=vm.runInNewContext(`(function(){${preparation}})()`,{$input:{first:()=>({json:{query:'SN 99999999'}})}})[0].json.knowledge;
-assert.ok(!indexed.includes('99999999'));
+const promptText=fs.readFileSync(new URL('../../../prompt.csv',import.meta.url),'utf8');
+const ragQuery='NEVER_INDEX_THIS_QUERY_XYZ';
+const fixtureDocs=[{source:'prompt.csv',text:promptText,kind:'rules',extraction:'utf8'}, {source:'情境模擬_20261105.docx',text:'情境範例',kind:'scenario_examples',extraction:'docx'}, {source:'CSD資料庫.xlsx',sheet:'派工',text:'派工單號：YCS-16860',kind:'workbook_records',extraction:'xlsx'}, {source:'(備品維修)PY252-0059-工單-20260602-2工-CL、JC.pdf',text:'OCR 工單內容需核對',kind:'work_order_document',extraction:'ocr'}];
+const executePreparation=documents=>vm.runInNewContext(`(function(){${preparation}})()`,{$:name=>{assert.equal(name,'RAG tool input');return {first:()=>({json:{query:ragQuery}})};},$input:{first:()=>({json:{documents}})}})[0].json;
+const loaded=executePreparation(fixtureDocs);
+assert.equal(loaded.query,ragQuery);
+assert.equal(loaded.sources.length,4);
+for(const doc of fixtureDocs) assert.ok(loaded.knowledge.includes(doc.source));
+assert.ok(loaded.knowledge.includes('工作表：派工'));
+assert.throws(()=>executePreparation([{...fixtureDocs[0],text:'  '},...fixtureDocs.slice(1)]),/Empty source/);
+assert.throws(()=>executePreparation(fixtureDocs.slice(1)),/Missing knowledge source/);
+assert.equal(rag.nodes.find(n=>n.name==='Load knowledge files').parameters.url,'http://knowledge:8085/documents');
+assert.equal(rag.connections['RAG tool input'].main[0][0].node,'Load knowledge files');
 const completion=nodes.get('confirm_startup_test').parameters.jsCode;
 assert.throws(()=>vm.runInNewContext(`(function(){${completion}})()`,{query:{context:{current:'維修完成',user_transcripts:[]}}}),/not confirmed/);
 assert.throws(()=>vm.runInNewContext(`(function(){${completion}})()`,{query:{context:{current:'不正確，起機測試正常。',user_transcripts:[turns[0].text]}}}),/not confirmed/);

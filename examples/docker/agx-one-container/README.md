@@ -552,9 +552,16 @@ Unrecognized letters in a part number are preserved, not guessed from hotwords.
 ### n8n MCP tools for the voice assistant
 
 Compose includes `ivr-n8n`. `docker compose up -d --build` automatically imports
-the Maintenance MCP Tools workflow, its Simple Vector Store RAG subworkflow, and
+the Maintenance MCP Tools workflow, its file-backed Simple Vector Store RAG
+subworkflow, its CSD work-order listing subworkflow, and
 local credentials after owner-account setup, preserving existing edits. Publish
-both workflows, then select **Dialogue source → n8n** and save model settings.
+all three workflows, then select **Dialogue source → n8n** and save model settings.
 The local LLM discovers and calls n8n tools through MCP, then generates the reply
 for TTS. ASR and TTS stay in audio.cpp. See the
 [n8n MCP setup guide](n8n/README.md) for endpoints, tools, and tuning.
+
+The `ivr-knowledge` extraction container reads project-root `prompt.csv`,
+`情境模擬_20261105.docx`, all worksheets in `CSD資料庫.xlsx`, and the scanned PDF
+`(備品維修)PY252-0059-工單-20260602-2工-CL、JC.pdf`. It uses Node.js and local
+Traditional Chinese/English OCR, with no Python. All source mounts are read-only.
+Ensure these source files are also present on the AGX before starting Compose.
