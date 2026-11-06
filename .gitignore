@@ -58,3 +58,14 @@ docs/FALCON_H1_0.1B_PORT_PLAN.md
 /ui-settings/*
 !/ui-settings/.gitkeep
 /assets/resources/scenarios/*.wav
+*.xlsx
+*.docx
+
+# Workbook CRUD backups and atomic replacement files
+/.ivr-work-order-backups/
+/.ivr-work-orders-*.xlsx
+
+# Local IVR data and CSV transaction temporaries
+/ivrDataBase.csv
+/.ivr-work-orders-*.csv
+/.ivr-import-*.csv

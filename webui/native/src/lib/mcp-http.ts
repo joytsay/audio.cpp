@@ -28,7 +28,7 @@ export class McpHttpClient {
       signal: this.signal,
     });
     if (!response.ok)
-      throw new Error(`n8n MCP ${method} failed (${response.status}). Publish the IVR Maintenance MCP Tools workflow.`);
+      throw new Error(`n8n MCP ${method} failed (${response.status}). Publish the GeoVision · MCP workflow.`);
     const session = response.headers.get("Mcp-Session-Id");
     if (session) this.session = session;
     if (notification) {

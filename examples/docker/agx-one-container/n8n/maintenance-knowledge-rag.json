@@ -1,6 +1,6 @@
 {
   "id": "ivrMaintenanceKnowledge",
-  "name": "IVR Maintenance Knowledge · RAG Tool",
+  "name": "GeoVision · RAG",
   "nodes": [
     {
       "id": "rag-tool-input",
@@ -8,7 +8,7 @@
       "type": "n8n-nodes-base.executeWorkflowTrigger",
       "typeVersion": 1.1,
       "position": [
-        0,
+        250,
         0
       ],
       "parameters": {
@@ -29,11 +29,11 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        220,
+        1000,
         0
       ],
       "parameters": {
-        "jsCode": "const query = $input.first().json.query;\nif (typeof query !== 'string' || !query.trim()) throw new Error('A guidance query is required');\nreturn [{json:{query,knowledge:\"維修內容回報：逐台複誦設備編號、維修項目及各自數量，以「以上是否正確。」結尾，尚未完成工單。\\n\\n確認內容並新增備註：只複誦本輪備註。相同料號合併說明有兩個，各 SN、製造日期及電容值保持配對。以「以上是否正確。」結尾。\\n\\n確認備註及起機測試：使用者確認且起機測試正常後，用對話中實際工單名稱回覆「好的，工單：工單名稱，已輸入完成，謝謝。」不再詢問。\\n\\n每筆資料僅來自使用者回報，保留數字及代碼。不使用範例資料填補欄位。不得恭喜、讚美或提前宣稱完成。\"}}];"
+        "jsCode": "const query = $('Validate query').first().json.query;\nconst documents = $input.first().json.documents;\nconst result = $input.first().json.result;\nif (typeof query !== 'string' || !query.trim()) throw new Error('A guidance query is required');\nif (!Array.isArray(documents) || !documents.length) throw new Error('Knowledge file extraction returned no documents');\nconst expected = result ? ['CSD資料庫.xlsx'] : ['prompt.csv','情境模擬_20261105.docx','CSD資料庫.xlsx','(備品維修)PY252-0059-工單-20260602-2工-CL、JC.pdf'];\nfor (const source of expected) if (!documents.some(doc => doc.source === source)) throw new Error('Missing knowledge source: ' + source);\nconst sources = documents.map(({text, ...metadata}) => metadata);\nconst knowledge = documents.map(doc => {\n  if (typeof doc.text !== 'string' || !doc.text.trim()) throw new Error('Empty source: ' + doc.source);\n  const header = '【來源：' + doc.source + (doc.sheet ? '；工作表：' + doc.sheet : '') + '；類型：' + doc.kind + '；擷取：' + doc.extraction + '】';\n  return doc.text.split(/\\n\\s*\\n/).filter(Boolean).map(paragraph => header + '\\n' + paragraph).join('\\n\\n');\n}).join('\\n\\n');\nreturn [{json:{query,knowledge,sources,result}}];"
       }
     },
     {
@@ -42,7 +42,7 @@
       "type": "@n8n/n8n-nodes-langchain.vectorStoreInMemory",
       "typeVersion": 1.2,
       "position": [
-        500,
+        1280,
         0
       ],
       "parameters": {
@@ -61,8 +61,8 @@
       "type": "@n8n/n8n-nodes-langchain.documentDefaultDataLoader",
       "typeVersion": 1.1,
       "position": [
-        420,
-        240
+        1230,
+        300
       ],
       "parameters": {
         "dataType": "json",
@@ -78,12 +78,12 @@
       "type": "@n8n/n8n-nodes-langchain.textSplitterRecursiveCharacterTextSplitter",
       "typeVersion": 1,
       "position": [
-        400,
-        460
+        1130,
+        540
       ],
       "parameters": {
-        "chunkSize": 200,
-        "chunkOverlap": 40,
+        "chunkSize": 450,
+        "chunkOverlap": 80,
         "options": {}
       }
     },
@@ -93,8 +93,8 @@
       "type": "@n8n/n8n-nodes-langchain.embeddingsOpenAi",
       "typeVersion": 1.1,
       "position": [
-        700,
-        460
+        1550,
+        540
       ],
       "parameters": {
         "model": "Qwen/Qwen3-Embedding-0.6B-GGUF:Q8_0",
@@ -117,7 +117,7 @@
       "type": "@n8n/n8n-nodes-langchain.vectorStoreInMemory",
       "typeVersion": 1.2,
       "position": [
-        880,
+        1610,
         0
       ],
       "parameters": {
@@ -139,11 +139,73 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        1140,
+        1920,
         0
       ],
       "parameters": {
-        "jsCode": "const passages = $input.all().map(item => item.json.document?.pageContent).filter(Boolean);\nif (!passages.length) throw new Error('No maintenance guidance retrieved');\nreturn [{json:{passages,source:'Simple Vector Store',scope:'workflow guidance only; work-order facts must come from the user transcript'}}];"
+        "jsCode": "const prepared = $('Prepare guidance').first().json;\nif (prepared.result) return [{json:{...prepared.result,sources:prepared.sources}}];\nconst passages = $input.all().map(item => item.json.document?.pageContent).filter(Boolean);\nif (!passages.length) throw new Error('No knowledge passages retrieved');\nreturn [{json:{passages,sources:$('Prepare guidance').first().json.sources,scope:'prompt.csv rules; DOCX scenario examples (not actual records); all XLSX worksheets; PDF text/OCR (verify OCR codes and quantities). These passages may be partial; do not claim a complete dispatch list from these passages.'}}];"
+      }
+    },
+    {
+      "id": "load-knowledge-files",
+      "name": "Load knowledge files",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        750,
+        0
+      ],
+      "parameters": {
+        "url": "http://knowledge:8085/documents",
+        "options": {
+          "timeout": 240000
+        },
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "query",
+              "value": "={{ $json.query }}"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "manual-rag-test",
+      "name": "Test RAG",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        -260
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "rag-test-query",
+      "name": "Test query",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        250,
+        -260
+      ],
+      "parameters": {
+        "jsCode": "// Edit this text to test another retrieval question.\nreturn [{json:{query:'維修工單回報時，SN、製造日期與電容值要如何記錄？'}}];"
+      }
+    },
+    {
+      "id": "validate-rag-query",
+      "name": "Validate query",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        500,
+        0
+      ],
+      "parameters": {
+        "jsCode": "const query = $input.first().json.query;\nif (typeof query !== 'string' || !query.trim()) throw new Error('缺少 query。手動測試請使用 Test RAG → Test query；MCP 呼叫請確認 lookup_maintenance_guidance 的 query 輸入。');\nreturn [{json:{query:query.trim()}}];"
       }
     }
   ],
@@ -152,7 +214,7 @@
       "main": [
         [
           {
-            "node": "Prepare guidance",
+            "node": "Validate query",
             "type": "main",
             "index": 0
           }
@@ -229,12 +291,56 @@
           }
         ]
       ]
+    },
+    "Load knowledge files": {
+      "main": [
+        [
+          {
+            "node": "Prepare guidance",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Test RAG": {
+      "main": [
+        [
+          {
+            "node": "Test query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Test query": {
+      "main": [
+        [
+          {
+            "node": "Validate query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate query": {
+      "main": [
+        [
+          {
+            "node": "Load knowledge files",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     }
   },
   "active": false,
   "settings": {
     "executionOrder": "v1",
-    "executionTimeout": 120,
+    "executionTimeout": 300,
     "callerPolicy": "workflowsFromSameOwner"
   },
   "pinData": {},

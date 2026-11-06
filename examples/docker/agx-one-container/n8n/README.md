@@ -1,180 +1,107 @@
-# Maintenance voice assistant with n8n MCP tools
+# GeoVision RAG and MCP
 
-Selecting **Dialogue source → n8n** in the demo now uses this flow:
+The voice assistant uses two n8n workflows:
 
-```text
-ASR → local LLM ↔ MCP client ↔ n8n MCP Server Trigger → maintenance tools
-          ↓                                              ↓
-         TTS                                  Simple Vector Store RAG
-```
+| Workflow | Template | Editor |
+|---|---|---|
+| GeoVision · MCP | [maintenance-mcp-tools.json](maintenance-mcp-tools.json) | http://192.168.5.151:5678/workflow/ivrMaintenanceMcp |
+| GeoVision · RAG | [maintenance-knowledge-rag.json](maintenance-knowledge-rag.json) | http://192.168.5.151:5678/workflow/ivrMaintenanceKnowledge |
 
-The local LLM chooses tools, receives their results, and generates the final
-spoken reply. The demo no longer sends the whole turn to a reply-generating
-n8n webhook. ASR and TTS retain their existing models and streaming settings.
-The MCP client/tool loop runs in the existing TypeScript WebUI; model inference
-remains in the C++ servers. n8n tool code is JavaScript. No Python is required.
-This conversion applies to the WebUI demo, not the separate SIP client.
+ASR → local LLM → MCP tools → local LLM reply → TTS. ASR/TTS models and
+streaming settings are unchanged. MCP uses Streamable HTTP at
+`/mcp/ivr-maintenance`, exposed to the WebUI through `/n8n/mcp/ivr-maintenance`.
+No instance-level MCP/OAuth or Python runner is required.
 
-## Deploy
+## Deploy or roll back the CRUD version
 
-From `examples/docker/agx-one-container` on the AGX, with the existing `.env`:
+From `examples/docker/agx-one-container`, after syncing this code to the AGX:
 
 ```sh
 docker compose up -d --build
+docker compose restart n8n
 ```
 
-Automatic setup waits for the n8n owner account, then imports the local
-credentials and these two new workflows, preserving any existing edits:
+Startup waits for owner setup, imports missing local credentials and the two
+workflows, and checks existing workflows for migrations. Existing CRUD tools
+are removed with a workflow backup saved under `/home/node/.n8n/ivr-backups`.
+The RAG source is restored to `CSD資料庫.xlsx`. Republish **GeoVision · MCP**
+and **GeoVision · RAG**, then reload the WebUI with Ctrl+Shift+R and select
+**Dialogue source → n8n**.
 
-| Workflow | File | Editor |
-|---|---|---|
-| IVR Maintenance Knowledge · RAG Tool | [maintenance-knowledge-rag.json](maintenance-knowledge-rag.json) | `http://192.168.5.151:5678/workflow/ivrMaintenanceKnowledge` |
-| IVR Maintenance MCP Tools | [maintenance-mcp-tools.json](maintenance-mcp-tools.json) | `http://192.168.5.151:5678/workflow/ivrMaintenanceMcp` |
+The old CSV and transaction backups are left on disk; they are no longer mounted
+or used. No source files are converted or changed. There is no work-order
+subworkflow or database-writing endpoint.
 
-**Publish both workflows**, then select **n8n** in the demo's Dialogue source
-and save model settings. Use a local model with tool/function-call support
-and a compatible chat template, for example the configured Qwen2.5 Instruct
-model. Models that omit tool calls or reject the tools API produce a visible
-error; the application does not silently fall back to the old webhook.
+## Tools
 
-Run **Scenario 1** or send the Scenario 2 recordings to test the complete flow.
-The Events panel records `MCP_TOOL_STARTED`, `MCP_TOOL_COMPLETED`, and
-`MCP_TOOL_FAILED`. A report or notes turn should call guidance and the matching
-readback tool before speech is synthesized.
-
-The existing `scenario-1-rag.json` remains a legacy webhook example. Existing
-copies are not deleted or overwritten; automatic setup now imports the MCP
-workflows instead. It is not the endpoint used by the demo's n8n option.
-
-## Prefilled endpoints
-
-| Service | Address |
+| Tool | Purpose |
 |---|---|
-| n8n editor | `http://192.168.5.151:5678` |
-| Audio API | `http://192.168.5.151:8081` |
-| Local LLM | `http://192.168.5.151:8082/v1` |
-| Local embeddings | `http://192.168.5.151:8084/v1` |
-| Maintenance MCP production URL | `http://192.168.5.151:5678/mcp/ivr-maintenance` |
-| Same-origin HTTPS MCP URL | `https://192.168.5.151:8083/n8n/mcp/ivr-maintenance` |
+| `lookup_maintenance_guidance` | Retrieve source passages and reporting rules through RAG |
+| `get_report_draft` | Inspect the simulated draft reconstructed from this call's ASR |
+| `read_back_maintenance` | Repeat reported equipment, items and quantities; end with 以上是否正確。 |
+| `read_back_notes` | Repeat reported part/SN/date/capacitance pairings; ask for confirmation |
+| `confirm_startup_test` | Return completion wording after the user confirms startup tested normally |
 
-The browser uses the relative same-origin MCP URL through Caddy. Caddy forwards
-MCP sessions and flushes SSE responses immediately. Vite also proxies `/n8n`
-to local port 5678 for development.
+These tools do not create, edit or delete database records. Completion refers
+to the conversation draft. All source documents are read-only.
 
-The MCP Server Trigger is **version 2**, using Streamable HTTP at
-`/mcp/ivr-maintenance`. It does not use the older `/sse` transport, the legacy
-`/webhook/ivr-scenario-1` endpoint, or the instance-management endpoint
-`/mcp-server/http`. Instance-level MCP access and Codex OAuth are not needed
-for the voice assistant. This follows the workflow-level MCP Server Trigger
-pattern, as in the restaurant example.
+Only approved maintenance tools are sent to the LLM, even if an older published
+workflow still advertises CRUD tools. Tools are offered by stage to keep local
+model prompts small. Initial tool selection has a 128-token limit and 5-second
+model-request timeout, with no retry. Missing tool calls return and speak:
+`我目前無法回答關於這個問題，請換個方式詢問。`
+Model loading, MCP connection, retrieval and TTS are outside that selection
+budget. Actual upstream errors are preserved for diagnosis.
 
-Authentication is set to **None** for the existing LAN demo, matching the old
-webhook. This workflow exposes only the supplied maintenance tools; it does
-not expose n8n administration. If you add authentication, keep tokens on a
-server-side proxy rather than embedding them in the WebUI bundle.
+## Knowledge sources
 
-## Tools and conversation state
+Place the original files in the AGX project root. They are mounted read-only
+into `ivr-knowledge`; port 8085 is internal to Compose.
 
-| Tool | Behavior |
-|---|---|
-| `lookup_maintenance_guidance` | Calls the RAG subworkflow to retrieve reporting rules. |
-| `get_report_draft` | Returns the simulated draft reconstructed from this call's user transcripts. |
-| `read_back_maintenance` | Reads back the reported equipment, work, and quantities, ending with `以上是否正確。` |
-| `read_back_notes` | Groups matching parts while preserving each SN/date/capacitance pairing, ending with `以上是否正確。` |
-| `confirm_startup_test` | Requires the current user transcript to confirm a normal start-up test, then uses the actual work-order title for the completion reply. |
+- `prompt.csv`: maintenance reporting rules.
+- `情境模擬_20261105.docx`: examples, not actual work-order records.
+- `CSD資料庫.xlsx`: every worksheet, including 派工、客戶設備、設備類型、通訊錄.
+- `(備品維修)PY252-0059-工單-20260602-2工-CL、JC.pdf`: PDF text or local Chinese/English OCR.
 
-For every maintenance Code Tool call, the client binds a `context` object with
-`sessionId`, `current`, and `user_transcripts`. It removes this field from the
-schema shown to the LLM and replaces any attempted model-supplied context with
-the actual call data. This prevents the model from substituting sample codes,
-serials, or numbers in the tool's source transcript. Assistant messages are not
-used as maintenance facts.
+RAG uses Load knowledge files → Prepare guidance → Default Document Loader →
+Recursive Text Splitter → Simple Vector Store → Retrieve guidance → Return guidance.
+Local Embeddings uses port8084; the local credential is imported automatically.
+Do not replace existing embedding credentials or retrieval tuning unnecessarily.
 
-Drafts are reconstructed from the current call history, not stored in a shared
-cross-call variable. These are simulated reports, consistent with Scenario 1;
-no external ticket is created or updated. Completion tools reject a call when
-the user has not confirmed a normal test. The tools return `proposed_reply`
-and state information to the LLM; the final reply still goes through the local
-LLM rather than being replaced by a browser template.
+Retrieved passages are not a complete work-order inventory. Do not treat a DOCX
+example as a real record, infer newest/oldest without evidence, or trust OCR
+codes/numbers without checking the original PDF.
 
-## RAG components
+For manual RAG testing, open the **Test query** Code node, edit its `query`, and
+run **Test RAG**. The **RAG tool input** trigger expects a query from MCP; running
+it with empty input correctly fails validation.
 
-The knowledge subworkflow contains:
+Office editors may replace files on save. Recreate the knowledge container
+following external source-file replacements to refresh its file bind mounts:
+`docker compose up -d --no-deps --force-recreate knowledge`.
 
-```text
-RAG tool input → Prepare guidance → Seed Simple Vector Store → Retrieve guidance → Return guidance
-                                      ↑ Document Loader        ↑ Local Embeddings
-                                      ↑ Recursive Text Splitter
-                                      ↑ Local Embeddings
-```
-
-The **Default Document Loader** loads static reporting guidance, the
-**Recursive Text Splitter** chunks it, and **Local Embeddings** populates the
-built-in **Simple Vector Store**. **Retrieve guidance** performs semantic
-retrieval for the MCP tool's query. A workflow tool connects this subworkflow
-to the MCP Server Trigger.
-
-Only workflow guidance is indexed. User transcripts are used by maintenance
-tools and as conversational context, not inserted into the shared knowledge
-store. The small demo reseeds static guidance on every RAG call because Simple
-Vector Store is memory-only and loses vectors on restart. n8n's Docker volume
-persists workflows/credentials, not these vectors. For larger document sets,
-separate ingestion and use persistent vector storage. See the
-[official Simple Vector Store docs](https://docs.n8n.io/integrations/builtin/cluster-nodes/root-nodes/n8n-nodes-langchain.vectorstoreinmemory/).
-
-The local embedding model defaults to `Qwen/Qwen3-Embedding-0.6B-GGUF:Q8_0`.
-The prefilled Local Embeddings credential is supplied by
-[local-credentials.json](local-credentials.json), using the non-secret dummy
-key `local`. Change that model/credential if you change the embedding worker.
-The local LLM is called by audio.cpp's existing UI, so its model comes from
-the sidebar rather than a chat-model node inside the MCP workflow.
-
-## Tune and extend
-
-- Edit **Maintenance MCP Server → Instructions** for tool-use guidance. The
-  client includes these instructions in the LLM's conversation.
-- Edit **Prepare guidance** in the RAG workflow to change the knowledge text.
-- Edit Code Tool descriptions and JavaScript to change maintenance behavior.
-- Add tools connected to the MCP Server Trigger's tool connector. The client
-  discovers tools on each turn, so published changes appear without a UI rebuild.
-- Preserve the reserved `context` parameter on tools that need authoritative ASR
-  data. It is injected by the voice client, not generated by the LLM.
-
-The client initializes an MCP session, lists tools (including paginated lists),
-and executes function calls sequentially. Tool results and call IDs are returned
-to the local LLM until it produces a final reply. Each turn is bounded to eight
-LLM rounds and sixteen tool calls, honors hang-up cancellation, and closes its
-MCP session. Protocol and tool failures are surfaced instead of claiming work
-was completed.
-
-## Automatic setup and troubleshooting
+## Checks
 
 ```sh
-docker compose logs -f n8n
+node webui/native/tests/n8n-dialogue.mjs
+node webui/native/tests/n8n-bootstrap.mjs
+node webui/native/tests/n8n-compose.mjs
+TEST_HTTP=1 npm test --prefix examples/docker/agx-one-container/knowledge
 ```
 
-Startup must log `[ivr-n8n] Starting automatic Scenario 1 setup`, then owner
-readiness/import progress, and finally `Scenario 1 is ready`. Setup verifies
-missing entities on every boot, even if a completion marker exists, and never
-overwrites existing workflow or credential edits. Create the owner account if
-setup is waiting for it. The optional `./n8n/install-local.sh` explicitly resets
-the supplied credentials/workflows and should only be used after exporting edits
-you want to keep.
+Tests cover Scenario 1 readbacks, source validation, no-tool fallback, rollback
+backups/idempotence, read-only mounts and rejection of source-writing requests.
 
-If startup changes have not been applied, recreate n8n without a GPU rebuild:
 
-```sh
-docker compose up -d --no-deps --force-recreate n8n
-```
+## Direct query results
 
-A 404 at the maintenance MCP URL generally means the MCP tools workflow has not
-been published, or the new Caddy configuration has not been applied. A local
-LLM error mentioning tools means that its model/chat template needs tool-call
-support. An RAG tool failure should be checked against the knowledge workflow's
-publish state, Local Embeddings credential, and embedding worker on port 8084.
-
-`scenario-1-turns.json` contains the original three turns and expected readbacks.
-Tests cover JSON/SSE MCP responses, session headers, tool discovery/calls, real
-maintenance tool code, context binding, cancellation, failures, and the local
-LLM/tool/TTS loop in the browser. They use mocked services; publishing and a live
-n8n execution must still be checked on the AGX.
+For newest/oldest/all dispatch questions, `Load knowledge files` passes the
+current query to the existing read-only `/documents` endpoint. It selects actual
+派工 rows by valid 派工日期, includes all rows tied at the selected date, and skips
+reporting-rule documents and PDF OCR for this query. Invalid/missing dates are
+counted and excluded from date sorting. `Return guidance` passes these selected
+facts through the same RAG workflow, without replacing them with top-K rule text.
+The LLM answers with the results, not tool names or reporting instructions.
+This adds no CRUD tools, write endpoints or extra workflows. Republish RAG after
+the automatic query/result wiring migration; embedding credentials and top-K
+settings are preserved.
