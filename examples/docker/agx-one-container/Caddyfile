@@ -5,7 +5,7 @@
 	default_sni {$AUDIOCPP_HTTPS_HOST:192.168.5.151}
 }
 
-https://{$AUDIOCPP_HTTPS_HOST:192.168.5.151}:443 {
+https://{$AUDIOCPP_HTTPS_HOST:192.168.5.151}:443, https://localhost:443, https://127.0.0.1:443 {
 	tls internal
 
 	# Browser SIP signaling to the local, host-networked Asterisk test PBX.

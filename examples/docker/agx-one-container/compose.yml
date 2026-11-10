@@ -215,8 +215,6 @@ services:
     depends_on:
       voice-ai:
         condition: service_healthy
-      coturn:
-        condition: service_started
     restart: unless-stopped
     init: true
     stop_grace_period: 15s
@@ -258,7 +256,8 @@ services:
       - ../../../.devops/sip-entrypoint.sh:/app/sip-entrypoint.sh:ro
 
   coturn:
-    profiles: [sip]
+    # Enable explicitly with COMPOSE_PROFILES=sip,turn or --profile turn.
+    profiles: [turn]
     image: ${COTURN_IMAGE:-coturn/coturn:4.18.0-r0-alpine}
     # Linux host networking keeps relay addresses and UDP ports unchanged.
     container_name: ivr-turn

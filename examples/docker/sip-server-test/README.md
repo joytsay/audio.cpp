@@ -26,6 +26,18 @@ image. The previous SIP build stages can be reused from Docker's cache. The
 first build still needs the compiler and SIP libraries if those stages are not
 cached; subsequent source-only changes rebuild just the SIP application.
 
+Open `/#/demo` and expand the **satellite** icon on the right. The SIP sidebar
+shares its settings with this worker and the HTTP server through the existing
+`agx-one-container_audiocpp-sip-data` volume. For another Compose project, set
+`SIP_SETTINGS_VOLUME` to its SIP data volume name.
+
+Set **Call mode → Test echo**, configure the 521 account and current network
+interface/address, and turn **Use SIP** on. Echo is enabled automatically in
+Test echo mode and disabled in Use IVR mode.
+**Save SIP settings** applies edits and restarts registration. The Use SIP switch
+starts/stops the native listener; hiding the sidebar keeps it running. Only run
+one 521 worker at a time.
+
 Wait for:
 
 ```text
@@ -44,8 +56,12 @@ Greetings play only on keypad selection. Echo mode remains enabled.
 
 ## Settings
 
-Use `.env` in this directory. It is separate from `agx-one-container/.env` and
-from the saved SIP Gateway page. Defaults match the current Ubuntu device:
+The demo sidebar and SIP Gateway page now use the same private `gateway.env`.
+Connection settings saved there override the worker's Compose environment.
+Use `.env` in this directory for image/build settings, inference service URLs,
+and the opt-in automated caller. The historical connection defaults below must
+be updated to match the current network (the tested Ethernet address is
+`eno1`, `192.168.2.111:15061`):
 
 | Setting | Default |
 | --- | --- |
@@ -277,3 +293,35 @@ after the capture point. Check tcpdump's kernel-drop count before interpreting
 missing sequences as network loss. The analyzer is C++ and runs from the existing
 SIP image through the shell wrapper; rebuild `sip-test` first. It accepts tcpdump
 PCAP files, not PCAPNG. A native build can run `analyzeRTP CAPTURE.pcap` directly.
+
+## Live SIP calls in the demo
+
+The SIP worker publishes `live.json` atomically at most ten times per second.
+The demo reads `/v1/ui/sip/live` every 200 ms; closing/hiding the sidebar does
+not interrupt calls. Both HTTP and SIP services must use the same settings
+volume and the updated server/worker images.
+
+- **Use IVR:** the greeting starts on answer, then received SIP audio runs through
+  VAD → ASR → LLM → TTS. Replies play back over the same call, and listening
+  resumes afterward. No keypad selection is required. Caller ASR transcripts
+  and assistant replies appear in Conversation; registration, RTP, VAD, ASR,
+  LLM, TTS, playback and hangup events appear in Events.
+- **Test echo:** caller audio is echoed, and #1/#2/#3 generate the configured
+  greetings. Greeting text appears in Conversation. Caller speech has no text
+  transcript in this mode because no ASR is run.
+- **ASSISTANT / MICROPHONE:** rolling levels come from the native worker's actual
+  transmitted and decoded received PCM. The browser does not open its microphone
+  or play a second copy of phone audio.
+
+The worker uses its server-side ASR/LLM configuration, not the browser's local
+microphone session. A monitor older than three seconds is shown as disconnected.
+Monitoring is protected by the existing UI management setting; passwords never
+appear in settings responses, snapshots, events or browser storage.
+
+Local regression checks without a PBX:
+
+```sh
+python3 .devops/tests/test_sip_gateway_reload.py
+python3 .devops/tests/test_sip_entrypoint.py
+bash .devops/tests/test_sip_monitor.sh
+```

@@ -276,16 +276,20 @@ You can override the account arguments explicitly:
 
 The default greeting is “歡迎來電期偶科技 請問我可以怎麼服務您”.
 It starts listening after the greeting finishes. Set `SIP_GREETING` to change the
-message; an empty value disables it. The greeting uses the same TTS voice as
-conversation replies and is generated before registration.
+message; an empty value disables it. The opening greeting uses `lingCL` and is
+generated before registration. `TTS_VOICE` selects the conversation reply voice.
 
-By default, `SIP_WAIT_FOR_MEDIA=1` waits for manual voice selection: press
-**#**, then **1** for `lingCL`, or **#**, then **2** for `WangSG`. Both greeting
-versions are generated before registration using `SIP_GREETING`. A bare `#`
-only arms selection. Repeat either sequence to replay that voice from the
-beginning, even during playback. Other digits cancel a pending selection and
-are logged normally. There is no greeting wait timeout. The browser never
-sends these sequences automatically.
+In **Use IVR** / `--pipeline` mode, the greeting starts automatically when the
+SIP call is established. After playback, decoded caller RTP goes to VAD → ASR →
+LLM → TTS; synthesized replies are encoded and returned to the same caller over
+RTP. Listening resumes after each reply. No keypad selection is needed, even
+when `SIP_WAIT_FOR_MEDIA=1`. Echo is disabled for pipeline calls regardless of a
+stale `SIP_ECHO_TEST` value.
+
+`SIP_WAIT_FOR_MEDIA=1` applies to standalone announcement tests: press **#**,
+then **1** for `lingCL`, or **#**, then **2** for `WangSG`. These sequences can also
+replay prepared greetings. **Test echo** keeps its manual #1/#2/#3 TTS selections.
+Other digits are logged normally. The browser does not send selections for you.
 
 The Docker worker sets `SIP_CONTINUOUS=1`: it retains both greeting buffers
 between incoming calls and creates a fresh conversation for each caller.
@@ -308,9 +312,9 @@ carrying the traffic. Inspect `COTURN_URL`, `COTURN_LISTEN_IP`,
 `COTURN_RELAY_IP`, `COTURN_EXTERNAL_IP`, and the relay port range before changing
 SIP credentials or codecs.
 
-`TTS_VOICE` still controls conversation replies. Set `SIP_WAIT_FOR_MEDIA=0`
-explicitly for automatic greeting playback on answer, or empty `SIP_GREETING`
-to disable greetings. In fixed-announcement mode, the optional VOICE argument
+`TTS_VOICE` controls conversation replies. Empty `SIP_GREETING` to disable
+pipeline greetings and listen immediately on answer. For standalone
+announcements, set `SIP_WAIT_FOR_MEDIA=0` for automatic playback on answer. In fixed-announcement mode, the optional VOICE argument
 still selects the first greeting voice; the second voice is `WangSG`.
 
 During a conversation, baresip decodes caller audio and the custom audio player

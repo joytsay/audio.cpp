@@ -751,6 +751,55 @@ void test_sip(const std::string& executable) {
                   std::string("RTP conversation skipped ") + route);
     }
     {
+        // Exercise the sidebar's Use IVR mode with the deployed defaults:
+        // incoming call, wait-for-media enabled, and no #1/#2 selection.
+        Server audio; audio.pipeline_mode = true; Temp settings;
+        SipServer sip(false, false, true, false, true);
+        const auto options = settings.path / "gateway.env";
+        write_file(options, "SIP_MODE= pipeline\nSIP_ACCOUNT=sip:1001@127.0.0.1\nSIP_PROXY=" + sip.uri +
+            "\nSIP_TARGET=listen\nSIP_WAIT_FOR_MEDIA=1\nSIP_ECHO_TEST=1\n");
+        for (const char* key : {"SIP_MODE", "SIP_ACCOUNT", "SIP_PROXY", "SIP_TARGET", "SIP_WAIT_FOR_MEDIA", "SIP_ECHO_TEST", "SIP_GREETING"}) unsetenv(key);
+        setenv("SIP_CONTINUOUS", "0", 1);
+        setenv("SIP_CODEC", "PCMU", 1);
+        setenv("AUDIOCPP_URL", audio.url.c_str(), 1);
+        setenv("LLM_URL", (audio.url + "/v1").c_str(), 1);
+        setenv("LLM_MODEL", "test-llm", 1);
+        setenv("SIP_MONITOR_DIR", settings.path.c_str(), 1);
+        Process client(executable, {"--env", options.string()});
+        check(client.finish(12) == 0, "incoming Use IVR failed: " + client.output);
+        sip.verify();
+        check(sip.voiced_packets > 70 && sip.unregistered, "Use IVR did not return speech over the caller's RTP session");
+        check(client.output.find("Waiting for greeting selection") == std::string::npos,
+              "Use IVR waited for keypad input instead of listening to SIP audio");
+        check(client.output.find("echoing audio") == std::string::npos,
+              "Use IVR echoed caller audio instead of running the conversation pipeline");
+        const auto requests = audio.pipeline_requests();
+        const std::vector<std::string> stages{"/v1/tasks/run", "/v1/audio/transcriptions/details", "/v1/chat/completions", "/v1/audio/speech"};
+        size_t stage = 0;
+        for (const auto& request : requests) {
+            if (stage < stages.size() && request.first == stages[stage]) ++stage;
+            if (request.first == "/v1/chat/completions")
+                check(request.second.find("Where is the office?") != std::string::npos, "SIP ASR transcript was not sent to the LLM");
+        }
+        check(stage == stages.size(), "Use IVR did not execute VAD -> ASR -> LLM -> TTS in order");
+        check(std::any_of(requests.begin(), requests.end(), [&](const auto& request) {
+            return request.first == "/v1/audio/speech" && field(parse(request.second).get(), "input") == "The office is on floor 三.";
+        }), "Use IVR did not synthesize the LLM's reply");
+        const auto snapshot = parse(read_file(settings.path / "live.json"));
+        check(field(snapshot.get(), "peer").find("1002") != std::string::npos, "live monitor lost the incoming SIP caller");
+        json_object* event_array = nullptr; json_object* message_array = nullptr;
+        check(json_object_object_get_ex(snapshot.get(), "events", &event_array) &&
+              json_object_object_get_ex(snapshot.get(), "messages", &message_array), "SIP demo snapshot missing events or messages");
+        const std::string events = json_object_to_json_string(event_array);
+        for (const char* event : {"SIP_CALL_ESTABLISHED", "VAD_COMPLETED", "ASR_COMPLETED", "LLM_COMPLETED", "TTS_PLAYBACK_STARTED"})
+            check(std::string(events).find(event) != std::string::npos, std::string("SIP demo event missing: ") + event);
+        const std::string messages = json_object_to_json_string(message_array);
+        check(messages.find("Where is the office?") != std::string::npos && messages.find("The office is on floor 3.") != std::string::npos,
+              "SIP conversation text missing from demo monitor");
+        unsetenv("SIP_MONITOR_DIR"); unsetenv("SIP_CONTINUOUS");
+        setenv("SIP_WAIT_FOR_MEDIA", "0", 1);
+    }
+    {
         Server audio; audio.pipeline_mode = true;
         SipServer sip(false, false, true, false, true);
         setenv("SIP_CONTINUOUS", "1", 1);

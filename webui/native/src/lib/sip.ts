@@ -1,0 +1,39 @@
+export type SipSettings = {
+  schema_version: number;
+  enabled: boolean;
+  echo: boolean;
+  proxy: string;
+  account: string;
+  auth_user: string;
+  display_name: string;
+  has_secret: boolean;
+  worker_running: boolean;
+  mode: 'pipeline' | 'tts';
+  interface: string;
+  listen: string;
+  contact_host: string;
+  rtp_ports: string;
+  codec: string;
+  dtmf_mode: string;
+  tts_model: string;
+  greeting1: string;
+  greeting2: string;
+  greeting3: string;
+};
+export type SipLive = {
+  live: boolean;
+  status: null | {
+    instance: string;
+    call_id: string;
+    peer: string;
+    stage: string;
+    registered: boolean;
+    active: boolean;
+    updated_at: number;
+    models?: { vad: string; asr: string; llm: string; tts: string };
+    input: number[];
+    output: number[];
+    events: { id: number; time: number; type: string; summary: string; run: string }[];
+    messages: { role: 'user' | 'assistant'; content: string }[];
+  };
+};

@@ -3,6 +3,7 @@
 #include "sipPipeline.h"
 #include "sipEnv.h"
 #include "sipTurn.h"
+#include "sipMonitor.h"
 #include <curl/curl.h>
 #include <re.h>
 #include <rem.h>
@@ -181,6 +182,7 @@ public:
         return echo_enabled_ && Clock::now() < speech_until_;
     }
     void transmit(int16_t* output, size_t frames, unsigned channels, unsigned rate) {
+        struct Meter { int16_t* p; size_t n; ~Meter() { SipMonitor::get().levels(false, p, n); } } meter{output, frames * channels};
         std::fill(output, output + frames * channels, 0);
         std::lock_guard<std::mutex> lock(mutex_);
         if (!active_) return;
@@ -207,6 +209,7 @@ public:
         if (position_ >= pcm_.size()) { playing_ = false; finished_ = true; }
     }
     void receive(const int16_t* input, size_t frames, unsigned channels, unsigned rate) {
+        if (active_) SipMonitor::get().levels(true, input, frames * channels);
         if (active_ && recording_.is_open()) {
             if (recording_wav_) {
                 if (!recording_rate_) { recording_rate_ = rate; recording_channels_ = channels; }
@@ -415,7 +418,7 @@ public:
         const auto echo = env("SIP_ECHO_TEST");
         if (!echo.empty() && echo != "0" && echo != "1")
             throw std::runtime_error("SIP_ECHO_TEST must be 0 or 1");
-        audio_.enable_echo(target_ == "listen" && echo == "1");
+        audio_.enable_echo(!pipeline_ && target_ == "listen" && echo == "1");
         require(libre_init(), "initialize libre"); libre_ = true;
         std::string config = "sip_transports udp,tcp,tls\naudio_source ivrtts,memory\naudio_player ivrtts,memory\n"
                              "audio_alert ivrtts,memory\nrtp_rxmode main\n";
@@ -504,6 +507,9 @@ private:
             }
             if (registered_) break;
             registered_ = true;
+            SipMonitor::get().registration(true);
+            SipMonitor::get().event("SIP_REGISTERED", "521 SIP registration accepted");
+            SipMonitor::get().stage("Waiting for incoming call");
             std::cout << "SIP registered.\n";
             if (target_ == "listen") { waiting_ = true; std::cout << "Waiting for one incoming call...\n"; }
             else require(ua_connect(ua_, &call_, nullptr, target_.c_str(), VIDMODE_OFF), "start SIP call");
@@ -519,12 +525,20 @@ private:
             break;
         case BEVENT_CALL_ESTABLISHED:
             established_ = true; audio_.activate(true);
+            SipMonitor::get().begin(call_peeruri(call));
+            SipMonitor::get().event("SIP_CALL_ESTABLISHED", "SIP call established");
+            SipMonitor::get().stage(realtime_tts_ ? "Echo / keypad TTS · press #1 or #2" : "Listening");
             media_deadline_ = Clock::now() + std::chrono::seconds(5);
             test_keys_ = target_ == "listen" ? "" : env("SIP_TEST_DTMF");
             test_next_ = Clock::now() + std::chrono::seconds(1);
             std::cout << "SIP call established.\n";
             re_printf("%H", stream_debug, audio_strm(call_audio(call_)));
-            if (realtime_tts_) {
+            if (pipeline_) {
+                // IVR consumes caller RTP automatically. The greeting-selection
+                // gate belongs to the standalone announcement test, not IVR.
+                if (!announcement_.empty()) start_announcement();
+                else { pipeline_->resume(); audio_.listen(true); }
+            } else if (realtime_tts_) {
                 std::cout << "Waiting for TTS selection: #1 lingCL, #2 WangSG, #3 lingCL.\n";
             } else if (!announcement_.empty()) {
                 if (wait_for_media_ && !media_ready_) {
@@ -532,16 +546,20 @@ private:
                     std::cout << "Waiting for greeting selection: #1 lingCL, #2 WangSG.\n";
                     if (!third_.empty()) std::cout << "#3: configured TTS greeting (lingCL).\n";
                 } else start_announcement();
-            } else if (pipeline_) pipeline_->resume();
+            }
             break;
         case BEVENT_CALL_RTPESTAB:
             if (call == call_) {
                 rtp_received_ = true;
+                SipMonitor::get().event("SIP_RTP_ESTABLISHED", "Incoming caller RTP established");
                 std::cout << "Incoming RTP established.\n";
             }
             break;
         case BEVENT_CALL_DTMF_START:
-            if (call == call_) std::cout << "DTMF: " << bevent_get_text(data) << '\n';
+            if (call == call_) {
+                std::cout << "DTMF: " << bevent_get_text(data) << '\n';
+                SipMonitor::get().event("SIP_DTMF", bevent_get_text(data));
+            }
             if (call == call_ && (realtime_tts_ || !announcement_.empty())) {
                 const std::string digit = bevent_get_text(data);
                 if (digit == "#") { greeting_prefix_ = true; break; }
@@ -581,9 +599,13 @@ private:
         cancel_tts();
         if (tts_worker_.joinable()) tts_worker_.join();
     }
+    char tts_digit_ = 0;
     void request_tts(char digit) {
         // A newer selection cancels/discards the previous synthesis.
         audio_.stop_playback(); announcement_playing_ = false; draining_ = false;
+        tts_digit_ = digit;
+        SipMonitor::get().event("TTS_REQUESTED", std::string("Keypad #") + digit);
+        SipMonitor::get().stage("Synthesizing");
         std::lock_guard<std::mutex> lock(tts_mutex_);
         ++tts_revision_; pending_digit_ = digit; tts_ready_ = false;
         tts_cv_.notify_one();
@@ -643,9 +665,12 @@ private:
         std::lock_guard<std::mutex> lock(tts_mutex_);
         if (!tts_ready_) return;
         tts_ready_ = false;
-        if (!tts_error_.empty()) { std::cerr << "TTS selection failed: " << tts_error_ << '\n'; return; }
+        if (!tts_error_.empty()) { std::cerr << "TTS selection failed: " << tts_error_ << '\n'; SipMonitor::get().event("ERROR", tts_error_); SipMonitor::get().stage("TTS failed"); return; }
         if (!established_ || !call_) return;
         audio_.play(std::move(tts_audio_)); announcement_playing_ = true; draining_ = false;
+        SipMonitor::get().message("assistant", env((std::string("DTMF_") + tts_digit_).c_str()));
+        SipMonitor::get().event("TTS_PLAYBACK_STARTED", "Playing generated TTS greeting");
+        SipMonitor::get().stage("Speaking");
         std::cout << "Playing generated TTS greeting.\n";
     }
     void start_announcement(bool alternate = false, bool third = false) {
@@ -653,10 +678,16 @@ private:
         announcement_playing_ = true;
         draining_ = false;
         audio_.listen(false);
-        if (pipeline_) std::cout << "Playing welcome greeting.\n";
+        if (pipeline_) {
+            std::cout << "Playing welcome greeting.\n";
+            SipMonitor::get().message("assistant", std::getenv("SIP_GREETING") ? env("SIP_GREETING") : "歡迎來電期偶科技 請問我可以怎麼服務您");
+            SipMonitor::get().event("GREETING_PLAYED", "Playing welcome greeting");
+            SipMonitor::get().stage("Speaking");
+        }
         audio_.play(third && !third_.empty() ? third_ : alternate && !alternate_.empty() ? alternate_ : announcement_);
     }
     void tick() {
+        SipMonitor::get().publish();
         if (closing_) {
             if (Clock::now() >= deadline_) re_cancel();
         } else if (interrupted) close();
@@ -697,7 +728,11 @@ private:
             if (pipeline_) {
                 auto error = pipeline_->error(); if (!error.empty()) throw std::runtime_error(error);
                 std::vector<unsigned char> reply;
-                if (!announcement_playing_ && pipeline_->take_reply(reply)) { audio_.listen(false); audio_.play(reply); draining_ = false; }
+                if (!announcement_playing_ && pipeline_->take_reply(reply)) {
+                    audio_.listen(false); audio_.play(reply); draining_ = false;
+                    SipMonitor::get().event("TTS_PLAYBACK_STARTED", "Playing IVR reply into SIP call");
+                    SipMonitor::get().stage("Speaking");
+                }
             }
             if (audio_.finished()) { draining_ = true; playback_end_ = Clock::now() + std::chrono::milliseconds(300); }
             if (draining_ && audio_.echo_active())
@@ -705,6 +740,8 @@ private:
             if (draining_ && Clock::now() >= playback_end_) {
                 draining_ = false;
                 announcement_playing_ = false;
+                SipMonitor::get().event("PLAYBACK_COMPLETED", "SIP audio playback completed");
+                SipMonitor::get().stage("Listening");
                 if (pipeline_) {
                     std::vector<unsigned char> reply;
                     if (pipeline_->take_reply(reply)) audio_.play(reply);
@@ -715,7 +752,7 @@ private:
         tmr_start(&timer_, 20, tick_handler, this);
     }
     void fail(const std::string& error) noexcept {
-        try { error_ = error; close(); } catch (...) { re_cancel(); }
+        try { SipMonitor::get().event("ERROR", error); error_ = error; close(); } catch (...) { re_cancel(); }
     }
     void report_test_audio() {
         if (!test_selection_) return;
@@ -727,6 +764,9 @@ private:
         if (closing_) return;
         report_test_audio();
         closing_ = true; cancel_tts(); audio_.activate(false);
+        SipMonitor::get().event("SIP_CALL_CLOSED", "SIP call closed");
+        SipMonitor::get().end();
+        SipMonitor::get().publish();
         std::cout << "Audible received frames: " << audio_.audible_frames() << "\n";
         if (call_) { ua_hangup(ua_, call_, 0, "Normal clearing"); call_ = nullptr; }
         ua_unregister(ua_);
@@ -888,6 +928,10 @@ int main(int argc, char** argv) {
         }
         if (args == std::vector<std::string>{"--self-test"}) { self_test(); return 0; }
         load_sip_env(settings, explicit_file);
+        if (env("SIP_MODE") == "tts" && args.empty()) tts_greetings = true;
+        if (tts_greetings && args.empty()) {
+            for (const char* key : {"SIP_ACCOUNT", "SIP_PROXY", "SIP_TARGET"}) args.push_back(env(key));
+        }
         if (tts_greetings && !greetings.empty()) throw std::runtime_error("choose --tts-greetings or --greetings, not both");
         if (!tts_greetings && greetings.empty() && (args.empty() || args == std::vector<std::string>{"--pipeline"})) {
             args = {"--pipeline"};

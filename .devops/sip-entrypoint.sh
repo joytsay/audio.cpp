@@ -10,6 +10,8 @@ if [[ -n "${SIP_SETTINGS_DIR:-}" ]]; then
     mkdir -p "$SIP_SETTINGS_DIR"
     settings="$SIP_SETTINGS_DIR/gateway.env"
     heartbeat="$SIP_SETTINGS_DIR/worker.heartbeat"
+    export SIP_MONITOR_DIR="$SIP_SETTINGS_DIR"
+    rm -f "$heartbeat"
     export AUDIOCPP_URL="${AUDIOCPP_URL:-http://127.0.0.1:8081}"
     export LLM_URL="${LLM_URL:-http://127.0.0.1:8082/v1}"
     export RAG_URL="${RAG_URL:-${AUDIOCPP_URL}/v1/rag}"
@@ -26,15 +28,17 @@ if [[ -n "${SIP_SETTINGS_DIR:-}" ]]; then
         exit 0
     }
     trap stop_shared_sip EXIT INT TERM
-    for url in "${AUDIOCPP_URL%/}/health" "${LLM_URL%/v1}/health"; do
-        until curl -fsS --connect-timeout 3 --max-time 5 "$url" >/dev/null; do sleep 2; done
-    done
     while true; do
-        if [[ ! -s "$settings" ]]; then sleep 1; continue; fi
+        if [[ ! -s "$settings" ]] || grep -qx 'SIP_ENABLED="0"' "$settings"; then
+            rm -f "$heartbeat"
+            sleep 1; continue
+        fi
         revision="$(sha256sum "$settings")"
         # The shared file must override any old Compose account environment.
         env -u SIP_ACCOUNT -u SIP_PROXY -u SIP_SECRET -u SIP_AUTHUSER -u SIP_DISPLAY_NAME -u SIP_TARGET \
-            stdbuf -oL -eL /opt/sip/bin/exampleSIP --env "$settings" --pipeline &
+            -u SIP_MODE -u SIP_ECHO_TEST -u SIP_INTERFACE -u SIP_LISTEN -u SIP_CONTACT_HOST \
+            -u SIP_RTP_PORTS -u SIP_CODEC -u SIP_DTMF_MODE -u TTS_MODEL -u DTMF_1 -u DTMF_2 -u DTMF_3 \
+            stdbuf -oL -eL /opt/sip/bin/exampleSIP --env "$settings" &
         sip_pid=$!
         while kill -0 "$sip_pid" 2>/dev/null; do
             touch "$heartbeat"

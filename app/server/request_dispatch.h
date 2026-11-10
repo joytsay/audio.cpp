@@ -53,6 +53,8 @@ struct RequestDispatcher {
         response = demo_settings_response(request, state.config_.ui_management, state.request_base_);
       } else if (request.method == "GET" && request.path == "/v1/ui/system-info") {
         response = ui_system_info_response(state.config_.ui_enabled || state.config_.ui_management);
+      } else if (request.method == "GET" && request.path == "/v1/ui/sip/live") {
+        response = sip_live_response(state.config_.ui_management, state.request_base_);
       } else if ((request.method == "GET" || request.method == "POST") && request.path == "/v1/ui/sip") {
         response = sip_settings_response(request, state.config_.ui_management, state.request_base_);
       } else if (request.method == "GET" && request.path == "/v1/models") {

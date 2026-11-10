@@ -69,3 +69,9 @@ docs/FALCON_H1_0.1B_PORT_PLAN.md
 /ivrDataBase.csv
 /.ivr-work-orders-*.csv
 /.ivr-import-*.csv
+/audio-models
+/examples/docker/agx-one-container/.env.back
+/examples/docker/cotrun/build
+/examples/docker/sip-server-test
+/llama-models/cache
+/rag-data

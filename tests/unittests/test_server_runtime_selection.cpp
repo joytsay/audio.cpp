@@ -130,6 +130,17 @@ int main() {
             request.body = R"({"proxy":"sip:host\nSIP_SECRET=injected","account":"sip:521@host","auth_user":"521","display_name":"521","secret":"x"})";
             if (minitts::server::sip_settings_response(request, true, root).status != 400 || read() != original)
                 throw std::runtime_error("SIP settings accepted injected configuration");
+            request.body = R"({"enabled":false,"mode":"tts","echo":true,"interface":"eno1","listen":"192.168.2.111:15061"})";
+            if (minitts::server::sip_settings_response(request, true, root).status != 200)
+                throw std::runtime_error("SIP sidebar settings save failed");
+            request.method = "GET";
+            const auto sidebar = engine::io::json::parse(minitts::server::sip_settings_response(request, true, root).body);
+            if (sidebar.require("enabled").as_bool() || !sidebar.require("echo").as_bool() ||
+                sidebar.require("mode").as_string() != "tts" || !sidebar.require("has_secret").as_bool())
+                throw std::runtime_error("SIP sidebar settings did not round-trip");
+            if (minitts::server::sip_live_response(false, root).status != 403 ||
+                engine::io::json::parse(minitts::server::sip_live_response(true, root).body).require("live").as_bool())
+                throw std::runtime_error("SIP live guard or missing monitor status failed");
             const auto permissions = std::filesystem::status(saved).permissions();
             if ((permissions & (std::filesystem::perms::group_all | std::filesystem::perms::others_all)) != std::filesystem::perms::none)
                 throw std::runtime_error("SIP credentials are not private");

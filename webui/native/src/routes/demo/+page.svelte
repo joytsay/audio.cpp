@@ -1,6 +1,8 @@
 <script lang="ts">
   import { onMount, onDestroy, tick } from "svelte";
   import { n8nDialogue, type DialogueSource } from "$lib/n8n-dialogue";
+  import SipSidebar from "$lib/SipSidebar.svelte";
+  import type { SipSettings, SipLive } from "$lib/sip";
   import PanelDivider from "$lib/PanelDivider.svelte";
   import { catalog, modelModes } from "$lib/catalog";
   import {
@@ -27,6 +29,7 @@
     PanelBottomOpen,
     ListMusic,
     EyeOff,
+    Satellite,
   } from "@lucide/svelte";
   import logo from "../../../static/logo_cloud.svg?raw";
   import "../../app.css";
@@ -64,6 +67,7 @@
   import {
     endpointJson,
     routerEndpoint,
+    siblingWorkerEndpoint,
     chatText,
     type ChatMessage,
   } from "$lib/openai";
@@ -341,12 +345,13 @@
       /* Keep a generic header when host information is unavailable. */
     }
   }
-  type DemoPanel = "settings" | "session" | "events" | "scenarios";
+  type DemoPanel = "settings" | "session" | "events" | "scenarios" | "sip";
   let visiblePanels: Record<DemoPanel, boolean> = {
     settings: true,
     session: true,
     events: true,
     scenarios: true,
+    sip: true,
   };
   function restorePanelVisibility() {
     visiblePanels = { ...visiblePanels, session: window.innerWidth > 1050 };
@@ -375,6 +380,7 @@
         : `[data-hide-panel="${name}"]`;
     document.querySelector<HTMLButtonElement>(control)?.focus();
   }
+  let sipWidth = 280;
   let detailsWidth = 225,
     bottomHeight = 320,
     eventsShare = 50,
@@ -387,6 +393,7 @@
         "geovision.demo.panel-layout",
         JSON.stringify({
           detailsWidth,
+          sipWidth,
           bottomHeight,
           eventsShare,
           waveHeight,
@@ -410,6 +417,7 @@
         typeof saved[name] === "number" && Number.isFinite(saved[name])
           ? Math.max(min, Math.min(max, saved[name]))
           : fallback;
+      sipWidth = bounded("sipWidth", sipWidth, 240, 420);
       detailsWidth = bounded("detailsWidth", detailsWidth, 150, 500);
       bottomHeight = bounded(
         "bottomHeight",
@@ -539,6 +547,40 @@
   $: technicianVoice = voiceChoices.find((id) => id !== voice) || "";
   let events: Event[] = [],
     messages: DemoMessage[] = [];
+  let useSip = false;
+  let sipSettings: SipSettings | null = null;
+  let sipLive: SipLive = { live: false, status: null };
+  let sipInstance = '', sipEventId = 0;
+  function receiveSipSettings(value: SipSettings) {
+    sipSettings = value;
+    if (value.enabled && !useSip && (connected || starting)) hangup(false);
+    useSip = value.enabled;
+  }
+  function receiveSipStatus(value: SipLive) {
+    sipLive = value;
+    const snapshot = value.status;
+    if (!snapshot || !useSip) return;
+    if (sipInstance !== snapshot.instance) { sipInstance = snapshot.instance; sipEventId = 0; }
+    const fresh = snapshot.events.filter((event) => event.id > sipEventId);
+    if (fresh.length) {
+      sipEventId = Math.max(...fresh.map((event) => event.id));
+      events = [...fresh.map((event) => ({
+        time: new Date(event.time).toISOString(), run: event.run,
+        type: event.type, summary: event.summary,
+      })).reverse(), ...events].slice(0, 300);
+      try { localStorage.setItem(historyKey, JSON.stringify(events)); } catch {}
+    }
+  }
+  $: sipOnline = useSip && sipLive.live && !!sipLive.status?.registered;
+  $: sipConnected = useSip && sipLive.live && !!sipLive.status?.active;
+  $: displayMessages = (useSip ? sipLive.status?.messages || [] : messages) as DemoMessage[];
+  $: sipStatus = !sipLive.live ? (useSip ? "Waiting for SIP worker" : "SIP disabled")
+    : sipLive.status?.stage || "Waiting for incoming call";
+  function sipBars(values: number[] | undefined) {
+    const samples = values || [];
+    return [...Array(Math.max(0, 36 - samples.length)).fill(2),
+      ...samples.slice(-36).map((value) => Math.max(2, Math.min(70, Math.sqrt(Math.max(0, value)) * 70)))];
+  }
   let connected = false,
     starting = false,
     muted = false,
@@ -1011,7 +1053,10 @@
     utterance: Float32Array[] = [],
     preRoll: Float32Array | null = null;
   const historyKey = "geovision.demo.events.v1";
-  const llmBase = () => new URL("/llm/v1/", location.href).toString();
+  // HTTPS uses Caddy's same-origin proxy; the native HTTP server has no /llm route.
+  const llmBase = () => location.protocol === "https:"
+    ? new URL("/llm/v1/", location.href).toString()
+    : siblingWorkerEndpoint(8082);
   function record(
     type: string,
     summary: string,
@@ -2518,6 +2563,11 @@
     </div>
     <div class="header-actions">
       <div class="panel-restores" aria-label="Hidden panels">
+        {#if !visiblePanels.sip}<button class="panel-toggle"
+          aria-label="Show SIP"
+          title="Show SIP"
+          aria-controls="demo-sip" aria-expanded="false"
+          data-panel-toggle="sip" on:click={() => togglePanel("sip")}><Satellite size={17} /></button>{/if}
         {#if !visiblePanels.session}<button
             class="panel-toggle"
             aria-label="Show session"
@@ -2530,7 +2580,7 @@
           >{/if}
       </div>
       <div class="connection">
-        <i class:online={connected}></i>{connected
+        <i class:online={useSip ? sipOnline : connected}></i>{(useSip ? sipOnline : connected)
           ? "CONNECTED"
           : starting
             ? "CONNECTING"
@@ -3007,6 +3057,7 @@
     on:keydown={sidebarResizeKey}
   ></div>
   <main
+    style:--sip-width={`${sipWidth}px`}
     style:--details-width={`${detailsWidth}px`}
     style:--bottom-height={`${bottomHeight}px`}
     style:--events-share={`${eventsShare}fr`}
@@ -3014,23 +3065,23 @@
     style:--wave-height={`${waveHeight}px`}
     style:--composer-height={`${composerHeight}px`}
   >
-    <section class="session" class:no-session={!visiblePanels.session}>
+    <section class="session" class:no-session={!visiblePanels.session} class:no-sip={!visiblePanels.sip}>
       <div class="conversation">
         <div class="wave-area">
           <div class="wave-label">ASSISTANT</div>
           <div class="wave wave-out" aria-label="Live assistant waveform">
-            {#each outputBars as height}<span style:height={`${height}px`}
+            {#each (useSip ? sipBars(sipConnected ? sipLive.status?.output : undefined) : outputBars) as height}<span style:height={`${height}px`}
               ></span>{/each}
           </div>
           <div class="wave-label">
-            {speaking && playbackRole !== "assistant"
+            {useSip ? "MICROPHONE · SIP CALLER" : speaking && playbackRole !== "assistant"
               ? playbackRole === "technician"
                 ? "TECHNICIAN"
                 : "CALLER"
               : "MICROPHONE"}
           </div>
           <div class="wave wave-in" aria-label="Live microphone waveform">
-            {#each inputBars as height}<span style:height={`${height}px`}
+            {#each (useSip ? sipBars(sipConnected ? sipLive.status?.input : undefined) : inputBars) as height}<span style:height={`${height}px`}
               ></span>{/each}
           </div>
         </div>
@@ -3049,11 +3100,12 @@
           bind:this={transcriptElement}
           aria-live="polite"
         >
-          {#if !messages.length}<div class="empty">
+          {#if !displayMessages.length}<div class="empty">
               <h1>Your local voice assistant</h1>
-              <p>Start a call, then speak or type a message.</p>
+              <p>{useSip ? "Call 521 from your phone. SIP activity appears here." : "Start a call, then speak or type a message."}</p>
+              {#if useSip && sipSettings?.mode === "tts"}<small>Echo + keypad TTS · press #1 or #2. Caller transcription requires IVR conversation mode.</small>{/if}
               <small>VAD → ASR → LLM → TTS</small>
-            </div>{/if}{#each messages as message}<article
+            </div>{/if}{#each displayMessages as message}<article
               class:user={message.role === "user"}
             >
               <small>{message.role === "user" ? "YOU" : "GEOVISION"}</small>
@@ -3088,7 +3140,7 @@
               aria-label="Message"
               placeholder="Type something…"
               bind:value={input}
-              disabled={!connected || scenarioRunning}
+              disabled={useSip || !connected || scenarioRunning}
               on:keydown={(e) => {
                 if (e.key === "Enter" && !e.shiftKey) {
                   e.preventDefault();
@@ -3096,7 +3148,7 @@
                 }
               }}></textarea><button
               aria-label="Send message"
-              disabled={!connected ||
+              disabled={useSip || !connected ||
                 busy ||
                 detecting ||
                 scenarioRunning ||
@@ -3107,19 +3159,19 @@
             <button
               class:muted
               on:click={toggleMute}
-              disabled={!connected || !useAsr}
+              disabled={useSip || !connected || !useAsr}
               aria-label={muted ? "Unmute microphone" : "Mute microphone"}
               >{#if muted}<MicOff size={18} />{:else}<Mic
                   size={18}
                 />{/if}</button
             >{#if !useVad && useAsr}<button
-                disabled={!connected || busy || muted || scenarioRunning}
+                disabled={useSip || !connected || busy || muted || scenarioRunning}
                 on:click={toggleManualTurn}
                 ><Mic size={16} />{manualRecording
                   ? "Send voice turn"
                   : "Record voice turn"}</button
-              >{/if}<span class="call-status" role="status">{status}</span
-            >{#if connected || starting}<button
+              >{/if}<span class="call-status" role="status">{useSip ? sipStatus : status}</span
+            >{#if useSip}<span class="sip-call-hint">{sipConnected ? "Hang up on your phone" : "Dial 521 from 520"}</span>{:else if connected || starting}<button
                 class="hangup"
                 on:click={() => hangup()}><PhoneOff size={16} /> Hang up</button
               >{:else}<button
@@ -3165,27 +3217,38 @@
         </div>
         <dl>
           <dt>Transport</dt>
-          <dd>HTTPS</dd>
+          <dd>{useSip ? "SIP / RTP" : "HTTPS"}</dd>
           <dt>Audio</dt>
-          <dd>Microphone + speaker</dd>
+          <dd>{useSip ? "Phone microphone + earpiece" : "Microphone + speaker"}</dd>
           <dt>Turn detection</dt>
-          <dd>{useVad && useAsr ? selectedVad?.label || "—" : "Skipped"}</dd>
+          <dd>{useSip ? (sipSettings?.mode === "tts" ? "Echo test" : sipLive.status?.models?.vad || "Server VAD") : useVad && useAsr ? selectedVad?.label || "—" : "Skipped"}</dd>
           <dt>ASR</dt>
-          <dd>{useAsr ? selectedAsr?.label || "—" : "Skipped · text input"}</dd>
+          <dd>{useSip ? (sipSettings?.mode === "tts" ? "Skipped · echo test" : sipLive.status?.models?.asr || "Server ASR") : useAsr ? selectedAsr?.label || "—" : "Skipped · text input"}</dd>
           <dt>LLM</dt>
-          <dd>{useLlm ? (dialogueSource === "n8n" ? `n8n · ${llm || "—"}` : llm || "—") : "Skipped · passthrough"}</dd>
+          <dd>{useSip ? (sipSettings?.mode === "tts" ? "Skipped · echo test" : sipLive.status?.models?.llm || "Server LLM") : useLlm ? (dialogueSource === "n8n" ? `n8n · ${llm || "—"}` : llm || "—") : "Skipped · passthrough"}</dd>
           <dt>TTS</dt>
           <dd>
-            {useTts ? selectedTts?.label || "—" : "Skipped · text output"}
+            {useSip ? sipSettings?.tts_model || "Server TTS" : useTts ? selectedTts?.label || "—" : "Skipped · text output"}
           </dd>
           <dt>Session</dt>
-          <dd>{run || "—"}</dd>
+          <dd>{useSip ? sipLive.status?.call_id || "—" : run || "—"}</dd>
         </dl>
         <p>
-          Sequential voice pipeline. Listening pauses while the assistant
-          processes and speaks.
+          {useSip ? "Live SIP call. Audio stays on the phone; waveforms show received and transmitted RTP audio." : "Sequential voice pipeline. Listening pauses while the assistant processes and speaks."}
         </p>
       </div>
+      <div class="sip-resize panel-resize" hidden={!visiblePanels.sip}>
+        <PanelDivider label="Resize SIP sidebar" bind:value={sipWidth} min={240} max={420} reverse oncommit={savePanelLayout} />
+      </div>
+      <section class="sip-sidebar" id="demo-sip" aria-label="SIP connection" hidden={!visiblePanels.sip}>
+        <div class="panel-heading">
+          <button class="panel-toggle" aria-label="Hide SIP" title="Hide SIP"
+            aria-controls="demo-sip" aria-expanded="true" data-hide-panel="sip"
+            on:click={() => togglePanel("sip")}><Satellite size={15} /></button>
+          <div class="section-label">SIP CONNECTION</div>
+        </div>
+        <SipSidebar onsettings={receiveSipSettings} onstatus={receiveSipStatus} browserBusy={connected || starting} />
+      </section>
     </section>
     <div
       class="bottom-resize panel-resize"
@@ -3305,7 +3368,7 @@
             ><select
               aria-label="Scenario"
               bind:value={scenarioMode}
-              disabled={scenarioRunning || exampleLoading}
+              disabled={useSip || scenarioRunning || exampleLoading}
               on:change={changeScenario}
               ><option value="audio">Scenario 0 · audio examples</option><option
                 value="maintenance"
@@ -3344,7 +3407,7 @@
                   aria-current={activeExampleName === example.name
                     ? "step"
                     : undefined}
-                  disabled={scenarioRunning ||
+                  disabled={useSip || scenarioRunning ||
                     exampleLoading ||
                     busy ||
                     starting}
@@ -3361,7 +3424,7 @@
                 bind:this={scenarioPreviewPlayer}
               ></audio>{/if}
             <button
-              disabled={scenarioRunning ||
+              disabled={useSip || scenarioRunning ||
                 busy ||
                 detecting ||
                 starting ||
@@ -3371,7 +3434,7 @@
                 (!connected && !canCall)}
               on:click={() => runScenario()}>Send audio</button
             ><button
-              disabled={scenarioRunning ||
+              disabled={useSip || scenarioRunning ||
                 busy ||
                 detecting ||
                 starting ||
@@ -3388,7 +3451,7 @@
               <strong>{voiceFile ? "Custom reference" : voice}</strong>.
             </p>
             <button
-              disabled={scenarioRunning ||
+              disabled={useSip || scenarioRunning ||
                 busy ||
                 detecting ||
                 starting ||
@@ -3406,7 +3469,7 @@
                   <strong>{index + 1}. {step.title}</strong>
                   <p><b>維修人員：</b>{step.message}</p>
                   <button
-                    disabled={scenarioRunning ||
+                    disabled={useSip || scenarioRunning ||
                       busy ||
                       detecting ||
                       starting ||
@@ -3478,10 +3541,14 @@
     grid-template-columns: minmax(0, 1fr);
   }
   .session.no-session {
-    grid-template-columns: minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr) 6px var(--sip-width, 280px);
     grid-template-rows: minmax(0, 1fr);
     min-height: 320px;
   }
+  .session.no-sip { grid-template-columns: minmax(0, 1fr) 6px var(--details-width, 225px); }
+  .session.no-session.no-sip { grid-template-columns: minmax(0, 1fr); }
+  .sip-sidebar { min-width: 0; overflow: auto; padding: 4px 8px; border-left: 1px solid var(--line); }
+  .sip-call-hint { color: var(--muted); font-size: 11px; }
   .bottom-panels.collapsed {
     height: 54px;
   }
@@ -3828,10 +3895,7 @@
   }
   .session {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) 6px minmax(
-        150px,
-        var(--details-width, 225px)
-      );
+    grid-template-columns: minmax(0, 1fr) 6px var(--details-width, 225px) 6px var(--sip-width, 280px);
     min-height: 320px;
     flex: 1;
     padding: 20px;
@@ -4291,13 +4355,15 @@
       min-height: 940px;
     }
 
+    .sip-resize { display: none; }
+    .sip-sidebar { max-height: 420px; border-left: 0; border-top: 1px solid var(--line); }
     .details {
       max-height: 220px;
       overflow: auto;
     }
-    .session {
-      grid-template-columns: 1fr;
-      grid-template-rows: minmax(280px, 1fr) auto;
+    .demo .session {
+      grid-template-columns: minmax(0, 1fr);
+      grid-template-rows: minmax(280px, 1fr) auto auto;
       min-height: 540px;
     }
     .bottom-panels {

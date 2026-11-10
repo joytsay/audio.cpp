@@ -188,6 +188,31 @@ calls. An incomplete LFM2.5 download has a **Resume LFM2.5 Q4_K_M** action.
 Before each LLM turn, the demo explicitly loads the selected worker and waits
 for its ready state. Inference also enables router autoload for that request.
 
+When opening the demo directly at `http://127.0.0.1:8081/#/demo`, LLM requests
+use the same hostname on port `8082` (llama.cpp). HTTPS access uses the gateway's
+same-origin `/llm/` proxy. On the local device, open
+`https://localhost:8083/#/demo` or `https://127.0.0.1:8083/#/demo`; the gateway
+also accepts the configured `AUDIOCPP_HTTPS_HOST`. Local HTTPS uses Caddy's
+internal certificate authority. The native HTTP server on port `8081` does not
+provide the `/llm/` proxy route.
+
+The satellite icon opens a right-hand **SIP Connection** sidebar. **Use SIP**
+enables/disables the server's native phone listener. Its **Call mode** dropdown
+preserves both **Use IVR** and **Test echo** (including #1/#2/#3 TTS greetings).
+Save the account and network settings there; edits restart registration and end
+an active phone call. Hiding the sidebar does not stop SIP. The server and worker
+must share `audiocpp-sip-data` and run matching updated images.
+
+During a SIP call, the demo shows live call events, actual received/transmitted
+PCM levels, and the native worker's conversation text. Test echo has no caller
+transcription; Use IVR shows ASR results and assistant replies. Audio stays on
+the phone. The browser's microphone and scenario controls are disabled in SIP
+mode; the native worker uses its configured server-side ASR/LLM pipeline.
+
+The top-right **CONNECTED** indicator follows SIP registration, so it is on
+while the worker is registered and waiting for a call. Call activity separately
+controls the caller/assistant waveforms and phone call status.
+
 The sidebar groups controls into **VAD**, **ASR**, **LLM**, and **TTS** sections,
 each with an On/Off switch. System prompt and its save button are in **LLM**.
 Turn stages off before starting a call:
@@ -342,9 +367,11 @@ Restart Asterisk separately after edits to its mounted configuration files.
 For browser calls, use the [local Asterisk test PBX](../asterisk/README.md#test-from-the-ivr-webui)
 and open `https://192.168.5.151:8083/#/sip`. Trust the Caddy CA and allow
 microphone access first.
-Keep `SIP_WAIT_FOR_MEDIA=1` in this deployment's `.env` (the default). The
-greeting waits for **#1** (`lingCL`) or **#2** (`WangSG`) on the keypad; the browser never
-sends it automatically. Set it to `0` only for automatic playback on answer.
+In **Use IVR**, calls start automatically: the opening greeting plays, then
+caller RTP audio runs through VAD → ASR → LLM → TTS and replies play back into
+the same SIP call. Listening resumes after each reply. No keypad selection is
+needed, and echo is disabled. `SIP_WAIT_FOR_MEDIA` only gates standalone
+announcement tests; **Test echo** retains its #1/#2/#3 greeting selections.
 Rebuild the `sip` image after changes to the native SIP client;
 this does not require rebuilding CUDA inference binaries.
 
@@ -352,6 +379,19 @@ The same Compose project can now start `sip` and `coturn`. Docker builds libre,
 baresip, the `g711`, `opus` and `turn` modules, and `exampleSIP` automatically.
 No host-side SIP libraries, CMake configuration or `PKG_CONFIG_PATH` are needed.
 The SIP executable and setup tool are also included in the all-in-one image.
+
+TURN is optional. If the external gateway already carries two-way audio in
+Test echo mode, Use IVR can use that same direct RTP path: leave `COTURN_URL=`
+empty in this project's `.env`. Run only one 521 worker; stop the separate
+`sip-server-test` worker when using this project's `sip` service. Otherwise both
+processes compete for the same SIP address/port and shared status files. For a
+direct RTP deployment, set `COMPOSE_PROFILES=sip` and leave `COTURN_URL=` empty.
+Coturn now has its own `turn` profile and is not a dependency of `sip`, so the
+normal `docker compose up -d --build --force-recreate` command leaves it off.
+If coturn was already running, stop it once with `docker compose stop coturn`;
+changing profiles does not stop an existing container.
+If TURN is enabled, its listening/relay IPs must exist on the current machine;
+a stale address can prevent media negotiation and delay answering the call.
 The separate SIP image runs without NVIDIA; it calls the inference workers over
 HTTP. Linux host networking exposes its SIP and RTP addresses directly.
 
@@ -418,8 +458,16 @@ The audio model IDs default to `silero-vad`, `qwen3-asr` and `zipvoice`.
 
 ### Start and test
 
-If the standalone coturn container is running, stop it before starting this
-stack so both servers do not bind the same TURN ports:
+For direct RTP, leave `COTURN_URL=` empty and use `COMPOSE_PROFILES=sip`.
+If the integrated coturn container is already running, stop it once:
+
+```bash
+docker compose stop coturn
+```
+
+For an optional TURN relay, use `COMPOSE_PROFILES=sip,turn` and set a valid
+`COTURN_URL`. If the standalone coturn container is running, stop it first so
+both relay servers do not bind the same TURN ports:
 
 ```bash
 docker compose --env-file .env -f ../coturn/compose.yml down
@@ -429,7 +477,7 @@ Start the integrated services:
 
 ```bash
 docker compose up --build -d
-docker compose logs -f sip coturn
+docker compose logs -f sip
 ```
 
 Wait for the initial model downloads to finish in Studio before making a call.
@@ -460,7 +508,9 @@ docker compose exec sip /opt/sip/bin/exampleSIP --self-test
 If settings change, recreate the affected services:
 
 ```bash
-docker compose up -d --force-recreate sip coturn
+docker compose up -d --force-recreate sip
+# Only when the optional turn profile is enabled:
+# docker compose --profile turn up -d --force-recreate coturn
 ```
 
 Leave `COMPOSE_PROFILES` empty to start only the web/inference services. The

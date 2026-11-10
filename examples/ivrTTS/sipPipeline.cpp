@@ -1,4 +1,5 @@
 #include "sipPipeline.h"
+#include "sipMonitor.h"
 #include "ivrTTS.h"
 #include <curl/curl.h>
 #include <json-c/json.h>
@@ -180,6 +181,8 @@ bool SipPipeline::speech(const std::vector<unsigned char>& pcm) {
     return false;
 }
 void SipPipeline::respond(const std::vector<unsigned char>& pcm) {
+    SipMonitor::get().stage("Transcribing");
+    SipMonitor::get().event("ASR_STARTED", config_.stt_model);
     std::cout << "Pipeline: STT with hotwords\n";
     auto stt = object(); add(stt.get(), "model", config_.stt_model); add(stt.get(), "audio", upload(pcm));
     if (!config_.hotwords.empty()) add(stt.get(), "text", config_.hotwords);
@@ -187,6 +190,8 @@ void SipPipeline::respond(const std::vector<unsigned char>& pcm) {
     auto transcript = post(config_.audio_url + "/v1/audio/transcriptions/details", stt.get(), stopping_);
     auto caller = text(transcript.get(), "text");
     if (caller.find_first_not_of(" \r\n\t") == std::string::npos) { resume(); return; }
+    SipMonitor::get().message("user", caller);
+    SipMonitor::get().event("ASR_COMPLETED", caller);
     std::cout << "Caller: " << caller << "\n";
     std::string context;
     if (config_.use_rag) {
@@ -213,6 +218,8 @@ void SipPipeline::respond(const std::vector<unsigned char>& pcm) {
         context = context.substr(0, 20000);
         if (context.empty()) context = "No relevant records were found.";
     }
+    SipMonitor::get().stage("Thinking");
+    SipMonitor::get().event("LLM_STARTED", config_.llm_model);
     std::cout << "Pipeline: LLM\n";
     auto llm = object(); add(llm.get(), "model", config_.llm_model);
     json_object_object_add(llm.get(), "stream", json_object_new_boolean(false));
@@ -233,6 +240,9 @@ void SipPipeline::respond(const std::vector<unsigned char>& pcm) {
         throw std::runtime_error("LLM returned no choices");
     auto answer = text(member(json_object_array_get_idx(choices, 0), "message"), "content");
     if (answer.empty()) throw std::runtime_error("LLM returned no reply text");
+    SipMonitor::get().message("assistant", answer);
+    SipMonitor::get().event("LLM_COMPLETED", answer);
+    SipMonitor::get().stage("Synthesizing");
     std::cout << "Assistant: " << answer << "\nPipeline: TTS\n";
     // The spoken form is separate from the original answer/history. Even if
     // the LLM misses the prompt's pronunciation rules, never send ASCII digits
@@ -248,6 +258,8 @@ void SipPipeline::respond(const std::vector<unsigned char>& pcm) {
     std::vector<unsigned char> output;
     tts.run_stream(spoken, [&](const unsigned char* bytes, size_t size) { output.insert(output.end(), bytes, bytes + size); },
                    ivrTTS::AudioMode::Wav, [&] { return stopping_.load(); });
+    SipMonitor::get().event("TTS_COMPLETED", config_.tts_model);
+    SipMonitor::get().stage("Speaking");
     history_.emplace_back("user", caller); history_.emplace_back("assistant", answer);
     if (history_.size() > 12) history_.erase(history_.begin(), history_.begin() + 2);
     std::lock_guard<std::mutex> lock(mutex_); reply_ = std::move(output);
@@ -265,7 +277,10 @@ void SipPipeline::work() {
               for (int i = 0; i < 16000; ++i) { window.push_back(input_.front()); input_.pop_front(); } }
             bool active = speech(window);
             if (active) {
-                if (utterance.empty()) utterance = previous;
+                if (utterance.empty()) {
+                    SipMonitor::get().event("VAD_SPEECH_STARTED", "Caller speech detected from SIP audio");
+                    utterance = previous;
+                }
                 utterance.insert(utterance.end(), window.begin(), window.end()); silent = 0;
             } else if (!utterance.empty()) {
                 utterance.insert(utterance.end(), window.begin(), window.end()); ++silent;
@@ -273,10 +288,11 @@ void SipPipeline::work() {
             previous = window;
             if (!utterance.empty() && (silent >= 2 || utterance.size() >= 16000 * 2 * 15)) {
                 { std::lock_guard<std::mutex> lock(mutex_); listening_ = false; input_.clear(); }
+                SipMonitor::get().event("VAD_COMPLETED", "Caller utterance ready for ASR");
                 respond(utterance); utterance.clear(); previous.clear(); silent = 0;
             }
         }
     } catch (const std::exception& e) {
-        if (!stopping_) { std::lock_guard<std::mutex> lock(mutex_); error_ = e.what(); listening_ = false; }
+        if (!stopping_) { SipMonitor::get().event("ERROR", e.what()); SipMonitor::get().stage("Pipeline error"); std::lock_guard<std::mutex> lock(mutex_); error_ = e.what(); listening_ = false; }
     }
 }

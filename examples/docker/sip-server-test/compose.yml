@@ -12,13 +12,14 @@ services:
     init: true
     restart: unless-stopped
     stop_grace_period: 10s
-    entrypoint: ["/opt/sip/bin/exampleSIP"]
-    command:
-      - --tts-greetings
-      - ${SIP_ACCOUNT:-sip:521@175.180.90.33}
-      - ${SIP_PROXY:-sip:175.180.90.33:9900}
-      - listen
     environment:
+      SIP_SETTINGS_DIR: /app/sip-data
+      LLM_URL: http://127.0.0.1:8082/v1
+      LLM_MODEL: ${SIP_LLM_MODEL:-bartowski/Qwen2.5-3B-Instruct-GGUF:Q4_K_M}
+      VAD_MODEL: ${SIP_VAD_MODEL:-silero-vad}
+      STT_MODEL: ${SIP_STT_MODEL:-qwen3-asr}
+      STT_HOTWORDS_FILE: /app/hotword.csv
+      SYSTEM_PROMPT_FILE: /app/prompt.csv
       AUDIOCPP_URL: ${AUDIOCPP_URL:-http://127.0.0.1:8081}
       SIP_TTS_DEBUG_DIR: ${SIP_TTS_DEBUG_DIR:-/tmp/tts-debug}
       TTS_MODEL: ${TTS_MODEL:-zipvoice}
@@ -40,6 +41,9 @@ services:
       SIP_TRACE: "1"
     volumes:
       - ./greetings:/greetings:ro
+      - sip-settings:/app/sip-data
+      - ../../../hotword.csv:/app/hotword.csv:ro
+      - ../../../prompt.csv:/app/prompt.csv:ro
     healthcheck:
       disable: true
 
@@ -73,3 +77,9 @@ services:
       - ./greetings:/greetings:ro
     healthcheck:
       disable: true
+
+# The HTTP server and SIP worker share settings and atomic live snapshots.
+volumes:
+  sip-settings:
+    external: true
+    name: ${SIP_SETTINGS_VOLUME:-agx-one-container_audiocpp-sip-data}
