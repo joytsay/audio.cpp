@@ -65,7 +65,16 @@ into `ivr-knowledge`; port 8085 is internal to Compose.
 
 RAG uses Load knowledge files → Prepare guidance → Default Document Loader →
 Recursive Text Splitter → Simple Vector Store → Retrieve guidance → Return guidance.
-Local Embeddings uses port8084; the local credential is imported automatically.
+Local Embeddings uses `http://voice-ai:8084/v1` on the Compose network, so
+changing the host's LAN address does not break embedding requests. The model
+remains `Qwen/Qwen3-Embedding-0.6B-GGUF:Q8_0` (1024 dimensions). The local
+credential is imported automatically for new installations.
+
+For an existing installation, update both **Local Embeddings → Options → Base URL**
+and its **IVR local embeddings** credential's Base URL to
+`http://voice-ai:8084/v1`. Existing credentials and workflow edits are preserved
+by bootstrap, so rebuilding containers alone does not replace an old LAN URL.
+Save and republish the workflow after editing; keep chunking and top-K unchanged.
 Do not replace existing embedding credentials or retrieval tuning unnecessarily.
 
 Retrieved passages are not a complete work-order inventory. Do not treat a DOCX

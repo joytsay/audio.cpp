@@ -94,7 +94,7 @@
       "parameters": {
         "model": "Qwen/Qwen3-Embedding-0.6B-GGUF:Q8_0",
         "options": {
-          "baseURL": "http://192.168.5.151:8084/v1",
+          "baseURL": "http://voice-ai:8084/v1",
           "batchSize": 8,
           "encodingFormat": "float"
         }
@@ -221,7 +221,7 @@
       "parameters": {
         "width": 1100,
         "height": 350,
-        "content": "## Scenario 1 · 192.168.5.151 preconfigured\nEditor: http://192.168.5.151:5678\nAudio API: http://192.168.5.151:8081\nLLM: http://192.168.5.151:8082/v1\nEmbeddings: http://192.168.5.151:8084/v1\nProduction webhook: http://192.168.5.151:5678/webhook/ivr-scenario-1\nIVR HTTPS webhook: https://192.168.5.151:8083/n8n/webhook/ivr-scenario-1\ndocker compose up -d --build automatically imports the local credentials and workflow after owner-account setup. Existing edits are preserved. Then publish. Use Test Scenario 1 to execute without a webhook; edit turn in Scenario 1 test input for turns 1–3. Expressions show runtime values after input is received."
+        "content": "## Scenario 1 · 192.168.5.151 preconfigured\nEditor: http://192.168.5.151:5678\nAudio API: http://192.168.5.151:8081\nLLM: http://192.168.5.151:8082/v1\nEmbeddings: http://voice-ai:8084/v1\nProduction webhook: http://192.168.5.151:5678/webhook/ivr-scenario-1\nIVR HTTPS webhook: https://192.168.5.151:8083/n8n/webhook/ivr-scenario-1\ndocker compose up -d --build automatically imports the local credentials and workflow after owner-account setup. Existing edits are preserved. Then publish. Use Test Scenario 1 to execute without a webhook; edit turn in Scenario 1 test input for turns 1–3. Expressions show runtime values after input is received."
       }
     },
     {

@@ -99,7 +99,7 @@
       "parameters": {
         "model": "Qwen/Qwen3-Embedding-0.6B-GGUF:Q8_0",
         "options": {
-          "baseURL": "http://192.168.5.151:8084/v1",
+          "baseURL": "http://voice-ai:8084/v1",
           "batchSize": 8,
           "encodingFormat": "float"
         }
