@@ -25,10 +25,9 @@
     Trash2,
     PanelLeftClose,
     PanelLeftOpen,
-    PanelRightOpen,
-    PanelBottomOpen,
+    Radio,
+    Activity,
     ListMusic,
-    EyeOff,
     Satellite,
   } from "@lucide/svelte";
   import logo from "../../../static/logo_cloud.svg?raw";
@@ -2576,7 +2575,7 @@
             aria-expanded="false"
             data-panel-toggle="session"
             on:click={() => togglePanel("session")}
-            ><PanelRightOpen size={17} /></button
+            ><Radio size={17} /></button
           >{/if}
       </div>
       <div class="connection">
@@ -3211,7 +3210,7 @@
             aria-controls="demo-session-details"
             aria-expanded="true"
             data-hide-panel="session"
-            on:click={() => togglePanel("session")}><EyeOff size={15} /></button
+            on:click={() => togglePanel("session")}><Radio size={15} /></button
           >
           <div class="section-label">SESSION</div>
         </div>
@@ -3280,9 +3279,7 @@
             data-hide-panel="events"
             on:click={() => togglePanel("events")}
           >
-            {#if visiblePanels.events}<EyeOff
-                size={15}
-              />{:else}<PanelBottomOpen size={15} />{/if}
+            <Activity size={15} />
             <strong>Events <span>{events.length}</span></strong>
           </button>
           <button
@@ -3354,9 +3351,7 @@
           data-hide-panel="scenarios"
           on:click={() => togglePanel("scenarios")}
         >
-          {#if visiblePanels.scenarios}<EyeOff
-              size={15}
-            />{:else}<PanelBottomOpen size={15} />{/if}
+          <ListMusic size={15} />
           <strong>Scenarios</strong>
         </button>
         <div
