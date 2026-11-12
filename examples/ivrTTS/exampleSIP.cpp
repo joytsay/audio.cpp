@@ -726,9 +726,12 @@ private:
             if (realtime_tts_) poll_tts();
             if (audio_.failed()) throw std::runtime_error("SIP audio driver failed");
             if (pipeline_) {
+                const auto typed = SipMonitor::get().take_text();
+                if (!typed.empty() && !pipeline_->submit_text(typed)) SipMonitor::get().event("TEXT_INPUT_REJECTED", "SIP pipeline is busy");
                 auto error = pipeline_->error(); if (!error.empty()) throw std::runtime_error(error);
                 std::vector<unsigned char> reply;
-                if (!announcement_playing_ && pipeline_->take_reply(reply)) {
+                if (!announcement_playing_ && !pipeline_playing_ && pipeline_->take_reply(reply, &pipeline_interim_)) {
+                    pipeline_playing_ = true;
                     audio_.listen(false); audio_.play(reply); draining_ = false;
                     SipMonitor::get().event("TTS_PLAYBACK_STARTED", "Playing IVR reply into SIP call");
                     SipMonitor::get().stage("Speaking");
@@ -740,11 +743,17 @@ private:
             if (draining_ && Clock::now() >= playback_end_) {
                 draining_ = false;
                 announcement_playing_ = false;
+                const bool was_interim = pipeline_playing_ && pipeline_interim_;
+                pipeline_playing_ = false;
                 SipMonitor::get().event("PLAYBACK_COMPLETED", "SIP audio playback completed");
                 SipMonitor::get().stage("Listening");
                 if (pipeline_) {
                     std::vector<unsigned char> reply;
-                    if (pipeline_->take_reply(reply)) audio_.play(reply);
+                    if (pipeline_->take_reply(reply, &pipeline_interim_)) {
+                        pipeline_playing_ = true; audio_.play(reply);
+                        SipMonitor::get().stage("Speaking");
+                        SipMonitor::get().event("TTS_PLAYBACK_STARTED", "Playing queued IVR audio into SIP call");
+                    } else if (was_interim) SipMonitor::get().stage("Thinking · n8n");
                     else { pipeline_->resume(); audio_.listen(true); }
                 } else if (!keep_open_) close();
             }
@@ -784,6 +793,7 @@ private:
     struct tmr timer_{};
     bool libre_ = false, configured_ = false, initialized_ = false, ua_initialized_ = false, events_ = false;
     bool registered_ = false, established_ = false, waiting_ = false, closing_ = false, draining_ = false;
+    bool pipeline_playing_ = false, pipeline_interim_ = false;
     bool wait_for_media_ = false, waiting_for_media_ = false, media_ready_ = false, announcement_playing_ = false;
     bool greeting_prefix_ = false;
     std::string test_keys_;

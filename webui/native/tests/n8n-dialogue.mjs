@@ -5,7 +5,7 @@ import {createRequire} from 'node:module';
 const require=createRequire(new URL('../package.json',import.meta.url));
 const {buildSync}=require('esbuild');
 const compiled=buildSync({entryPoints:[new URL('../src/lib/n8n-dialogue.ts',import.meta.url).pathname],bundle:true,platform:'node',format:'esm',write:false});
-const {n8nDialogue}=await import('data:text/javascript;base64,'+Buffer.from(compiled.outputFiles[0].text).toString('base64'));
+const {n8nDialogue,isN8nLookup,N8N_LOOKUP_NOTICE}=await import('data:text/javascript;base64,'+Buffer.from(compiled.outputFiles[0].text).toString('base64'));
 const root=new URL('../../../examples/docker/agx-one-container/n8n/',import.meta.url);
 const workflow=JSON.parse(fs.readFileSync(new URL('workflow.json',root)));
 const rag=workflow;
@@ -117,4 +117,52 @@ const row={id:7,order_id:'GV-NATIVE',report_key:'key',dispatch_date:'',maintenan
 const nativeSaved=vm.runInNewContext(`(function(){${nodes.get('Return saved work order').parameters.jsCode}})()`,{$input:{first:()=>({json:row})}})[0].json;
 assert.equal(nativeSaved.persisted,true);assert.equal(nativeSaved.work_order.id,'GV-NATIVE');assert.equal(nativeSaved.work_order.fields.派工日期,'');
 assert.throws(()=>vm.runInNewContext(`(function(){${nodes.get('Return saved work order').parameters.jsCode}})()`,{$input:{first:()=>({json:{}})}}),/did not confirm/);
+const namedRow={...row,reference_number:'A1235',results:JSON.stringify({fields:{派工單號:'A1235'}})};
+const namedSave=vm.runInNewContext(`(function(){${nodes.get('Return saved work order').parameters.jsCode}})()`,{$input:{first:()=>({json:namedRow})}})[0].json;
+assert.equal(output({output:'okay'},{},{saved:namedSave}).reply,'工單 A1235 已新增。');
+assert.equal(saveNode.parameters.columns.value.results,'={{ $json.results }}');
+const detailsFacts={selection:'details',view:'details',reference:'F15P1',work_orders:[{fields:{派工單號:'F15P1/2_ME',派工日期:'2026-06-02',維修內容:'五年一維',FAN數量:14,FAN明細:[{類型:'強排',數量:4},{類型:'間面',數量:10}]}}]};
+const detailsAnswer=output({output:'請提供更多資訊。'},detailsFacts);
+assert.ok(detailsAnswer.reply.includes('F15P1/2_ME')&&detailsAnswer.reply.includes('14')&&!detailsAnswer.reply.includes('已新增'));
+assert.ok(output({output:'已新增。'},{...detailsFacts,view:'fans'}).reply.includes('強排 4 個、間面 10 個'));
 console.log('PASS native Data Table creation/upsert/read nodes and acknowledgment only after a successful table write');
+
+assert.equal(isN8nLookup('查詢最新工單。'),true);
+assert.equal(isN8nLookup('F15P1 工單內容？',[{role:'user',content:'我要回報工單。'}]),true);
+assert.equal(isN8nLookup('FAN幾個',[{role:'user',content:'我要回報工單。'}]),true);
+assert.equal(isN8nLookup('風扇壞了要找誰？'),true);
+assert.equal(isN8nLookup('A1235，五年一維，FAN2個',[{role:'user',content:'我要新增工單。'}]),false);
+assert.equal(isN8nLookup('二零二六年十一月的。',[{role:'user',content:'最新的工单，帮我列出来。'}]),true);
+assert.equal(isN8nLookup('我增加工单。'),false);
+assert.equal(isN8nLookup('二零二六年十一月的。',[{role:'user',content:'我增加工单。'}]),false);
+const realSetTimeout=globalThis.setTimeout,realClearTimeout=globalThis.clearTimeout;
+let fireNotice=null;const timerToken={};
+globalThis.setTimeout=(fn,delay,...args)=>{if(delay===5000){fireNotice=fn;return timerToken;}return realSetTimeout(fn,delay,...args);};
+globalThis.clearTimeout=token=>{if(token===timerToken)fireNotice=null;else realClearTimeout(token);};
+const flush=()=>new Promise(resolve=>realSetTimeout(resolve,0));
+try{
+ let requestStarted=false,finishRequest,finishNotice,noticeSignal,completed=false;
+ globalThis.fetch=async()=>{requestStarted=true;return await new Promise(resolve=>{finishRequest=resolve;});};
+ const answer=n8nDialogue(input,signal,{onProgress:(text,activeSignal)=>{
+  assert.equal(text,'查詢中，請稍後。');assert.ok(requestStarted);noticeSignal=activeSignal;
+  return new Promise(resolve=>{finishNotice=resolve;});
+ }}).then(value=>{completed=true;return value;});
+ await flush();assert.equal(finishNotice,undefined,'no notice before the five-second timer');
+ assert.ok(fireNotice,'five-second timer scheduled');fireNotice();await flush();
+ assert.ok(finishNotice&&!completed,'notice starts while retrieval is pending');
+ finishRequest(Response.json({reply:'Final answer'}));await flush();
+ assert.equal(completed,false,'final playback waits for notice audio');
+ finishNotice();assert.equal(await answer,'Final answer');assert.equal(noticeSignal.aborted,false);
+ let failRequest,cancelled=false;
+ globalThis.fetch=async()=>await new Promise(resolve=>{failRequest=resolve;});
+ const failure=n8nDialogue(input,signal,{onProgress:(_text,activeSignal)=>new Promise(resolve=>{
+  activeSignal.addEventListener('abort',()=>{cancelled=true;resolve();},{once:true});
+ })});
+ fireNotice();await flush();failRequest(Response.json({message:'upstream failure'},{status:500}));
+ await assert.rejects(failure,/upstream failure/);assert.equal(cancelled,true);
+ globalThis.fetch=async()=>Response.json({reply:'Quick answer'});
+ await n8nDialogue(input,signal,{onProgress:()=>assert.fail('fast lookups must be silent')});
+ assert.equal(fireNotice,null,'completed retrieval cancels the pending timer');
+ await n8nDialogue({...input,text:'我增加工单。'},signal,{onProgress:()=>assert.fail('report creation must not announce lookup')});
+}finally{globalThis.fetch=originalFetch;globalThis.setTimeout=realSetTimeout;globalThis.clearTimeout=realClearTimeout;}
+console.log('PASS lookup wait notice after five seconds only, fast lookup silence, ordered audio and error cancellation');

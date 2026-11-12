@@ -1,4 +1,4 @@
-import {unpublishWorkflow} from './unpublish-workflow.mjs';
+import {unpublishWorkflow,upgradeResultsColumn} from './unpublish-workflow.mjs';
 import { spawn } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
@@ -141,7 +141,7 @@ export function resultWorkflowMigration(existing,template){
 // Versioned upgrade: save the old flow first, preserve inference credentials and
 // retrieval tuning, and replace the bundled behavior/layout/tool set together.
 export function mergedWorkflowMigration(existing, rag, template) {
-  if (!existing || existing.meta?.ivrWorkflowRevision>=(template.meta?.ivrWorkflowRevision??5)) return null;
+  if (!existing || existing.meta?.ivrWorkflowRevision>=(template.meta?.ivrWorkflowRevision??8)) return null;
   const next={...structuredClone(existing),...structuredClone(template),id:existing.id,active:existing.active};
   next.meta={...existing.meta,...template.meta};
   next.settings={...existing.settings,...template.settings};
@@ -310,5 +310,5 @@ export async function bootstrap({
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  bootstrap().catch(error => { console.error('[ivr-n8n] Bootstrap failed:', error.message); process.exitCode = 1; });
+  bootstrap({install:async()=>{await importMissing();await upgradeResultsColumn();}}).catch(error => { console.error('[ivr-n8n] Bootstrap failed:', error.message); process.exitCode = 1; });
 }

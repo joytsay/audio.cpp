@@ -18,7 +18,7 @@ def free_port():
 port, broker_port, knowledge_port = free_port(), free_port(), free_port()
 subprocess.run(['docker', 'image', 'inspect', IMAGE, 'audio.cpp-ivr-knowledge:local'], check=True, stdout=subprocess.DEVNULL)
 subprocess.run(['docker', 'run', '--pull=never', '--rm', '-d', '--name', CONTAINER,
- '--network', 'host', '-e', 'N8N_LISTEN_ADDRESS=127.0.0.1',
+ '--network', 'host', '-v', str(ROOT/'examples/docker/agx-one-container/knowledge')+':/knowledge:ro', '-e', 'N8N_LISTEN_ADDRESS=127.0.0.1',
  '-e', f'N8N_PORT={port}', '-e', f'N8N_RUNNERS_BROKER_PORT={broker_port}',
  '-e', 'N8N_SECURE_COOKIE=false', '-e', 'N8N_DIAGNOSTICS_ENABLED=false',
  '-e', 'N8N_PERSONALIZATION_ENABLED=false', IMAGE], check=True, stdout=subprocess.DEVNULL)
@@ -77,7 +77,7 @@ if __name__=='__main__':
   else:raise RuntimeError('Isolated n8n did not become ready')
   try:api('/rest/owner/setup',{'email':'workflow-check@example.com','firstName':'Local','lastName':'Check','password':'LocalWorkflowCheck9!Secure'})
   except RuntimeError:api('/rest/login',{'emailOrLdapLoginId':'workflow-check@example.com','password':'LocalWorkflowCheck9!Secure'})
-  data=api('/rest/api-keys',{'label':'Isolated workflow check '+str(time.time()),'expiresAt':int(time.time())+3600,'scopes':['workflow:list','workflow:create','workflow:read','workflow:update','workflow:activate','credential:create','execution:read','execution:list','dataTable:list','dataTableRow:read']});key=data['data']['rawApiKey']
+  data=api('/rest/api-keys',{'label':'Isolated workflow check '+str(time.time()),'expiresAt':int(time.time())+3600,'scopes':['workflow:list','workflow:create','workflow:read','workflow:update','workflow:activate','credential:create','execution:read','execution:list','dataTable:list','dataTable:create','dataTableColumn:read','dataTableColumn:create','dataTableRow:read','dataTableRow:create']});key=data['data']['rawApiKey']
   workflow=json.loads((ROOT / 'examples/docker/agx-one-container/n8n/workflow.json').read_text())
   cred=api('/api/v1/credentials',{'name':'Local test models','type':'openAiApi','data':{'apiKey':'local','url':mock+'/v1'}})
   for n in workflow['nodes']:
@@ -118,18 +118,33 @@ if __name__=='__main__':
    assert '\n' not in result['reply'] and len(result['reply'])<=200
    assert expected_tool in result['tools']
    return result
+  # Reproduce an existing table from revision 5, preserving its schema/rows.
+  inverse={'派工單號':'reference_number','派工日期':'dispatch_date','工單名稱':'title','設備編號':'equipment_number','維修內容':'maintenance_items','FAN數量':'quantity','備註':'notes','起機測試':'test_result'}
+  columns=next(n for n in workflow['nodes'] if n['name']=='Ensure work_orders')['parameters']['columns']['column']
+  oldTable=api('/api/v1/data-tables',{'name':'work_orders','columns':[{**c,'name':inverse.get(c['name'],c['name'])} for c in columns if c['name']!='results']})
+  historical={'order_id':'GV-HISTORIC','report_key':'historic-key','session_id':'historic-spaced','dispatch_date':'2026-11-12','transcripts':json.dumps(['回要回報工單。','2026年11月12號 A >一二三四五。'],ensure_ascii=False)}
+  api('/api/v1/data-tables/'+oldTable['id']+'/rows',{'data':[historical]})
+  migration='process.argv[1]="/usr/local/lib/node_modules/n8n/bin/n8n"; const {withN8nApi,ensureResultsColumn,tableUpgradeScopes}=await import("/tmp/unpublish-workflow.mjs"); await withN8nApi(tableUpgradeScopes,ensureResultsColumn,{apiUrl:'+json.dumps(base)+'});'
+  migrated=subprocess.run(['docker','exec',CONTAINER,'node','--input-type=module','-e',migration],text=True,capture_output=True)
+  assert migrated.returncode==0,migrated.stdout+migrated.stderr
+  repaired=api('/api/v1/data-tables/'+oldTable['id']+'/rows')['data'][0]
+  assert repaired['reference_number']=='A12345' and repaired['dispatch_date']=='2026-11-12'
+  assert json.loads(repaired['results'])['fields']['派工單號']=='A12345'
+  renamed=api('/api/v1/data-tables/'+oldTable['id']+'/columns')
+  assert 'reference_number' in [c['name'] for c in renamed]
   utterances=['我增加工单。','二零二六年十一月十二号，名称是台积电，工单名称，呃设备编号是一二三四，维修项目五六七八，数量八个。','测试正常。']
   initial=turn('report-call',utterances[0])
   assert initial['reply'].count('？')==1 and '日期' in initial['reply'] and '編號' in initial['reply']
   tables=api('/api/v1/data-tables')['data']
   table=next(t for t in tables if t['name']=='work_orders')
-  def rows():return api('/api/v1/data-tables/'+table['id']+'/rows')['data']
+  def rows():return [r for r in api('/api/v1/data-tables/'+table['id']+'/rows')['data'] if r['session_id']!='historic-spaced']
   assert rows()==[],'the opener asks once and must not insert an empty row yet'
   details=turn('report-call',utterances[1],'add_work_order')
   records=rows();assert len(records)==1
   record=records[0]
   assert record['dispatch_date']=='2026-11-12'
   assert record['equipment_number']=='1234' and record['quantity']=='8個'
+  assert json.loads(record['results'])['fields']['FAN數量']==''
   assert record['test_result']=='' and json.loads(record['transcripts'])==utterances[:2]
   assert record['order_id'] in details['reply'] and '已新增' in details['reply'] and '？' not in details['reply']
   assert knowledge_api('/work-orders')['work_orders']==[],'new saves must not create a JSON store'
@@ -165,6 +180,24 @@ if __name__=='__main__':
   assert len(rows())==2,'retry must upsert the same Data Table row'
   inserts=[batch for batch in embedding if any('Q:' in str(item) for item in batch['input'])]
   assert inserts and all('Q:' in str(item) and 'A:' in str(item) for batch in inserts for item in batch['input']),'Q/A pairs must stay together'
+  turn('example-call','我要新增工單。')
+  example='十一月十二号A一二三五年一维，Fan两个。'
+  exampleReply=turn('example-call',example,'add_work_order')
+  assert exampleReply['reply']=='工單 A1235 已新增。'
+  exampleRow=next(r for r in rows() if r['reference_number']=='A1235')
+  assert json.loads(exampleRow['results'])=={'transcripts':['我要新增工單。',example],'fields':{'派工單號':'A1235','派工日期':'2026/11/12','維修內容':'五年一維','FAN數量':2,'備註':'','起機測試':''}}
+  fullReport='我要回報工單，2026年6月2日下午14:00臺積電F15P1/2_ME VFD備品與維修。\nF15P1H4K-GEX-EF-03 五年一維，更換強排FAN 2個、間面FAN 6個。\nF15P1H4K-GEX-EF-04 五年一維，更換強排FAN 2個、間面FAN 4個。'
+  turn('equipment-call',fullReport)
+  equipmentSave=turn('equipment-call','2026年6月2日下午14:00。\nF15P1H4K-GEX-EF-03 五年一維，更換強排FAN 2個、間面FAN 6個。','add_work_order')
+  assert equipmentSave['reply']=='工單 F15P1/2_ME 已新增。'
+  equipmentRow=next(r for r in rows() if r['session_id']=='equipment-call')
+  assert json.loads(equipmentRow['results'])['fields']['FAN數量']==14
+  count=len(rows())
+  for question in ['最新工單多少','F15P1 呢？','F15P1 工單內容？','可以跟我講F15P1工單內容','最舊工單','FAN幾個']:
+   answer=turn('equipment-call',question)
+   assert '已新增' not in answer['reply'] and len(rows())==count
+   if 'F15P1' in question:assert 'F15P1/2_ME' in answer['reply'] and '14' in answer['reply']
+   if question=='FAN幾個':assert '14' in answer['reply'] and '強排 4 個' in answer['reply'] and '間面 10 個' in answer['reply']
   print('PASS workflow ID migration and isolated n8n with real knowledge service: split spoken-number report, one follow-up question then native Data Table upsert even with missing fields, table-backed retrieval and enrichment despite model refusing tools, persisted record/retry, simplified Chinese lookups, month filtering/date follow-ups, direct one-line answers and isolated call memory (synthetic LLM/embeddings/PDF OCR).')
 
  except Exception:

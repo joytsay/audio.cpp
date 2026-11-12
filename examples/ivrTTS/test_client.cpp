@@ -154,7 +154,7 @@ public:
     std::string url, wav, pcm;
     std::filesystem::path player_audio;
     std::atomic<bool> early{false}, bad_catalog{false};
-    std::atomic<bool> pipeline_mode{false}, rag_fails{false}, stt_waits{false}, dialogue_fails{false};
+    std::atomic<bool> pipeline_mode{false}, rag_fails{false}, stt_waits{false}, dialogue_fails{false}, dialogue_progress{false};
     Server() {
         for (int i = 0; i < 24000; ++i) {
             int sample = int(16000 * std::sin(i * 6.283185307 * 440 / 24000));
@@ -237,6 +237,7 @@ private:
                 send_all(fd, std::string(success ? "HTTP/1.1 200 OK" : "HTTP/1.1 503 Busy") +
                     "\r\nConnection: close\r\nContent-Type: application/json\r\n\r\n" + json);
             };
+            if (route == "/normalize") { respond(body); return; }
             if (route == "/dialogue") {
                 auto input = parse(body);
                 check(field(input.get(), "text") == "Where is the office?", "SIP transcript missing from shared dialogue request");
@@ -247,7 +248,7 @@ private:
                 const std::string result = dialogue_fails ? R"({"type":"error","message":"MCP unavailable"})" "\n" :
                     R"({"type":"event","event":"MCP_TOOL_COMPLETED","summary":"lookup_maintenance_guidance"})" "\n"
                     R"({"type":"reply","reply":"The office is on floor 3."})" "\n";
-                const auto payload = events + result;
+                const auto payload = events + (dialogue_progress ? std::string(R"({"type":"progress","text":"正在查詢，請稍候。"})") + "\n" : "") + result;
                 for (size_t offset = 0; offset < payload.size(); offset += 7) send_all(fd, payload.substr(offset, 7));
                 return;
             }
@@ -396,7 +397,7 @@ class SipServer {
 public:
     std::string uri;
     std::atomic<bool> authenticated{false}, invited{false}, unregistered{false}, bye{false};
-    std::atomic<unsigned> timestamp_gaps{0};
+    std::atomic<unsigned> timestamp_gaps{0}, conversation_packet_goal{70};
     uint32_t last_rtp_timestamp_ = 0;
     bool have_rtp_timestamp_ = false;
     std::atomic<unsigned> packets{0}, voiced_packets{0}, voiced_before_ready{0}, voiced_before_selection{0};
@@ -451,7 +452,7 @@ public:
                         packet[8] = 0; packet[9] = 0; packet[10] = 0; packet[11] = 42;
                         sendto(rtp_, packet.data(), packet.size(), 0, reinterpret_cast<sockaddr*>(&media_peer_), sizeof(media_peer_));
                         ++audio_frames_; next_audio_ = Clock::now() + 20ms;
-                        if (voiced_packets > 70 && !sent_bye_) {
+                        if (voiced_packets > conversation_packet_goal && !sent_bye_) {
                             sent_bye_ = true;
                             send("BYE " + uri + " SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:" + std::to_string(port_) +
                                  ";branch=z9hG4bKbye\r\nFrom: " + dialog_from_ + "\r\nTo: " + dialog_to_ +
@@ -767,8 +768,9 @@ void test_sip(const std::string& executable) {
     {
         // Exercise the sidebar's Use IVR mode with the deployed defaults:
         // incoming call, wait-for-media enabled, and no #1/#2 selection.
-        Server audio; audio.pipeline_mode = true; Temp settings;
+        Server audio; audio.pipeline_mode = true; audio.dialogue_progress = true; Temp settings;
         SipServer sip(false, false, true, false, true);
+        sip.conversation_packet_goal = 125;
         const auto options = settings.path / "gateway.env";
         write_file(options, "SIP_MODE= pipeline\nSIP_ACCOUNT=sip:1001@127.0.0.1\nSIP_PROXY=" + sip.uri +
             "\nSIP_TARGET=listen\nSIP_WAIT_FOR_MEDIA=1\nSIP_ECHO_TEST=1\nSIP_DIALOGUE_URL=" + audio.url + "/dialogue\n");
@@ -782,7 +784,7 @@ void test_sip(const std::string& executable) {
         Process client(executable, {"--env", options.string()});
         check(client.finish(12) == 0, "incoming Use IVR failed: " + client.output);
         sip.verify();
-        check(sip.voiced_packets > 70 && sip.unregistered, "Use IVR did not return speech over the caller's RTP session");
+        check(sip.voiced_packets > 125 && sip.unregistered, "Use IVR did not play both the lookup notice and final reply over RTP");
         check(client.output.find("Waiting for greeting selection") == std::string::npos,
               "Use IVR waited for keypad input instead of listening to SIP audio");
         check(client.output.find("echoing audio") == std::string::npos,
@@ -805,7 +807,7 @@ void test_sip(const std::string& executable) {
         check(json_object_object_get_ex(snapshot.get(), "events", &event_array) &&
               json_object_object_get_ex(snapshot.get(), "messages", &message_array), "SIP demo snapshot missing events or messages");
         const std::string events = json_object_to_json_string(event_array);
-        for (const char* event : {"SIP_CALL_ESTABLISHED", "VAD_COMPLETED", "ASR_COMPLETED", "DIALOGUE_SOURCE", "MCP_TOOL_COMPLETED", "LLM_COMPLETED", "TTS_PLAYBACK_STARTED"})
+        for (const char* event : {"SIP_CALL_ESTABLISHED", "VAD_COMPLETED", "ASR_COMPLETED", "DIALOGUE_SOURCE", "RETRIEVAL_NOTICE", "MCP_TOOL_COMPLETED", "LLM_COMPLETED", "TTS_PLAYBACK_STARTED"})
             check(std::string(events).find(event) != std::string::npos, std::string("SIP demo event missing: ") + event);
         check(field(snapshot.get(), "dialogue_source") == "n8n", "SIP monitor did not report the actual dialogue source");
         const std::string messages = json_object_to_json_string(message_array);
@@ -937,9 +939,24 @@ void test_pipeline() {
             if (requests[i].first != "/dialogue") continue;
             auto body = parse(requests[i].second); json_object* history = nullptr;
             check(json_object_object_get_ex(body.get(), "messages", &history), "dialogue history missing");
-            check(json_object_array_length(history) == turns * 2, "dialogue lost the SIP call history"); ++turns;
+            check(json_object_array_length(history) == turns * 2, "dialogue lost the SIP call history");
+            check(requests[i].second.find("正在查詢") == std::string::npos, "lookup notice leaked into dialogue history"); ++turns;
         }
         check(turns == 2, "SIP turns did not use shared dialogue");
+        pipeline.resume();
+        check(pipeline.submit_text("Where is the office?"), "typed SIP turn rejected while listening");
+        check(!pipeline.submit_text("Duplicate"), "typed SIP turn bypassed busy guard");
+        reply(pipeline);
+        server.dialogue_progress = true;
+        pipeline.resume(); send_turn(pipeline);
+        auto progress_deadline = Clock::now() + 8s;
+        std::vector<unsigned char> notice; bool interim = false;
+        while (Clock::now() < progress_deadline && !pipeline.take_reply(notice, &interim) && pipeline.error().empty()) std::this_thread::sleep_for(10ms);
+        check(interim && std::string(notice.begin(), notice.end()) == server.wav, "SIP lookup notice was not queued as interim audio");
+        std::vector<unsigned char> final; interim = true;
+        while (Clock::now() < progress_deadline && !pipeline.take_reply(final, &interim) && pipeline.error().empty()) std::this_thread::sleep_for(10ms);
+        check(!interim && std::string(final.begin(), final.end()) == server.wav, "final SIP reply did not follow the lookup notice");
+        server.dialogue_progress = false;
         server.dialogue_fails = true;
         pipeline.resume(); send_turn(pipeline);
         const auto deadline = Clock::now() + 6s;

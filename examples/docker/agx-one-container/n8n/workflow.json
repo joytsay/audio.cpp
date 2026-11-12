@@ -417,7 +417,7 @@
         390
       ],
       "parameters": {
-        "jsCode": "// n8n MCP workflow tools may nest JSON strings, arrays and MCP content blocks.\nfunction payloads(value,depth=0){\n if(depth>12||value==null)return [];\n if(typeof value==='string'){try{return payloads(JSON.parse(value),depth+1);}catch{return [];}}\n if(Array.isArray(value))return value.flatMap(v=>payloads(v,depth+1));\n if(typeof value!=='object')return [];\n return [value,...Object.values(value).flatMap(v=>payloads(v,depth+1))];\n}\nconst item=$input.first().json,context=$('Prepare agent context').first().json;\nconst steps=item.intermediateSteps||[];\nconst tools=[context.executed_tool||'retrieve_knowledge',...steps.map(step=>step.action?.tool).filter(name=>typeof name==='string')];\nconst saved=context.saved||steps.filter(s=>/add_work_order$/.test(s.action?.tool||'')).flatMap(s=>payloads(s.observation)).find(p=>p.persisted===true&&p.work_order?.id);\nlet reply;\nif(saved)reply=`工單 ${saved.work_order.id} ${saved.updated?'已補充':'已新增'}。`;\nelse if(context.facts.selection){\n const facts=context.facts,rows=facts.work_orders;\n const label={newest:'最新',oldest:'最舊',all:'查到的'}[facts.selection]||'';\n const scope=facts.period?facts.period.slice(0,4)+'年'+Number(facts.period.slice(5))+'月':'';\n if(!rows.length&&scope)reply=`${scope}沒有工單記錄。`;\n else if(!rows.length)reply=facts.undated_count>0?`${facts.undated_count} 筆工單日期未完整，無法判定${label}工單。`:`沒有查到${label}工單的有效記錄。`;\n else{\n  const summaries=rows.slice(0,3).map(({fields:f})=>`${f['派工單號']}（${f['派工日期']||'日期未完整'}）`);\n  reply=`${scope}${label}工單${rows.length===1?'為':'共 '+rows.length+' 筆：'}${rows.length===1?' ':''}${summaries.join('、')}${rows.length>3?'，其餘 '+(rows.length-3)+' 筆可再查詢':''}。`;\n  if(facts.undated_count>0&&facts.selection!=='all')reply+=`另有 ${facts.undated_count} 筆日期未完整，未列入排序。`;\n }\n}else if(context.report_reply){\n reply=context.report_reply;\n}else{\n if(typeof item.output!=='string'||!item.output.trim())throw new Error('AI Agent returned an empty reply');\n reply=item.output.trim().replace(/^(?:AI|助理|GEOVISION)[：:]\\s*/i,'').split(/\\n|【|---/)[0].trim();\n // One conversational line, never a repeated essay, markdown or chain of thought.\n reply=reply.replace(/[😀-🙏🌀-🫿]/gu,'').trim();\n const first=reply.match(/^.*?[。？！!?](?:[」”])?/u)?.[0];\n if(first)reply=first;\n if(reply.length>200)reply='請告訴我這一輪要查詢或確認的重點？';\n if(/已(?:新增|儲存|建立|輸入完成|完成)|新增成功|保存成功|完成回報|回報完成|工單完成/.test(reply))reply='工單尚未儲存。';\n if(!reply)throw new Error('AI Agent returned an empty spoken reply');\n}\nreturn [{json:{reply:reply.replace(/\\s*\\n\\s*/g,' '),tools:[...new Set(tools)]}}];\n"
+        "jsCode": "// n8n MCP workflow tools may nest JSON strings, arrays and MCP content blocks.\nfunction payloads(value,depth=0){\n if(depth>12||value==null)return [];\n if(typeof value==='string'){try{return payloads(JSON.parse(value),depth+1);}catch{return [];}}\n if(Array.isArray(value))return value.flatMap(v=>payloads(v,depth+1));\n if(typeof value!=='object')return [];\n return [value,...Object.values(value).flatMap(v=>payloads(v,depth+1))];\n}\nconst item=$input.first().json,context=$('Prepare agent context').first().json;\nconst steps=item.intermediateSteps||[];\nconst tools=[context.executed_tool||'retrieve_knowledge',...steps.map(step=>step.action?.tool).filter(name=>typeof name==='string')];\nconst saved=context.saved||steps.filter(s=>/add_work_order$/.test(s.action?.tool||'')).flatMap(s=>payloads(s.observation)).find(p=>p.persisted===true&&p.work_order?.id);\nlet reply;\nif(saved)reply=`工單 ${saved.work_order.fields?.工單編號||saved.work_order.id} ${saved.updated?'已補充':'已新增'}。`;\nelse if(context.facts.selection){\n const facts=context.facts,rows=facts.work_orders;\n const reference=facts.reference;\n const label={newest:'最新',oldest:'最舊',all:'查到的'}[facts.selection]||'';\n const scope=facts.period?facts.period.slice(0,4)+'年'+Number(facts.period.slice(5))+'月':'';\n if(!rows.length&&reference)reply=`沒有查到 ${reference} 的工單。`;\n else if(!rows.length&&scope)reply=`${scope}沒有工單記錄。`;\n else if(!rows.length)reply=facts.undated_count>0?`${facts.undated_count} 筆工單日期未完整，無法判定${label}工單。`:`沒有查到${label}工單的有效記錄。`;\n else if(facts.view==='fans'||facts.view==='details'){\n  const items=rows.flatMap(r=>Array.isArray(r.fields.FAN明細)?r.fields.FAN明細:[]);\n  const total=items.length?items.reduce((n,item)=>n+Number(item.數量||0),0):rows.reduce((n,r)=>n+(Number(String(r.fields.FAN數量??'').replace(/個$/,''))||0),0);\n  const types=[...new Set(items.map(i=>i.類型).filter(Boolean))].map(type=>`${type} ${items.filter(i=>i.類型===type).reduce((n,i)=>n+Number(i.數量||0),0)} 個`).join('、');\n  const fan=total?`FAN 共 ${total} 個${types?'（'+types+'）':''}`:'未記錄 FAN 數量';\n  reply=facts.view==='fans'?`${fan}。`:rows.slice(0,2).map(({fields:f})=>`${f['派工單號']}：${f['派工日期']||'日期未完整'}，${f['維修內容']||f['維修項目']||f['派工項目']||'未記錄維修內容'}`).join('；')+`，${fan}。`;\n }else{\n  const summaries=rows.slice(0,3).map(({fields:f})=>`${f['派工單號']}（${f['派工日期']||'日期未完整'}）`);\n  reply=`${scope}${label}工單${rows.length===1?'為':'共 '+rows.length+' 筆：'}${rows.length===1?' ':''}${summaries.join('、')}${rows.length>3?'，其餘 '+(rows.length-3)+' 筆可再查詢':''}。`;\n  if(facts.undated_count>0&&facts.selection!=='all')reply+=`另有 ${facts.undated_count} 筆日期未完整，未列入排序。`;\n }\n}else if(context.report_reply){\n reply=context.report_reply;\n}else{\n if(typeof item.output!=='string'||!item.output.trim())throw new Error('AI Agent returned an empty reply');\n reply=item.output.trim().replace(/^(?:AI|助理|GEOVISION)[：:]\\s*/i,'').split(/\\n|【|---/)[0].trim();\n // One conversational line, never a repeated essay, markdown or chain of thought.\n reply=reply.replace(/[😀-🙏🌀-🫿]/gu,'').trim();\n const first=reply.match(/^.*?[。？！!?](?:[」”])?/u)?.[0];\n if(first)reply=first;\n if(reply.length>200)reply='請告訴我這一輪要查詢或確認的重點？';\n if(/已(?:新增|儲存|建立|輸入完成|完成)|新增成功|保存成功|完成回報|回報完成|工單完成/.test(reply))reply='工單尚未儲存。';\n if(!reply)throw new Error('AI Agent returned an empty spoken reply');\n}\nreturn [{json:{reply:reply.replace(/\\s*\\n\\s*/g,' '),tools:[...new Set(tools)]}}];\n"
       }
     },
     {
@@ -536,7 +536,7 @@
         390
       ],
       "parameters": {
-        "jsCode": "// n8n MCP workflow tools may nest JSON strings, arrays and MCP content blocks.\nfunction payloads(value,depth=0){\n if(depth>12||value==null)return [];\n if(typeof value==='string'){try{return payloads(JSON.parse(value),depth+1);}catch{return [];}}\n if(Array.isArray(value))return value.flatMap(v=>payloads(v,depth+1));\n if(typeof value!=='object')return [];\n return [value,...Object.values(value).flatMap(v=>payloads(v,depth+1))];\n}\nconst input=$('Prepare IVR input').first().json;\nconst decision=$('Register caller turn').first().json;\nconst results=payloads($input.first().json);\nconst saved=results.find(v=>v.persisted===true&&v.work_order?.id);\nconst facts=results.find(v=>Array.isArray(v.work_orders)&&v.selection)||results.find(v=>Array.isArray(v.passages));\nif(decision.tool==='add_work_order'&&!saved)throw new Error('Knowledge MCP did not confirm saving the work order');\nif(!facts&&!saved)throw new Error('Knowledge MCP returned no fresh retrieval result');\nif(decision.selection&&facts?.selection!==decision.selection)throw new Error('Knowledge MCP returned the wrong work-order selection');\nif(decision.period&&facts?.period!==decision.period)throw new Error('Knowledge MCP returned the wrong work-order month');\nconst preview=saved?{persisted:true,work_order_id:saved.work_order.id}:facts.work_orders?{selection:facts.selection,period:facts.period,selected_count:facts.selected_count,undated_count:facts.undated_count,work_orders:facts.work_orders.slice(0,3).map(({fields:f})=>({fields:{派工單號:f['派工單號'],派工日期:f['派工日期'],負責人:f['負責人'],客戶名稱:f['客戶名稱'],派工項目:f['派工項目']}}))}:{passages:facts.passages.slice(0,3).map(text=>text.slice(0,500)),sources:[...new Set((facts.sources||[]).map(s=>s.source))]};\nreturn [{json:{...input,...decision,facts:facts||{},saved,executed_tool:decision.tool||'retrieve_knowledge',retrieval_json:JSON.stringify(preview)}}];\n"
+        "jsCode": "// n8n MCP workflow tools may nest JSON strings, arrays and MCP content blocks.\nfunction payloads(value,depth=0){\n if(depth>12||value==null)return [];\n if(typeof value==='string'){try{return payloads(JSON.parse(value),depth+1);}catch{return [];}}\n if(Array.isArray(value))return value.flatMap(v=>payloads(v,depth+1));\n if(typeof value!=='object')return [];\n return [value,...Object.values(value).flatMap(v=>payloads(v,depth+1))];\n}\nconst input=$('Prepare IVR input').first().json;\nconst decision=$('Register caller turn').first().json;\nconst results=payloads($input.first().json);\nconst saved=results.find(v=>v.persisted===true&&v.work_order?.id);\nconst facts=results.find(v=>Array.isArray(v.work_orders)&&v.selection)||results.find(v=>Array.isArray(v.passages));\nif(decision.tool==='add_work_order'&&!saved)throw new Error('Knowledge MCP did not confirm saving the work order');\nif(!facts&&!saved)throw new Error('Knowledge MCP returned no fresh retrieval result');\nif(decision.selection&&facts?.selection!==decision.selection)throw new Error('Knowledge MCP returned the wrong work-order selection');\nif(decision.period&&facts?.period!==decision.period)throw new Error('Knowledge MCP returned the wrong work-order month');\nif(decision.reference&&facts?.reference!==decision.reference)throw new Error('Knowledge MCP returned the wrong work-order reference');\nif(decision.view&&facts?.view!==decision.view)throw new Error('Knowledge MCP returned the wrong work-order detail view');\nconst preview=saved?{persisted:true,work_order_id:saved.work_order.id}:facts.work_orders?{selection:facts.selection,period:facts.period,selected_count:facts.selected_count,undated_count:facts.undated_count,work_orders:facts.work_orders.slice(0,3).map(({fields:f})=>({fields:{派工單號:f['派工單號'],派工日期:f['派工日期'],負責人:f['負責人'],客戶名稱:f['客戶名稱'],派工項目:f['派工項目']}}))}:{passages:facts.passages.slice(0,3).map(text=>text.slice(0,500)),sources:[...new Set((facts.sources||[]).map(s=>s.source))]};\nreturn [{json:{...input,...decision,facts:facts||{},saved,executed_tool:decision.tool||'retrieve_knowledge',retrieval_json:JSON.stringify(preview)}}];\n"
       }
     },
     {
@@ -674,6 +674,10 @@
             {
               "name": "transcripts",
               "type": "string"
+            },
+            {
+              "name": "results",
+              "type": "string"
             }
           ]
         },
@@ -774,7 +778,8 @@
             "quantity": "={{ $json.quantity }}",
             "notes": "={{ $json.notes }}",
             "test_result": "={{ $json.test_result }}",
-            "transcripts": "={{ $json.transcripts }}"
+            "transcripts": "={{ $json.transcripts }}",
+            "results": "={{ $json.results }}"
           },
           "matchingColumns": [],
           "schema": [
@@ -885,6 +890,16 @@
               "display": true,
               "type": "string",
               "canBeUsedToMatch": true
+            },
+            {
+              "id": "results",
+              "displayName": "results",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
             }
           ],
           "attemptToConvertTypes": false,
@@ -903,7 +918,7 @@
         1000
       ],
       "parameters": {
-        "jsCode": "function tableRecord(row){\n const value=name=>String(row[name]??'');\n let transcripts=[];try{transcripts=JSON.parse(row.transcripts||'[]');if(!Array.isArray(transcripts))transcripts=[];}catch{transcripts=[];}\n const id=value('order_id')||`DT-${row.id}`;\n return {id,source:'n8n Data Table / work_orders',sessionId:value('session_id'),reportKey:value('report_key'),createdAt:row.createdAt,updatedAt:row.updatedAt,transcripts,fields:{派工單號:id,派工日期:value('dispatch_date'),工單編號:value('reference_number'),工單名稱:value('title'),設備編號:value('equipment_number'),維修內容:value('maintenance_items'),維修項目:value('maintenance_items'),數量:value('quantity'),備註:value('notes'),起機測試:value('test_result')}};\n}\n\nconst row=$input.first().json;\nif(!row.id||!row.order_id)throw new Error('Data Table did not confirm saving the row');\nreturn [{json:{persisted:true,work_order:tableRecord(row)}}];"
+        "jsCode": "function tableRecord(row){\n const value=name=>String(row[name]??'');\n let transcripts=[];try{transcripts=JSON.parse(row.transcripts||'[]');if(!Array.isArray(transcripts))transcripts=[];}catch{transcripts=[];}\n let resultFields={};try{resultFields=JSON.parse(row.results||'{}')?.fields||{};}catch{}\n const id=value('order_id')||`DT-${row.id}`;\n return {id,source:'n8n Data Table / work_orders',sessionId:value('session_id'),reportKey:value('report_key'),createdAt:row.createdAt,updatedAt:row.updatedAt,transcripts,fields:{...resultFields,派工單號:value('reference_number')||id,派工日期:value('dispatch_date'),工單編號:value('reference_number'),工單名稱:value('title'),設備編號:value('equipment_number'),維修內容:value('maintenance_items'),維修項目:value('maintenance_items'),數量:value('quantity'),備註:value('notes'),起機測試:value('test_result')}};\n}\n\nconst row=$input.first().json;\nif(!row.id||!row.order_id)throw new Error('Data Table did not confirm saving the row');\nreturn [{json:{persisted:true,work_order:tableRecord(row)}}];"
       }
     },
     {
@@ -941,7 +956,7 @@
         1240
       ],
       "parameters": {
-        "jsCode": "function tableRecord(row){\n const value=name=>String(row[name]??'');\n let transcripts=[];try{transcripts=JSON.parse(row.transcripts||'[]');if(!Array.isArray(transcripts))transcripts=[];}catch{transcripts=[];}\n const id=value('order_id')||`DT-${row.id}`;\n return {id,source:'n8n Data Table / work_orders',sessionId:value('session_id'),reportKey:value('report_key'),createdAt:row.createdAt,updatedAt:row.updatedAt,transcripts,fields:{派工單號:id,派工日期:value('dispatch_date'),工單編號:value('reference_number'),工單名稱:value('title'),設備編號:value('equipment_number'),維修內容:value('maintenance_items'),維修項目:value('maintenance_items'),數量:value('quantity'),備註:value('notes'),起機測試:value('test_result')}};\n}\n\nconst records=$input.all().map(item=>item.json).filter(row=>row.id).map(tableRecord);\nreturn [{json:{query:$('Prepare tool request').first().json.query,records}}];"
+        "jsCode": "function tableRecord(row){\n const value=name=>String(row[name]??'');\n let transcripts=[];try{transcripts=JSON.parse(row.transcripts||'[]');if(!Array.isArray(transcripts))transcripts=[];}catch{transcripts=[];}\n let resultFields={};try{resultFields=JSON.parse(row.results||'{}')?.fields||{};}catch{}\n const id=value('order_id')||`DT-${row.id}`;\n return {id,source:'n8n Data Table / work_orders',sessionId:value('session_id'),reportKey:value('report_key'),createdAt:row.createdAt,updatedAt:row.updatedAt,transcripts,fields:{...resultFields,派工單號:value('reference_number')||id,派工日期:value('dispatch_date'),工單編號:value('reference_number'),工單名稱:value('title'),設備編號:value('equipment_number'),維修內容:value('maintenance_items'),維修項目:value('maintenance_items'),數量:value('quantity'),備註:value('notes'),起機測試:value('test_result')}};\n}\n\nconst records=$input.all().map(item=>item.json).filter(row=>row.id).map(tableRecord);\nreturn [{json:{query:$('Prepare tool request').first().json.query,records}}];"
       }
     }
   ],
@@ -1297,6 +1312,6 @@
   "pinData": {},
   "tags": [],
   "meta": {
-    "ivrWorkflowRevision": 5
+    "ivrWorkflowRevision": 8
   }
 }

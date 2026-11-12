@@ -41,7 +41,7 @@ export async function ensureModel(base, model, signal, fetchImpl = fetch) {
   throw new Error(`Selected LLM did not become ready: ${model}`);
 }
 
-export function createDialogueServer({ dialogue, fetchImpl = fetch,
+export function createDialogueServer({ dialogue, normalizeTranscript = text => text, fetchImpl = fetch,
   audioUrl = process.env.SIP_DIALOGUE_AUDIO_URL || 'http://voice-ai:8081',
   llmUrl = process.env.SIP_DIALOGUE_LLM_URL || 'http://voice-ai:8082/v1',
   workflowUrl = process.env.SIP_DIALOGUE_WORKFLOW_URL || 'http://127.0.0.1:5678/webhook/ivr-agent',
@@ -49,7 +49,7 @@ export function createDialogueServer({ dialogue, fetchImpl = fetch,
   return createServer(async (req, res) => {
     res.setHeader('Cache-Control', 'no-store');
     if (req.method === 'GET' && req.url === '/health') { res.setHeader('Content-Type', 'application/json'); res.end('{"status":"ok"}'); return; }
-    if (req.method !== 'POST' || req.url !== '/dialogue') { res.writeHead(404); res.end(); return; }
+    if (req.method !== 'POST' || !['/dialogue', '/normalize'].includes(req.url)) { res.writeHead(404); res.end(); return; }
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(new Error('SIP dialogue timed out')), 300_000);
     res.on('close', () => { if (!res.writableEnded) controller.abort(); });
@@ -58,6 +58,12 @@ export function createDialogueServer({ dialogue, fetchImpl = fetch,
       let raw = '';
       for await (const chunk of req) { raw += chunk; if (Buffer.byteLength(raw) > 256 * 1024) throw new Error('SIP dialogue request is too large'); }
       const body = JSON.parse(raw);
+      if (req.url === '/normalize') {
+        if (typeof body.text !== 'string' || body.text.length > 20000) throw new Error('Invalid transcript');
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({text: normalizeTranscript(body.text, typeof body.context === 'string' ? body.context : '')}));
+        return;
+      }
       if (typeof body.text !== 'string' || !body.text.trim() || typeof body.model !== 'string' || typeof body.prompt !== 'string' || !Array.isArray(body.messages) || body.messages.length > 12 || body.messages.some(m => !['user', 'assistant'].includes(m.role) || typeof m.content !== 'string')) throw new Error('Invalid SIP dialogue request');
       const signal = controller.signal;
       const response = await fetchImpl(`${audioUrl}/v1/ui/demo-settings`, { signal, cache: 'no-store' });
@@ -77,6 +83,7 @@ export function createDialogueServer({ dialogue, fetchImpl = fetch,
           if (!dialogue) throw new Error('n8n dialogue handler is unavailable');
           reply = await dialogue({ sessionId: body.sessionId, text: body.text, model: ready, messages }, signal, {
             workflowUrl,
+            onProgress: text => send({type: 'progress', text}),
             onWorkflow: state => send({ type: 'event', event: `N8N_WORKFLOW_${state.toUpperCase()}`, summary: 'GeoVision · Workflow' }),
             onTool: (name, state) => send({ type: 'event', event: `MCP_TOOL_${state.toUpperCase()}`, summary: name }),
           });
@@ -87,7 +94,7 @@ export function createDialogueServer({ dialogue, fetchImpl = fetch,
         }
       }
       if (typeof reply !== 'string' || !reply.trim()) throw new Error('Dialogue returned an empty reply');
-      send({ type: 'reply', reply: reply.trim() });
+      send({ type: 'reply', reply: normalizeTranscript(reply.trim()) });
       res.end();
     } catch (error) {
       if (!res.destroyed) {
@@ -100,5 +107,6 @@ export function createDialogueServer({ dialogue, fetchImpl = fetch,
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const dialogue = await loadDialogue(process.env.SIP_DIALOGUE_SOURCE_DIR || '/dialogue');
-  createDialogueServer({ dialogue }).listen(Number(process.env.SIP_DIALOGUE_PORT || 8086), '0.0.0.0', () => console.log('[sip-dialogue] Ready on port 8086'));
+  const { normalizeTranscript } = await import(pathToFileURL(path.join(process.env.SIP_DIALOGUE_SOURCE_DIR || '/dialogue', 'transcript.mjs')).href);
+  createDialogueServer({ dialogue, normalizeTranscript }).listen(Number(process.env.SIP_DIALOGUE_PORT || 8086), '0.0.0.0', () => console.log('[sip-dialogue] Ready on port 8086'));
 }

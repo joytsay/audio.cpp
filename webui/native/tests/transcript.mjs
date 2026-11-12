@@ -131,3 +131,21 @@ assert.equal(
 console.log(
   "PASS dates/times, serials/units, leading zeros, code separators from hotwords, unchanged maintenance terms/prose, and Traditional assistant text",
 );
+
+const apiCompiled=buildSync({entryPoints:[fileURLToPath(new URL('../src/lib/openai.ts',import.meta.url))],bundle:true,platform:'node',format:'esm',write:false});
+const {endpointJson}=await import(`data:text/javascript;base64,${Buffer.from(apiCompiled.outputFiles[0].text).toString('base64')}`);
+const previousFetch=globalThis.fetch;
+try{
+ const spoken='二零二六年十二月十二号。';
+ globalThis.fetch=async()=>Response.json({text:spoken});
+ const preserved=await endpointJson('http://asr.test/v1','audio/transcriptions/details',{},undefined,{preserveTranscript:true});
+ assert.equal(preserved.text,spoken,'raw transcript opt-out remains available to other callers');
+ const normal=await endpointJson('http://asr.test/v1','audio/transcriptions/details');
+ assert.ok(normal.text.includes('2026'),'existing transcription normalization remains available elsewhere');
+}finally{globalThis.fetch=previousFetch;}
+assert.equal(normalizeTranscript('十一月十二号A一二三五年一维，Fan两个。'),'11月12號A1235年一維，Fan2個。');
+console.log('PASS Traditional Chinese/digits for n8n ASR and optional raw transcript API');
+
+assert.equal(normalizeTranscript('2026年11月12號 A 一二三四五。'),'2026年11月12號 A12345。');
+assert.equal(normalizeTranscript('A 一 二 三 四 五，FAN 兩個。'),'A12345，FAN 2個。');
+assert.equal(normalizeTranscript('A 12345，A 一樣。'),'A12345，A 一樣。');

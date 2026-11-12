@@ -37,6 +37,33 @@ inline HttpResponse sip_live_response(bool management, const std::filesystem::pa
     return response;
 }
 
+// Queue a typed turn for the current native call; never run a separate browser session.
+inline HttpResponse sip_text_response(const HttpRequest & request, bool management, const std::filesystem::path & base) {
+    if (!management) return error_response(403, "SIP control is disabled", "forbidden");
+    static std::mutex mutex; std::lock_guard<std::mutex> lock(mutex);
+    namespace json = engine::io::json;
+    const auto body = json::parse(request.body);
+    if (!body.is_object()) return error_response(400, "SIP text must be an object", "invalid_request_error");
+    const auto *text = body.find("text"), *call = body.find("call_id");
+    if (!text || !text->is_string() || text->as_string().empty() || text->as_string().size() > 20000 || !call || !call->is_string())
+        return error_response(400, "text and call_id are required", "invalid_request_error");
+    const auto snapshot = json::parse(sip_live_response(true, base).body);
+    const auto *status = snapshot.find("status");
+    if (!snapshot.require("live").as_bool() || !status || !status->is_object() || !status->require("active").as_bool() ||
+        status->require("call_id").as_string() != call->as_string())
+        return error_response(409, "Start a SIP call before sending text", "conflict");
+    if (status->require("stage").as_string() != "Listening")
+        return error_response(409, "Wait for the SIP assistant to finish", "conflict");
+    const auto root = sip_settings_root(base), path = root / "text-turn.json";
+    if (std::filesystem::exists(path)) return error_response(409, "A SIP text turn is already pending", "conflict");
+    const auto temp = root / "text-turn.json.tmp";
+    std::ofstream out(temp); out << request.body; out.close();
+    if (!out) return error_response(500, "Cannot queue SIP text", "server_error");
+    std::filesystem::permissions(temp, std::filesystem::perms::owner_read | std::filesystem::perms::owner_write);
+    std::filesystem::rename(temp, path);
+    return json_response("{\"queued\":true}");
+}
+
 // Values are parsed as data by sipEnv.h. Secrets never leave this endpoint.
 inline HttpResponse sip_settings_response(const HttpRequest & request, bool management,
                                          const std::filesystem::path & base) {

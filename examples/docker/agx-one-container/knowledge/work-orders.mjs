@@ -23,7 +23,7 @@ export function createWorkOrderStore({root=process.env.KNOWLEDGE_DATA_ROOT||'/da
   async prepare(sessionId){
    const context=contexts.get(sessionId);
    if(!context||Date.now()-context.seen>3600000)throw failure('找不到本通話的原始回報。');
-   const {history}=context,draft=reportDraft(history);
+   const {history}=context,draft=reportDraft(history,now());
    if(!draft)throw failure('尚未開始工單回報。');
    if(draft.cancelled)throw failure('本次工單回報已取消。');
    if(callDecision(history,now()).tool!=='add_work_order')throw failure('尚未收到單次追問後的回覆。');
@@ -36,8 +36,9 @@ export function createWorkOrderStore({root=process.env.KNOWLEDGE_DATA_ROOT||'/da
    return {
     order_id,report_key,session_id:sessionId,dispatch_date:draft.date||'',reference_number:draft.fields.工單編號||'',
     title:draft.fields.工單名稱||'',equipment_number:draft.fields.設備編號||'',maintenance_items:draft.fields.維修項目||(/維修|更換|保養|修理/.test(draft.details)?draft.details:''),
-    quantity:draft.fields.數量||'',notes:draft.turns.filter(t=>/備註|备注/.test(t)).join('\n'),test_result,
+    quantity:draft.fields.數量||'',fan_quantity:draft.fanQuantity||'',notes:draft.turns.filter(t=>/備註|备注/.test(t)).join('\n'),test_result,
     transcripts:JSON.stringify(draft.turns),
+    results:JSON.stringify({transcripts:draft.turns,fields:{派工單號:draft.fields.工單編號||order_id,派工日期:(draft.date||'').replaceAll('-','/'),維修內容:draft.fields.維修項目||'',FAN數量:draft.fanQuantity?Number(draft.fanQuantity):'',備註:draft.turns.filter(t=>/備註|备注/.test(t)).join('\n'),起機測試:test_result,...(draft.fanItems.length>1?{FAN明細:draft.fanItems}:{})}}),
    };
   }
  };

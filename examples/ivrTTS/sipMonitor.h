@@ -58,6 +58,21 @@ public:
         messages_.push_back({role, bounded(content, 2048)});
         while (messages_.size() > 40) messages_.pop_front();
     }
+    std::string take_text() {
+        if (!enabled_) return {};
+        const auto path = directory_ / "text-turn.json";
+        std::ifstream input(path); if (!input) return {};
+        std::string raw((std::istreambuf_iterator<char>(input)), {});
+        input.close(); std::filesystem::remove(path);
+        if (raw.size() > 22000) return {};
+        auto* data = json_tokener_parse(raw.c_str()); if (!data) return {};
+        struct Cleanup { json_object* p; ~Cleanup() { json_object_put(p); } } cleanup{data};
+        json_object *call = nullptr, *text = nullptr;
+        if (!json_object_object_get_ex(data, "call_id", &call) || !json_object_object_get_ex(data, "text", &text)) return {};
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!active_ || call_id_ != json_object_get_string(call)) return {};
+        return json_object_get_string(text);
+    }
     void publish() noexcept {
         if (!enabled_) return;
         try {

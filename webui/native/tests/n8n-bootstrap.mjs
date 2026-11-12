@@ -113,11 +113,11 @@ try{
 }finally{await fs.rm(renameDir,{recursive:true,force:true});}
 console.log('PASS workflow ID migration: preserved edits, rebound self-reference, released legacy routes, retry and idempotence');
 const revisionTwo=structuredClone(template);revisionTwo.meta.ivrWorkflowRevision=2;
-assert.equal(mergedWorkflowMigration(revisionTwo,null,template).meta.ivrWorkflowRevision,5,'existing revision 2 must receive the routing/save fixes');
+assert.equal(mergedWorkflowMigration(revisionTwo,null,template).meta.ivrWorkflowRevision,8,'existing revision 2 must receive the routing/save fixes');
 const revisionThree=structuredClone(template);revisionThree.meta.ivrWorkflowRevision=3;
-assert.equal(mergedWorkflowMigration(revisionThree,null,template).meta.ivrWorkflowRevision,5,'revision 3 upgrades to native Data Table intake');
+assert.equal(mergedWorkflowMigration(revisionThree,null,template).meta.ivrWorkflowRevision,8,'revision 3 upgrades to native Data Table intake');
 const revisionFour=structuredClone(template);revisionFour.meta.ivrWorkflowRevision=4;
-assert.equal(mergedWorkflowMigration(revisionFour,null,template).meta.ivrWorkflowRevision,5,'revision 4 upgrades to one-question Data Table saving');
+assert.equal(mergedWorkflowMigration(revisionFour,null,template).meta.ivrWorkflowRevision,8,'revision 4 upgrades to one-question Data Table saving');
 console.log('PASS unified bootstrap: one workflow, backups of both legacy flows, two tools, preserved credentials/top-K, same-workflow RAG, retry and idempotence');
 
 const credentialDir=await fs.mkdtemp(path.join(os.tmpdir(),'ivr-local-credential-test-'));
@@ -145,3 +145,9 @@ try {
  assert.equal((await fs.stat(path.join(credentialDir,backups[0]))).mode & 0o777,0o600);
 }finally{await fs.rm(credentialDir,{recursive:true,force:true});}
 console.log('PASS old bundled credential URL repair preserves API keys/custom settings and backs up encrypted credentials');
+
+const {repairTableRow}=await import('../../../examples/docker/agx-one-container/n8n/unpublish-workflow.mjs');
+const repaired=repairTableRow({order_id:'GV-F0FF402E0DED',reference_number:'',dispatch_date:'2026-11-12',transcripts:JSON.stringify(['回要回報工單。','2026年11月12號 A >一二三四五。']),createdAt:'2026-11-11T23:16:41.115Z'});
+assert.equal(repaired.reference_number,'A12345');
+assert.equal(JSON.parse(repaired.results).fields.派工單號,'A12345');
+console.log('PASS existing CSV row repair recovers spaced work-order number without changing internal ID');

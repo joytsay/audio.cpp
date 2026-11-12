@@ -139,7 +139,9 @@ services:
     volumes:
       - audiocpp-n8n-data:/home/node/.n8n
       - ./n8n:/templates:ro
+      - ./knowledge:/knowledge:ro
       - ../../../webui/native/src/lib/n8n-dialogue.ts:/dialogue/n8n-dialogue.ts:ro
+      - ../../../webui/native/dist/transcript.mjs:/dialogue/transcript.mjs:ro
       - ../../../webui/native/src/lib/mcp-http.ts:/dialogue/mcp-http.ts:ro
     healthcheck:
       test: ["CMD", "node", "-e", "Promise.all(['http://127.0.0.1:5678/healthz','http://127.0.0.1:8086/health'].map(u=>fetch(u))).then(rs=>process.exit(rs.every(r=>r.ok)?0:1)).catch(()=>process.exit(1))"]

@@ -44,6 +44,7 @@ voices/
 /webui/native/.svelte-kit/
 /webui/native/dist/*
 !/webui/native/dist/index.html
+!/webui/native/dist/transcript.mjs
 
 audio-vtest-*
 

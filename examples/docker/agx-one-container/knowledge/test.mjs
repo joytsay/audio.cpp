@@ -54,6 +54,41 @@ try{
  const numberOnly='number-only';orders.register({sessionId:numberOnly,text:'我增加工单。'});
  assert.equal(orders.register({sessionId:numberOnly,text:'编号是零零一二三四。'}).tool,'add_work_order');
  const numbered=await orders.prepare(numberOnly);assert.equal(numbered.reference_number,'001234');assert.equal(numbered.dispatch_date,'');
+ const spaced='spaced-identifier';orders.register({sessionId:spaced,text:'回要回報工單。'});
+ const spacedDetails='2026年11月12號 A 一二三四五。';
+ assert.equal(orders.register({sessionId:spaced,text:spacedDetails}).tool,'add_work_order');
+ const spacedRow=await orders.prepare(spaced);
+ assert.equal(spacedRow.reference_number,'A12345');assert.equal(spacedRow.dispatch_date,'2026-11-12');
+ assert.equal(JSON.parse(spacedRow.results).fields.派工單號,'A12345');
+ const exampleStore=createWorkOrderStore({root:dataRoot,now:()=>new Date('2026-11-12T00:00:00Z')});
+ exampleStore.register({sessionId:'sample',text:'我要新增工單。'});
+ const example='十一月十二号A一二三五年一维，Fan两个。';
+ exampleStore.register({sessionId:'sample',text:example});
+ const exampleRow=await exampleStore.prepare('sample');
+ assert.equal(exampleRow.reference_number,'A1235');
+ assert.deepEqual(JSON.parse(exampleRow.results),{transcripts:['我要新增工單。',example],fields:{派工單號:'A1235',派工日期:'2026/11/12',維修內容:'五年一維',FAN數量:2,備註:'',起機測試:''}});
+ const maintenanceSession='equipment-detail-queries';
+ const fullReport='我要回報工單，2026年6月2日下午14:00臺積電F15P1/2_ME VFD備品與維修。\nF15P1H4K-GEX-EF-03 五年一維，更換強排FAN 2個、間面FAN 6個。\nF15P1H4K-GEX-EF-04 五年一維，更換強排FAN 2個、間面FAN 4個。';
+ orders.register({sessionId:maintenanceSession,text:fullReport});
+ orders.register({sessionId:maintenanceSession,text:'2026年6月2日下午14:00。\nF15P1H4K-GEX-EF-03 五年一維，更換強排FAN 2個、間面FAN 6個。'});
+ const equipmentRow=await orders.prepare(maintenanceSession);
+ assert.equal(equipmentRow.reference_number,'F15P1/2_ME','never truncate identifiers at / or _');
+ assert.ok(equipmentRow.equipment_number.includes('F15P1H4K-GEX-EF-03')&&equipmentRow.equipment_number.includes('F15P1H4K-GEX-EF-04'));
+ assert.equal(JSON.parse(equipmentRow.results).fields.FAN數量,14,'deduplicate repeated equipment lines across turns');
+ const {fanItems}=await import('./conversation.mjs');
+ assert.equal(fanItems(fullReport.replaceAll('\n','')).reduce((sum,item)=>sum+item.數量,0),14,'ASR may omit equipment line breaks');
+ const equipmentRecord={id:equipmentRow.order_id,source:'n8n Data Table / work_orders',fields:{...JSON.parse(equipmentRow.results).fields,設備編號:equipmentRow.equipment_number}};
+ for(const question of ['最新工單多少','F15P1 呢？','F15P1 工單內容？','可以跟我講F15P1工單內容','最舊工單','FAN幾個','起機測試正常嗎？']){
+  const decision=orders.register({sessionId:maintenanceSession,text:question});
+  assert.equal(decision.tool,'retrieve_knowledge',question+' must never authorize a save');
+  await assert.rejects(orders.prepare(maintenanceSession),/追問/);
+  if(question.includes('F15P1')){
+   const lookup=await store.documents(decision.query,[equipmentRecord]);
+   assert.equal(lookup.result.selection,'details');assert.equal(lookup.result.work_orders.length,1);
+   assert.equal(lookup.result.work_orders[0].fields.FAN數量,14);
+  }
+  if(question==='FAN幾個')assert.equal(decision.view,'fans');
+ }
  const cancelled='cancel';orders.register({sessionId:cancelled,text:'我增加工单。'});orders.register({sessionId:cancelled,text:'取消回報。'});
  await assert.rejects(orders.prepare(cancelled),/取消/);
  const record={id:row.order_id,source:'n8n Data Table / work_orders',fields:{派工單號:row.order_id,派工日期:row.dispatch_date,設備編號:row.equipment_number}};

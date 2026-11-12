@@ -54,7 +54,8 @@ export async function endpointJson<T>(
   base: string,
   path: string,
   init: RequestInit = {},
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  options: { preserveTranscript?: boolean } = {}
 ): Promise<T> {
   const headers = new Headers(init.headers);
   if (init.body && !(init.body instanceof FormData) && !headers.has('Content-Type')) {
@@ -63,7 +64,7 @@ export async function endpointJson<T>(
   const response = await fetch(apiEndpoint(base, path), { ...init, headers, signal });
   if (!response.ok) throw await responseError(response);
   const result = await response.json() as T;
-  return isTranscriptionPath(path) ? traditionalTranscriptionResponse(result) : result;
+  return isTranscriptionPath(path) && !options.preserveTranscript ? traditionalTranscriptionResponse(result) : result;
 }
 
 export async function endpointBlob(

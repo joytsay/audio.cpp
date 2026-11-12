@@ -152,6 +152,12 @@ export function normalizeSpokenNumbers(text: string): string {
       );
     },
   );
+  // ASR can insert spaces between a short identifier prefix and spoken digits.
+  // Rejoin only multi-digit runs, leaving prose such as A 一樣 untouched.
+  result = result.replace(
+    new RegExp(`(?<![A-Za-z0-9])([A-Za-z]{1,2})[ \t]+([0-9${digits}](?:[ \t]*[0-9${digits}])+)`, "g"),
+    (_match, prefix: string, value: string) => prefix + value.replace(/[ \t]/g, ""),
+  );
   // Without this boundary, EF零三五年一維 would incorrectly become EF035年一維.
   return result
     .split(/(五\s*年\s*一\s*維)/)

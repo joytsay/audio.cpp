@@ -53,11 +53,13 @@ export function workOrderSelection(query,sheets,{now=new Date()}={}){
   const sheet=sheets.find(s=>s.name==='派工');if(!sheet)throw new Error('CSD資料庫.xlsx is missing 派工');
   const {selection:mode,period}=intent;
   const normalized=sheet.rows.map(row=>{const original=row.fields['派工日期'],date=dispatchDate(original);return date&&date!==original?{...row,original_dispatch_date:original,fields:{...row.fields,派工日期:date}}:row;});
-  const candidates=intent.invalidPeriod?[]:period?normalized.filter(r=>String(r.fields['派工日期']||'').startsWith(period+'-')):normalized;
+  const matching=intent.reference?normalized.filter(row=>[row.fields.派工單號,row.fields.工單編號].some(value=>String(value||'').toUpperCase().includes(intent.reference.toUpperCase()))):[];
+  const scoped=intent.reference?(matching.length?matching:normalized.filter(row=>JSON.stringify(row.fields).toUpperCase().includes(intent.reference.toUpperCase()))):normalized;
+  const candidates=intent.invalidPeriod?[]:period?scoped.filter(r=>String(r.fields['派工日期']||'').startsWith(period+'-')):scoped;
   const dated=candidates.filter(row=>{const d=row.fields['派工日期'];return /^\d{4}-\d{2}-\d{2}$/.test(d)&&!Number.isNaN(Date.parse(d))&&new Date(d).toISOString().slice(0,10)===d;}).sort((a,b)=>a.fields['派工日期'].localeCompare(b.fields['派工日期'])||a.row-b.row);
   const date=mode==='oldest'?dated[0]?.fields['派工日期']:dated.at(-1)?.fields['派工日期'];
-  const rows=mode==='all'?candidates:dated.filter(row=>row.fields['派工日期']===date);
-  return {source:filenames.excel,sheet:'派工',selection:mode,period,total_count:candidates.length,selected_count:rows.length,undated_count:candidates.length-dated.length,work_orders:rows};
+  const rows=mode==='all'||mode==='details'?candidates:dated.filter(row=>row.fields['派工日期']===date);
+  return {source:filenames.excel,sheet:'派工',selection:mode,period,reference:intent.reference,view:intent.view,total_count:candidates.length,selected_count:rows.length,undated_count:candidates.length-dated.length,work_orders:rows};
 }
 function workbookDocument(excel,sheet){return {source:excel.source,sheet:sheet.name,modified:excel.modified,kind:'workbook_records',extraction:'xlsx',rowCount:sheet.rows.length,text:sheet.rows.length?sheet.rows.map(row=>`來源：${excel.source}；工作表：${sheet.name}；列：${row.row}\n${JSON.stringify(row.fields)}`).join('\n\n'):'此資料表目前沒有記錄。'};}
 export function createKnowledgeStore({root=process.env.KNOWLEDGE_ROOT||'/files',pdf=extractPdf,orders=createWorkOrderStore()}={}){

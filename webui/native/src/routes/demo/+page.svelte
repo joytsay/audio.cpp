@@ -478,6 +478,7 @@
     rtf?: number | null;
   };
   type DemoMessage = ChatMessage & {
+    progressNotice?: boolean;
     audioId?: string;
     audioUrl?: string;
     audioName?: string;
@@ -579,6 +580,9 @@
   }
   $: sipOnline = useSip && sipLive.live && !!sipLive.status?.registered;
   $: sipConnected = useSip && sipLive.live && !!sipLive.status?.active;
+  $: sipCanSend = sipConnected && sipSettings?.mode !== "tts" && sipLive.status?.stage === "Listening";
+  $: scenarioConnected = useSip ? sipConnected : connected;
+  $: scenarioCanCall = useSip ? sipCanSend : connected || canCall;
   $: displayMessages = (useSip ? sipLive.status?.messages || [] : messages) as DemoMessage[];
   $: sipStatus = !sipLive.live ? (useSip ? "Waiting for SIP worker" : "SIP disabled")
     : sipLive.status?.stage || "Waiting for incoming call";
@@ -1248,8 +1252,9 @@
       audioName?: string;
     } = {},
   ) {
+    if (useSip && (!controller || controller.signal.aborted)) controller = new AbortController();
     const signal = controller?.signal;
-    if (!connected || busy || !signal) return;
+    if (!(useSip ? sipCanSend : connected) || busy || !signal) return;
     busy = true;
     error = "";
     reset();
@@ -1341,6 +1346,7 @@
       if (scenarioMode !== "audio")
         text = maintenanceTranscript(text, hotwords);
       if (generation !== epoch) return;
+      if (useSip) { await sendSipText(normalizeTranscript(text, hotwords), signal); return; }
       if (audioMessageId)
         messages = messages.map((message) =>
           message.audioId === audioMessageId
@@ -1404,9 +1410,31 @@
           sessionId: run,
           text,
           model: llm,
-          messages: messages.filter(message => message.content.trim())
+          messages: messages.filter(message => !message.progressNotice && message.content.trim())
             .map(({ role, content }) => ({ role, content })),
-        }, signal, { onWorkflow: state => {
+        }, signal, { onProgress: async (notice, noticeSignal) => {
+          if (generation !== epoch || noticeSignal.aborted) return;
+          messages = [...messages, {role: "assistant", content: notice, progressNotice: true}];
+          status = notice;
+          record("RETRIEVAL_NOTICE", notice);
+          try {
+            if (useTts) {
+              const id = await load(ttsKey, noticeSignal, true, ttsRunMode);
+              const body: Record<string, unknown> = {model: id, input: notice, response_format: "wav"};
+              if (referencePath && supportsReference) { body.voice_ref = referencePath; body.reference_text = referenceText; }
+              else body.voice = voice;
+              if (streamingTts) await streamTts(body, generation, noticeSignal);
+              else {
+                const speech = await synthesizeSpeech(body, noticeSignal);
+                if (generation === epoch && !noticeSignal.aborted) await playAudio(speech.audio, generation, "assistant", noticeSignal);
+              }
+            }
+          } catch (cause) {
+            if (!noticeSignal.aborted && generation === epoch) record("RETRIEVAL_NOTICE_FAILED", String(cause));
+          } finally {
+            if (generation === epoch && !noticeSignal.aborted) status = "Thinking · n8n";
+          }
+        }, onWorkflow: state => {
           if (generation !== epoch || signal.aborted) return;
           record(`N8N_WORKFLOW_${state.toUpperCase()}`, "GeoVision · Workflow");
         }, onTool: (name, state) => {
@@ -1454,7 +1482,7 @@
                   })}`,
                 }]),
                 ...messages
-                  .filter((message) => message.content.trim())
+                  .filter((message) => !message.progressNotice && message.content.trim())
                   .map(({ role, content }) => ({ role, content })),
               ],
               max_tokens: 256,
@@ -2132,7 +2160,7 @@
     if (scenarioRunning || busy || detecting || starting) return;
     if (isAudioScenario && ((!scenarioFile && !examples?.length) || !useAsr))
       return;
-    if (scenarioMode === "maintenance" && useTts && !technicianVoice) {
+    if (!useSip && scenarioMode === "maintenance" && useTts && !technicianVoice) {
       scenarioStatus = "Two built-in voices are required.";
       return;
     }
@@ -2144,17 +2172,17 @@
     error = "";
     scenarioStatus = "Starting scenario…";
     try {
-      if (!connected) await call();
-      if (!connected || token !== scenarioToken) return;
+      if (!useSip && !scenarioConnected) await call();
+      if (!scenarioConnected || token !== scenarioToken) return;
       if (isAudioScenario) {
         const queue = examples || [null];
         for (let index = 0; index < queue.length; index++) {
-          if (!connected || token !== scenarioToken) break;
+          if (!scenarioConnected || token !== scenarioToken) break;
           const example = queue[index];
           const file = example
             ? await loadScenarioExample(example)
             : scenarioFile!;
-          if (!connected || token !== scenarioToken) break;
+          if (!scenarioConnected || token !== scenarioToken) break;
           setScenarioFile(file, example?.name || selectedExampleName);
           activeExampleName = example?.name || selectedExampleName;
           scenarioStatus = `Scenario ${scenarioNumber} · ${index + 1}/${queue.length} · ${file.name}`;
@@ -2182,12 +2210,12 @@
               ? maintenanceScenarioSteps.length
               : first + 1;
         for (let index = first; index < last; index++) {
-          if (!connected || token !== scenarioToken) break;
+          if (!scenarioConnected || token !== scenarioToken) break;
           scenarioStep = index;
           scenarioStatus = `Scenario 1 · ${index + 1}/3 · ${maintenanceScenarioSteps[index].title}`;
           input = maintenanceScenarioSteps[index].message;
           await tick();
-          if (token !== scenarioToken || !connected) break;
+          if (token !== scenarioToken || !scenarioConnected) break;
           const text = input;
           input = "";
           await respond(text, undefined, epoch, { speakTechnician: true });
@@ -2229,9 +2257,28 @@
     scenarioStatus = "Scenario stopped";
     reset();
   }
+  async function sendSipText(text: string, signal: AbortSignal) {
+    const callId = sipLive.status?.call_id;
+    const after = Math.max(0, ...(sipLive.status?.events || []).map(e => e.id));
+    await endpointJson("", "ui/sip/text", { method: "POST", body: JSON.stringify({call_id: callId, text}) }, signal);
+    const deadline = Date.now() + 300_000;
+    let accepted = false;
+    while (Date.now() < deadline) {
+      signal.throwIfAborted();
+      const snapshot = await endpointJson<SipLive>("", "ui/sip/live", {cache: "no-store"}, signal);
+      receiveSipStatus(snapshot);
+      if (!snapshot.live || !snapshot.status?.active || snapshot.status.call_id !== callId) throw new Error("SIP call ended");
+      const events = snapshot.status.events.filter(e => e.id > after);
+      if (events.some(e => e.type === "TEXT_INPUT_REJECTED" || e.type === "ERROR")) throw new Error("SIP turn could not complete");
+      accepted ||= events.some(e => e.type === "TEXT_INPUT");
+      if (accepted && snapshot.status.stage === "Listening") return;
+      await new Promise(resolve => setTimeout(resolve, 250));
+    }
+    throw new Error("SIP text turn timed out");
+  }
   function send() {
     const text = input.trim();
-    if (!text || busy || detecting || scenarioRunning || !connected) return;
+    if (!text || busy || detecting || scenarioRunning || !(useSip ? sipCanSend : connected)) return;
     input = "";
     void respond(text, undefined, epoch, {
       speakTechnician: scenarioMode === "maintenance",
@@ -3166,7 +3213,7 @@
               aria-label="Message"
               placeholder="Type something…"
               bind:value={input}
-              disabled={useSip || !connected || scenarioRunning}
+              disabled={(useSip ? !sipCanSend : !connected) || scenarioRunning}
               on:keydown={(e) => {
                 if (e.key === "Enter" && !e.shiftKey) {
                   e.preventDefault();
@@ -3174,7 +3221,7 @@
                 }
               }}></textarea><button
               aria-label="Send message"
-              disabled={useSip || !connected ||
+              disabled={(useSip ? !sipCanSend : !connected) ||
                 busy ||
                 detecting ||
                 scenarioRunning ||
@@ -3390,7 +3437,7 @@
             ><select
               aria-label="Scenario"
               bind:value={scenarioMode}
-              disabled={useSip || scenarioRunning || exampleLoading}
+              disabled={scenarioRunning || exampleLoading}
               on:change={changeScenario}
               ><option value="audio">Scenario 0 · audio examples</option><option
                 value="maintenance"
@@ -3429,7 +3476,7 @@
                   aria-current={activeExampleName === example.name
                     ? "step"
                     : undefined}
-                  disabled={useSip || scenarioRunning ||
+                  disabled={scenarioRunning ||
                     exampleLoading ||
                     busy ||
                     starting}
@@ -3446,22 +3493,22 @@
                 bind:this={scenarioPreviewPlayer}
               ></audio>{/if}
             <button
-              disabled={useSip || scenarioRunning ||
+              disabled={scenarioRunning ||
                 busy ||
                 detecting ||
                 starting ||
                 !scenarioFile ||
                 exampleLoading ||
                 !useAsr ||
-                (!connected && !canCall)}
+                !scenarioCanCall}
               on:click={() => runScenario()}>Send audio</button
             ><button
-              disabled={useSip || scenarioRunning ||
+              disabled={scenarioRunning ||
                 busy ||
                 detecting ||
                 starting ||
                 !useAsr ||
-                (!connected && !canCall)}
+                !scenarioCanCall}
               on:click={() => runScenario(undefined, scenarioAudioExamples)}
               >Play all {scenarioAudioExamples.length} examples</button
             >
@@ -3473,12 +3520,12 @@
               <strong>{voiceFile ? "Custom reference" : voice}</strong>.
             </p>
             <button
-              disabled={useSip || scenarioRunning ||
+              disabled={scenarioRunning ||
                 busy ||
                 detecting ||
                 starting ||
-                (!connected && !canCall) ||
-                (useTts && !technicianVoice)}
+                !scenarioCanCall ||
+                (!useSip && useTts && !technicianVoice)}
               on:click={() => runScenario()}>Run Scenario 1</button
             >
             <details class="scenario-script">
@@ -3491,11 +3538,11 @@
                   <strong>{index + 1}. {step.title}</strong>
                   <p><b>維修人員：</b>{step.message}</p>
                   <button
-                    disabled={useSip || scenarioRunning ||
+                    disabled={scenarioRunning ||
                       busy ||
                       detecting ||
                       starting ||
-                      (!connected && !canCall)}
+                      !scenarioCanCall}
                     on:click={() => runScenario(index)}
                     >Send technician turn {index + 1}</button
                   >

@@ -141,6 +141,19 @@ int main() {
             if (minitts::server::sip_live_response(false, root).status != 403 ||
                 engine::io::json::parse(minitts::server::sip_live_response(true, root).body).require("live").as_bool())
                 throw std::runtime_error("SIP live guard or missing monitor status failed");
+            request.method = "POST"; request.body = R"({"call_id":"test-call","text":"我要新增工單。"})";
+            if (minitts::server::sip_text_response(request, false, root).status != 403 ||
+                minitts::server::sip_text_response(request, true, root).status != 409)
+                throw std::runtime_error("SIP typed input bypassed management or active-call guard");
+            auto snapshot = [&](const std::string& stage) { std::ofstream out(root / "sip-data/live.json"); out << "{\"active\":true,\"call_id\":\"test-call\",\"stage\":\"" << stage << "\"}"; };
+            snapshot("Speaking");
+            if (minitts::server::sip_text_response(request, true, root).status != 409)
+                throw std::runtime_error("SIP typed input interrupted playback");
+            snapshot("Listening");
+            if (minitts::server::sip_text_response(request, true, root).status != 200 ||
+                !std::filesystem::exists(root / "sip-data/text-turn.json") ||
+                minitts::server::sip_text_response(request, true, root).status != 409)
+                throw std::runtime_error("SIP typed input was not queued exactly once");
             const auto permissions = std::filesystem::status(saved).permissions();
             if ((permissions & (std::filesystem::perms::group_all | std::filesystem::perms::others_all)) != std::filesystem::perms::none)
                 throw std::runtime_error("SIP credentials are not private");
