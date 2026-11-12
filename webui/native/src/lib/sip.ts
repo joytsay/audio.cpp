@@ -27,6 +27,7 @@ export type SipLive = {
     call_id: string;
     peer: string;
     stage: string;
+    dialogue_source?: "prompt.csv" | "n8n";
     registered: boolean;
     active: boolean;
     updated_at: number;

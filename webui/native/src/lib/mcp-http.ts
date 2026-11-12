@@ -11,7 +11,13 @@ export class McpHttpClient {
   private id = 0;
   private session = "";
   private protocol = "2025-03-26";
-  constructor(private url: string, private signal: AbortSignal) {}
+  // Keep this class erasable for the shared Node strip-only runtime.
+  private url: string;
+  private signal: AbortSignal;
+  constructor(url: string, signal: AbortSignal) {
+    this.url = url;
+    this.signal = signal;
+  }
 
   private async send(method: string, params?: unknown, notification = false): Promise<any> {
     this.signal.throwIfAborted();

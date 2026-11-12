@@ -242,6 +242,7 @@
     if (
       settingsLoading ||
       savingSettings ||
+      savingDialogueSource ||
       connected ||
       starting ||
       cloneBusy ||
@@ -504,8 +505,14 @@
     scenarioAudioName = "",
     scenarioStatus = "";
   let transcriptElement: HTMLDivElement | null = null;
-  $: if (messages.length) void scrollTranscript(messages.length);
-  async function scrollTranscript(_count: number) {
+  let lastTranscriptSnapshot = "";
+  $: if (transcriptElement) void scrollTranscript(JSON.stringify(displayMessages));
+  async function scrollTranscript(snapshot: string) {
+    // SIP publishes repeated snapshots and caps its message history. Compare
+    // content so new replies scroll even at the cap, without pulling the user
+    // back down on every unchanged SIP status update.
+    if (snapshot === lastTranscriptSnapshot) return;
+    lastTranscriptSnapshot = snapshot;
     await tick();
     if (transcriptElement)
       transcriptElement.scrollTop = transcriptElement.scrollHeight;
@@ -782,6 +789,21 @@
     }
   }
   let dialogueSource: DialogueSource = "prompt.csv";
+  let savingDialogueSource = false;
+  async function changeDialogueSource() {
+    if (!useSip || savingDialogueSource || savingSettings || settingsLoading) return;
+    savingDialogueSource = true;
+    try {
+      const current = await endpointJson<{ settings: DemoSettings | null }>("", "ui/demo-settings", { cache: "no-store" });
+      await endpointJson("", "ui/demo-settings", {
+        method: "POST",
+        body: JSON.stringify({ settings: { ...(current.settings || { schema_version: 1 }), dialogue_source: dialogueSource } }),
+      });
+      settingsStatus = "Dialogue source saved · applies to the next SIP turn";
+    } catch (cause) {
+      settingsStatus = `Could not save SIP dialogue source: ${cause instanceof Error ? cause.message : cause}`;
+    } finally { savingDialogueSource = false; }
+  }
   let prompt =
     "你是現場維修保養的語音助理。請用繁體中文簡短回答，準確保留工單、設備代碼及數字。";
   const defaultReferenceText =
@@ -1384,7 +1406,10 @@
           model: llm,
           messages: messages.filter(message => message.content.trim())
             .map(({ role, content }) => ({ role, content })),
-        }, signal, { llmBase: llmBase(), onTool: (name, state) => {
+        }, signal, { onWorkflow: state => {
+          if (generation !== epoch || signal.aborted) return;
+          record(`N8N_WORKFLOW_${state.toUpperCase()}`, "GeoVision · Workflow");
+        }, onTool: (name, state) => {
           if (generation !== epoch || signal.aborted) return;
           status = `n8n MCP · ${name} · ${state}`;
           record(`MCP_TOOL_${state.toUpperCase()}`, name);
@@ -2618,6 +2643,7 @@
       <button
         disabled={settingsLoading ||
           savingSettings ||
+          savingDialogueSource ||
           connected ||
           starting ||
           discovering ||
@@ -2804,12 +2830,13 @@
               >{/each}</select
           ></label
         >
-        <label>Dialogue source<select aria-label="Dialogue source" bind:value={dialogueSource}>
+        <label>Dialogue source<select aria-label="Dialogue source" bind:value={dialogueSource} on:change={changeDialogueSource} disabled={savingDialogueSource}>
           <option value="prompt.csv">prompt.csv</option>
           <option value="n8n">n8n</option>
         </select></label>
+        {#if useSip}<small>Source changes apply to the next SIP turn. Save model settings to change its LLM.</small>{/if}
         {#if dialogueSource === "n8n"}
-          <small>The local LLM uses tools from the published IVR Maintenance MCP Tools workflow.</small>
+          <small>Uses the published GeoVision · Workflow.</small>
         {:else}
         <label
           >System prompt<textarea rows="4" bind:value={prompt}
@@ -3224,7 +3251,7 @@
           <dt>ASR</dt>
           <dd>{useSip ? (sipSettings?.mode === "tts" ? "Skipped · echo test" : sipLive.status?.models?.asr || "Server ASR") : useAsr ? selectedAsr?.label || "—" : "Skipped · text input"}</dd>
           <dt>LLM</dt>
-          <dd>{useSip ? (sipSettings?.mode === "tts" ? "Skipped · echo test" : sipLive.status?.models?.llm || "Server LLM") : useLlm ? (dialogueSource === "n8n" ? `n8n · ${llm || "—"}` : llm || "—") : "Skipped · passthrough"}</dd>
+          <dd>{useSip ? (sipSettings?.mode === "tts" ? "Skipped · echo test" : `${(sipLive.status?.dialogue_source || dialogueSource) === "n8n" ? "n8n · " : ""}${(sipLive.status?.dialogue_source ? sipLive.status?.models?.llm : llm) || "Server LLM"}`) : useLlm ? (dialogueSource === "n8n" ? `n8n · ${llm || "—"}` : llm || "—") : "Skipped · passthrough"}</dd>
           <dt>TTS</dt>
           <dd>
             {useSip ? sipSettings?.tts_model || "Server TTS" : useTts ? selectedTts?.label || "—" : "Skipped · text output"}

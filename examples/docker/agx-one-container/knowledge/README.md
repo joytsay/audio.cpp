@@ -1,28 +1,28 @@
-# Read-only local knowledge extraction
+# Source-grounded knowledge and caller context
 
-`ivr-knowledge` is a Node.js service on the internal Compose network at
-`http://knowledge:8085`. It reads four read-only project-root mounts:
+`ivr-knowledge` serves the internal Compose network at `http://knowledge:8085`. Original files are mounted read-only under `/files`:
 
-| File | Extraction |
+| Source | Q/A generation |
 |---|---|
-| prompt.csv | UTF-8 maintenance rules |
-| 情境模擬_20261105.docx | Mammoth text extraction, labelled scenario examples |
-| CSD資料庫.xlsx | ExcelJS, all worksheets with dates and leading-zero identifiers |
-| (備品維修)PY252-0059-工單-20260602-2工-CL、JC.pdf | Text layer or Poppler/Tesseract Traditional Chinese and English OCR |
+| 情境模擬_20261105.docx | Scenario 2 field pairings/conversation guidance; other conversations remain labelled examples. |
+| CSD資料庫.xlsx | Actual rows across every worksheet, preserving dates, leading-zero identifiers, SNs and source attribution. |
+| (備品維修)PY252-0059-工單-20260602-2工-CL、JC.pdf | Source text/OCR and visually reviewed Q/A tied to the reviewed file hash. Handwritten values still require verification. |
+| prompt.csv | Supporting instructions; sample facts are not indexed. |
 
-`GET /health` checks readable files. `GET /documents` returns source-tagged
-knowledge for RAG, with separate logical documents for each workbook sheet.
-POST/PATCH/PUT/DELETE requests are rejected. There are no work-order CRUD,
-CSV conversion, database-write or arbitrary-file endpoints. No Python is needed.
-The previously generated CSV and backups are preserved on the host but unused.
+## Caller intake and n8n storage
 
-Extraction is cached by source file size/mtime/ctime. Concurrent requests share
-OCR. Query text and call history are not cached here. Scanned handwriting can
-be misread: OCR codes, dates and quantities must be verified against the PDF.
+`POST /call-turn` registers raw caller transcripts. “我增加工单” or another report opener asks exactly one question about date, numbers and maintenance details. The next response selects `add_work_order`, even if fields are missing. `POST /work-order-draft` then prepares a flat row from registered transcripts; it does **not** persist or claim success.
 
-All four files must exist on the AGX. Following file replacements by Office,
-recreate this service to refresh the read-only file bind mounts:
-`docker compose up -d --no-deps --force-recreate knowledge`.
+The n8n workflow's native **Data Table** node creates/reuses `work_orders` and upserts that prepared row. New work orders persist in n8n's existing data volume. Unknown values stay blank, raw caller turns remain in the `transcripts` column, and a deterministic report key makes retries use the same row. No startup result or further confirmation is required. Explicit cancellation prevents saving.
 
-Run `npm ci --ignore-scripts && npm test`. Include HTTP endpoint checks with
-`TEST_HTTP=1 npm test`; tests use temporary file copies and do not write sources.
+`POST /work-orders` is retired. Existing `/data/work-orders.json` files are read-only legacy backups and remain accessible through `GET /work-orders`; new entries are not written there.
+
+## Retrieval
+
+`GET /documents?query=…` returns source-tagged `Q:` / `A:` chunks and legacy records. The workflow uses `POST /documents` with `{query,records}` to include authoritative rows read by the native Data Table node. Matching Data Table IDs override legacy JSON values. Latest/oldest/all questions use actual dispatch records, filtering months before sorting, preserving date ties and reporting genuinely unknown dates separately.
+
+Routing accepts simplified/traditional Chinese, spoken dates and month-only follow-ups. “This month” uses Asia/Taipei time. Compact spreadsheet dates such as `202611/06` normalize to `2026-11-06` for sorting without editing the source file. Query answers do not require users to supply work-order details.
+
+`GET /health` checks source mounts. Extraction caches by size/mtime/ctime and shares concurrent OCR. Poppler/Tesseract provide local Chinese/English PDF extraction. No Python or external generation API is needed. If Office replaces a mounted source file, recreate the knowledge service during your deployment to refresh its bind mount.
+
+Run `npm ci --ignore-scripts && TEST_HTTP=1 npm test`. Unit checks use temporary source copies and legacy data. Native persistence and UI-visible table rows are checked by `webui/native/tests/n8n-workflow-runtime.py` in isolated containers.

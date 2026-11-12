@@ -207,7 +207,12 @@ During a SIP call, the demo shows live call events, actual received/transmitted
 PCM levels, and the native worker's conversation text. Test echo has no caller
 transcription; Use IVR shows ASR results and assistant replies. Audio stays on
 the phone. The browser's microphone and scenario controls are disabled in SIP
-mode; the native worker uses its configured server-side ASR/LLM pipeline.
+mode. VAD/ASR/TTS use the native worker's configured models. Dialogue source
+and the LLM model come from the saved demo settings on each SIP turn. Choosing
+**Dialogue source → n8n** while Use SIP is enabled saves that source immediately;
+use **Save model settings** for other model changes. The same shared n8n/MCP
+dialogue code handles browser and SIP turns, and tool events appear in Events.
+Source changes take effect on the next turn without restarting the SIP call.
 
 The top-right **CONNECTED** indicator follows SIP registration, so it is on
 while the worker is registered and waiting for a call. Call activity separately
@@ -456,6 +461,27 @@ The TURN URL and password are read directly from `.env`; a separate
 that this stack downloads. If you use another LLM, set its registered model ID.
 The audio model IDs default to `silero-vad`, `qwen3-asr` and `zipvoice`.
 
+### SIP dialogue source
+
+The n8n container also runs the shared dialogue handler on internal port 8086,
+exposed only at `127.0.0.1:8086` for the host-networked SIP worker. Its TypeScript
+source modules are mounted read-only from `webui/native/src/lib`; the n8n image's
+Node runtime compiles their erasable types at startup. No document mounts or
+knowledge-service permissions change.
+
+`SIP_DIALOGUE_URL=http://127.0.0.1:8086/dialogue` connects the native SIP worker
+to this handler. It reads `/v1/ui/demo-settings` for every recognized utterance,
+loads the saved LLM if necessary, and follows `dialogue_source` (`prompt.csv` or
+`n8n`). n8n mode uses the same maintenance tool allowlist, ASR-bound context,
+read-only RAG tools and no-tool fallback as browser calls. MCP events and the
+actual source/model stream back into the SIP monitor; failures are reported
+instead of silently routing through the prompt-only path.
+
+When deploying this change, recreate **n8n** as well as rebuilding **sip** and
+the WebUI/server. The standard `docker compose up -d --build --force-recreate`
+with `COMPOSE_PROFILES=sip` includes them. A standalone native SIP executable
+without `SIP_DIALOGUE_URL` retains its original prompt-only implementation.
+
 ### Start and test
 
 For direct RTP, leave `COTURN_URL=` empty and use `COMPOSE_PROFILES=sip`.
@@ -601,12 +627,16 @@ Unrecognized letters in a part number are preserved, not guessed from hotwords.
 
 ### n8n MCP tools for the voice assistant
 
-Compose includes `ivr-n8n` and a read-only document extraction service. Automatic
-setup imports **GeoVision · MCP** and **GeoVision · RAG**, preserving existing
-credentials and settings. Publish both workflows and select **Dialogue source → n8n**.
-The local LLM uses MCP for RAG and conversation-draft readbacks, then generates
-speech. ASR/TTS stay in audio.cpp. No work-order CRUD tools or database writes
-are provided. See the [n8n setup guide](n8n/README.md).
+Compose includes `ivr-n8n` and a document extraction/local work-order service. Automatic
+setup imports **GeoVision · Workflow**, grouping **IVR Input → AI Agent → IVR Output**,
+**KnowledgeMCP**, and **RAG** on one canvas. The agent uses the MCP RAG tool and
+session-scoped Simple Memory. Existing workflows are backed up before merging;
+custom credentials and retrieval settings are preserved. Publish the merged
+workflow and select **Dialogue source → n8n**. Both browser and SIP turns enter
+the n8n AI Agent webhook; fresh MCP retrieval runs before every answer. The two
+tools retrieve knowledge and save work orders in a native n8n Data Table. New
+reports get one follow-up question, then the next reply is saved even with missing fields. Replies stay on one conversational line. ASR/TTS stay in audio.cpp;
+the original documents remain read-only. See the [n8n setup guide](n8n/README.md).
 
 `ivr-knowledge` reads `prompt.csv`, `情境模擬_20261105.docx`, all worksheets in
 `CSD資料庫.xlsx`, and `(備品維修)PY252-0059-工單-20260602-2工-CL、JC.pdf`.

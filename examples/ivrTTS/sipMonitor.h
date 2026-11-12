@@ -49,6 +49,9 @@ public:
     void stage(const std::string& value) {
         std::lock_guard<std::mutex> lock(mutex_); stage_ = value;
     }
+    void dialogue(const std::string& source, const std::string& model) {
+        std::lock_guard<std::mutex> lock(mutex_); dialogue_source_ = source; dialogue_model_ = model;
+    }
     void message(const std::string& role, const std::string& content) {
         if (!enabled_) return;
         std::lock_guard<std::mutex> lock(mutex_);
@@ -71,6 +74,7 @@ public:
             auto str = [](json_object* o, const char* key, const std::string& value) {
                 json_object_object_add(o, key, json_object_new_string(value.c_str()));
             };
+            if (!dialogue_source_.empty()) str(root, "dialogue_source", dialogue_source_);
             str(root, "instance", instance_); str(root, "call_id", call_id_); str(root, "peer", peer_); str(root, "stage", stage_);
             json_object_object_add(root, "active", json_object_new_boolean(active_));
             json_object_object_add(root, "registered", json_object_new_boolean(registered_));
@@ -78,7 +82,7 @@ public:
             auto* models = json_object_new_object();
             for (const auto& field : {std::pair{"vad", "VAD_MODEL"}, std::pair{"asr", "STT_MODEL"}, std::pair{"llm", "LLM_MODEL"}, std::pair{"tts", "TTS_MODEL"}}) {
                 const char* value = std::getenv(field.second);
-                str(models, field.first, value ? value : "");
+                str(models, field.first, std::string(field.first) == "llm" && !dialogue_model_.empty() ? dialogue_model_ : value ? value : "");
             }
             json_object_object_add(root, "models", models);
             auto bars = [&](const char* key, const std::deque<double>& values) {
@@ -126,6 +130,7 @@ private:
     bool enabled_ = false, active_ = false, registered_ = false;
     std::filesystem::path directory_;
     std::string instance_, call_id_, peer_, stage_ = "Waiting for registration";
+    std::string dialogue_source_, dialogue_model_;
     int64_t published_ = 0, sequence_ = 0, calls_ = 0;
     std::atomic<unsigned> input_peak_{0}, output_peak_{0};
     std::mutex mutex_;

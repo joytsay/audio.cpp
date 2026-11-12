@@ -313,8 +313,11 @@ volume and the updated server/worker images.
   transmitted and decoded received PCM. The browser does not open its microphone
   or play a second copy of phone audio.
 
-The worker uses its server-side ASR/LLM configuration, not the browser's local
-microphone session. A monitor older than three seconds is shown as disconnected.
+The worker receives audio from the phone. Its shared dialogue handler reads the
+demo's saved **Dialogue source** and **LLM** selection for each turn, so n8n also
+applies to SIP calls. The root stack's updated n8n service must be running with
+the loopback dialogue endpoint on port 8086. VAD/ASR/TTS use the SIP worker's
+configured models; the browser microphone is not used. A monitor older than three seconds is shown as disconnected.
 Monitoring is protected by the existing UI management setting; passwords never
 appear in settings responses, snapshots, events or browser storage.
 

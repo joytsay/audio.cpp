@@ -1,0 +1,1302 @@
+{
+  "id": "ivrWorkflow",
+  "name": "GeoVision · Workflow",
+  "nodes": [
+    {
+      "id": "maintenance-mcp-trigger",
+      "name": "Knowledge MCP Server",
+      "type": "@n8n/n8n-nodes-langchain.mcpTrigger",
+      "typeVersion": 2,
+      "position": [
+        1500,
+        180
+      ],
+      "parameters": {
+        "path": "ivr-maintenance",
+        "authentication": "none",
+        "instructions": "retrieve_knowledge reads source documents and the native work_orders Data Table. For a new report ask once for date, numbers and maintenance details, then add_work_order saves the next caller reply even if fields are missing. Never ask a second required-field or confirmation question."
+      },
+      "webhookId": "ivr-maintenance"
+    },
+    {
+      "id": "lookup-maintenance-guidance",
+      "name": "retrieve_knowledge",
+      "type": "@n8n/n8n-nodes-langchain.toolWorkflow",
+      "typeVersion": 2.1,
+      "position": [
+        1390,
+        430
+      ],
+      "parameters": {
+        "name": "retrieve_knowledge",
+        "description": "Retrieve fresh work-order facts or source-grounded Q/A. For latest/oldest/all orders, query the current request each time. Scenario examples are not actual work orders.",
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "value": "ivrWorkflow",
+          "mode": "id"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "query": "={{ $fromAI('query', 'Maintenance reporting stage or rule to retrieve', 'string') }}",
+            "operation": "retrieve",
+            "sessionId": ""
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "operation",
+              "displayName": "operation",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            },
+            {
+              "id": "query",
+              "displayName": "query",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            },
+            {
+              "id": "sessionId",
+              "displayName": "sessionId",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        }
+      }
+    },
+    {
+      "id": "rag-tool-input",
+      "name": "RAG tool input",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        70,
+        1000
+      ],
+      "parameters": {
+        "inputSource": "workflowInputs",
+        "workflowInputs": {
+          "values": [
+            {
+              "name": "operation",
+              "type": "string"
+            },
+            {
+              "name": "query",
+              "type": "string"
+            },
+            {
+              "name": "sessionId",
+              "type": "string"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "prepare-guidance",
+      "name": "Prepare guidance",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        950,
+        1240
+      ],
+      "parameters": {
+        "jsCode": "const query = $('Validate query').first().json.query;\nconst documents = $input.first().json.documents;\nconst result = $input.first().json.result;\nif (!Array.isArray(documents)||!documents.length) throw new Error('Knowledge Q/A extraction returned no documents');\nif(documents.some(d=>d.format!=='qa'||typeof d.text!=='string'||!d.text.startsWith('Q: ')||!d.text.includes('\\nA: ')))throw new Error('Knowledge documents must contain grounded Q/A pairs');\nconst sources=[...new Map(documents.map(({text,question,answer,...source})=>[JSON.stringify([source.source,source.sheet,source.section,source.page]),source])).values()];\nreturn [{json:{query,knowledge:documents.map(d=>d.text),sources,result}}];"
+      }
+    },
+    {
+      "id": "seed-simple-vector-store",
+      "name": "Seed Simple Vector Store",
+      "type": "@n8n/n8n-nodes-langchain.vectorStoreInMemory",
+      "typeVersion": 1.2,
+      "position": [
+        1200,
+        1240
+      ],
+      "parameters": {
+        "mode": "insert",
+        "memoryKey": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ 'ivr-qa-' + $execution.id }}"
+        },
+        "clearStore": true
+      }
+    },
+    {
+      "id": "default-document-loader",
+      "name": "Default Document Loader",
+      "type": "@n8n/n8n-nodes-langchain.documentDefaultDataLoader",
+      "typeVersion": 1.1,
+      "position": [
+        1120,
+        1500
+      ],
+      "parameters": {
+        "dataType": "json",
+        "jsonMode": "expressionData",
+        "jsonData": "={{ $('Prepare guidance').first().json.knowledge }}",
+        "textSplittingMode": "custom",
+        "options": {}
+      }
+    },
+    {
+      "id": "recursive-text-splitter",
+      "name": "Recursive Text Splitter",
+      "type": "@n8n/n8n-nodes-langchain.textSplitterRecursiveCharacterTextSplitter",
+      "typeVersion": 1,
+      "position": [
+        900,
+        1500
+      ],
+      "parameters": {
+        "chunkSize": 4096,
+        "chunkOverlap": 0,
+        "options": {}
+      }
+    },
+    {
+      "id": "local-embeddings",
+      "name": "Local Embeddings",
+      "type": "@n8n/n8n-nodes-langchain.embeddingsOpenAi",
+      "typeVersion": 1.1,
+      "position": [
+        1490,
+        1500
+      ],
+      "parameters": {
+        "model": "Qwen/Qwen3-Embedding-0.6B-GGUF:Q8_0",
+        "options": {
+          "baseURL": "http://voice-ai:8084/v1",
+          "batchSize": 8,
+          "encodingFormat": "float"
+        }
+      },
+      "credentials": {
+        "openAiApi": {
+          "id": "configure-local-embeddings",
+          "name": "IVR local embeddings"
+        }
+      }
+    },
+    {
+      "id": "retrieve-guidance",
+      "name": "Retrieve guidance",
+      "type": "@n8n/n8n-nodes-langchain.vectorStoreInMemory",
+      "typeVersion": 1.2,
+      "position": [
+        1490,
+        1240
+      ],
+      "parameters": {
+        "mode": "load",
+        "memoryKey": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ 'ivr-qa-' + $execution.id }}"
+        },
+        "prompt": "={{ $('Prepare guidance').first().json.query }}",
+        "topK": 4,
+        "options": {}
+      },
+      "executeOnce": true
+    },
+    {
+      "id": "return-guidance",
+      "name": "Return guidance",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1780,
+        1240
+      ],
+      "parameters": {
+        "jsCode": "const prepared = $('Prepare guidance').first().json;\nif (prepared.result) return [{json:{...prepared.result,sources:prepared.sources}}];\nconst passages=$input.all().map(item=>item.json.document?.pageContent).filter(Boolean);\nif(!passages.length)throw new Error('No knowledge Q/A retrieved');\nreturn [{json:{passages,sources:prepared.sources,scope:'Source-grounded Q/A; DOCX scenario 2 is conversation guidance, not actual work orders. PDF handwriting requires verification.'}}];"
+      }
+    },
+    {
+      "id": "load-knowledge-files",
+      "name": "Load knowledge files",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        730,
+        1240
+      ],
+      "parameters": {
+        "url": "http://knowledge:8085/documents",
+        "options": {
+          "timeout": 240000
+        },
+        "sendQuery": false,
+        "method": "POST",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ {query:$json.query,records:$json.records} }}"
+      }
+    },
+    {
+      "id": "manual-rag-test",
+      "name": "Test RAG",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        70,
+        1500
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "rag-test-query",
+      "name": "Test query",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        290,
+        1500
+      ],
+      "parameters": {
+        "jsCode": "// Edit this text to test another retrieval question.\nreturn [{json:{query:'維修工單回報時，SN、製造日期與電容值要如何記錄？'}}];"
+      }
+    },
+    {
+      "id": "validate-rag-query",
+      "name": "Validate query",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        510,
+        1240
+      ],
+      "parameters": {
+        "jsCode": "const input=$input.first().json;\nif(typeof input.query!=='string'||!input.query.trim())throw new Error('缺少 query；手動測試請使用 Test RAG。');\nreturn [{json:{query:input.query.trim(),records:input.records||[]}}];"
+      }
+    },
+    {
+      "id": "ivr-input",
+      "name": "IVR Input",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        70,
+        150
+      ],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ivr-agent",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "webhookId": "ivr-agent"
+    },
+    {
+      "id": "prepare-ivr-input",
+      "name": "Prepare IVR input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        290,
+        150
+      ],
+      "parameters": {
+        "jsCode": "const body = $input.first().json.body;\nif (!body || typeof body.text !== 'string' || !body.text.trim() || typeof body.sessionId !== 'string' || !body.sessionId.trim() || typeof body.model !== 'string' || !body.model.trim()) throw new Error('text, sessionId and model are required');\nconst messages = Array.isArray(body.messages) ? body.messages : [];\nif (messages.length > 100 || messages.some(m => !['user','assistant'].includes(m.role) || typeof m.content !== 'string')) throw new Error('Invalid conversation history');\nconst text=body.text.trim();\nconst user_transcripts=messages.filter(m=>m.role==='user').map(m=>m.content);\nlet query=text;\nif(!/[工公]單/.test(text)&&/^(?:那|我要查詢|查詢)?(?:最舊|最早|最新|全部|所有)(?:的|呢|[。？?\\s])*$/u.test(text)&&user_transcripts.some(t=>/[工公]單/.test(t)))query=`查詢工單：${text}`;\nreturn [{json:{text,query,sessionId:body.sessionId,model:body.model,user_transcripts}}];\n"
+      }
+    },
+    {
+      "id": "ivr-ai-agent",
+      "name": "AI Agent",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        370,
+        390
+      ],
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $json.text }}",
+        "options": {
+          "systemMessage": "=你是 GeoVision 電話維修助理。只用繁體中文、一行、簡短回覆，不加角色標籤、表情、Markdown、推理或下一輪。\n新增工單流程：使用者說「我增加工單」「我要回報工單」或開始提供新回報時，只問一次「工單日期、工單或設備編號、維修項目與數量是什麼？」。收到下一次回覆就執行 add_work_order 寫入 n8n work_orders Data Table，即使沒有日期、編號或維修內容也照現有資料新增。不可再追問、不等確認或測試正常。未知欄位留空，資料只能來自本通話原話。\n系統已判斷目前階段並執行必要的 MCP 工具。只有工具回傳 persisted=true 才能回覆「已新增」。若已寫入就不再呼叫工具；重複請求與後續補充使用同一筆記錄。DOCX 情境中的確認步驟不是本系統的儲存條件。\n查詢最新／最舊／全部時直接回答本輪 selection 與 work_orders，月份補充延續查詢，無記錄就說沒有。不要求使用者提供工單詳細資料，不沿用上輪查詢結果，查詢不可新增工單。\n本輪 sessionId：{{ $json.sessionId }}\n本輪使用者原話：{{ $json.text }}\n本輪工具資料：{{ $json.retrieval_json }}",
+          "maxIterations": 3,
+          "returnIntermediateSteps": true,
+          "enableStreaming": false,
+          "forceToolCallOnFirstIteration": false
+        }
+      }
+    },
+    {
+      "id": "ivr-local-chat-model",
+      "name": "Local Chat Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        300,
+        610
+      ],
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "value": "={{ $json.model }}",
+          "mode": "id"
+        },
+        "responsesApiEnabled": false,
+        "options": {
+          "temperature": 0,
+          "maxTokens": 160,
+          "timeout": 180000,
+          "maxRetries": 0
+        }
+      },
+      "credentials": {
+        "openAiApi": {
+          "id": "configure-local-llm",
+          "name": "IVR local LLM"
+        }
+      }
+    },
+    {
+      "id": "knowledge-mcp-client",
+      "name": "KnowledgeMCP",
+      "type": "@n8n/n8n-nodes-langchain.mcpClientTool",
+      "typeVersion": 1.2,
+      "position": [
+        760,
+        610
+      ],
+      "parameters": {
+        "endpointUrl": "http://127.0.0.1:5678/mcp/ivr-maintenance",
+        "serverTransport": "httpStreamable",
+        "authentication": "none",
+        "include": "selected",
+        "includeTools": [
+          "retrieve_knowledge",
+          "add_work_order"
+        ],
+        "options": {
+          "timeout": 240000
+        }
+      }
+    },
+    {
+      "id": "ivr-simple-memory",
+      "name": "Simple Memory",
+      "type": "@n8n/n8n-nodes-langchain.memoryBufferWindow",
+      "typeVersion": 1.3,
+      "position": [
+        530,
+        610
+      ],
+      "parameters": {
+        "sessionIdType": "customKey",
+        "sessionKey": "={{ $json.sessionId }}",
+        "contextWindowLength": 3
+      }
+    },
+    {
+      "id": "prepare-ivr-output",
+      "name": "Prepare IVR output",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        770,
+        390
+      ],
+      "parameters": {
+        "jsCode": "// n8n MCP workflow tools may nest JSON strings, arrays and MCP content blocks.\nfunction payloads(value,depth=0){\n if(depth>12||value==null)return [];\n if(typeof value==='string'){try{return payloads(JSON.parse(value),depth+1);}catch{return [];}}\n if(Array.isArray(value))return value.flatMap(v=>payloads(v,depth+1));\n if(typeof value!=='object')return [];\n return [value,...Object.values(value).flatMap(v=>payloads(v,depth+1))];\n}\nconst item=$input.first().json,context=$('Prepare agent context').first().json;\nconst steps=item.intermediateSteps||[];\nconst tools=[context.executed_tool||'retrieve_knowledge',...steps.map(step=>step.action?.tool).filter(name=>typeof name==='string')];\nconst saved=context.saved||steps.filter(s=>/add_work_order$/.test(s.action?.tool||'')).flatMap(s=>payloads(s.observation)).find(p=>p.persisted===true&&p.work_order?.id);\nlet reply;\nif(saved)reply=`工單 ${saved.work_order.id} ${saved.updated?'已補充':'已新增'}。`;\nelse if(context.facts.selection){\n const facts=context.facts,rows=facts.work_orders;\n const label={newest:'最新',oldest:'最舊',all:'查到的'}[facts.selection]||'';\n const scope=facts.period?facts.period.slice(0,4)+'年'+Number(facts.period.slice(5))+'月':'';\n if(!rows.length&&scope)reply=`${scope}沒有工單記錄。`;\n else if(!rows.length)reply=facts.undated_count>0?`${facts.undated_count} 筆工單日期未完整，無法判定${label}工單。`:`沒有查到${label}工單的有效記錄。`;\n else{\n  const summaries=rows.slice(0,3).map(({fields:f})=>`${f['派工單號']}（${f['派工日期']||'日期未完整'}）`);\n  reply=`${scope}${label}工單${rows.length===1?'為':'共 '+rows.length+' 筆：'}${rows.length===1?' ':''}${summaries.join('、')}${rows.length>3?'，其餘 '+(rows.length-3)+' 筆可再查詢':''}。`;\n  if(facts.undated_count>0&&facts.selection!=='all')reply+=`另有 ${facts.undated_count} 筆日期未完整，未列入排序。`;\n }\n}else if(context.report_reply){\n reply=context.report_reply;\n}else{\n if(typeof item.output!=='string'||!item.output.trim())throw new Error('AI Agent returned an empty reply');\n reply=item.output.trim().replace(/^(?:AI|助理|GEOVISION)[：:]\\s*/i,'').split(/\\n|【|---/)[0].trim();\n // One conversational line, never a repeated essay, markdown or chain of thought.\n reply=reply.replace(/[😀-🙏🌀-🫿]/gu,'').trim();\n const first=reply.match(/^.*?[。？！!?](?:[」”])?/u)?.[0];\n if(first)reply=first;\n if(reply.length>200)reply='請告訴我這一輪要查詢或確認的重點？';\n if(/已(?:新增|儲存|建立|輸入完成|完成)|新增成功|保存成功|完成回報|回報完成|工單完成/.test(reply))reply='工單尚未儲存。';\n if(!reply)throw new Error('AI Agent returned an empty spoken reply');\n}\nreturn [{json:{reply:reply.replace(/\\s*\\n\\s*/g,' '),tools:[...new Set(tools)]}}];\n"
+      }
+    },
+    {
+      "id": "ivr-output",
+      "name": "IVR Output",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        1030,
+        390
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "workflow-group-1",
+      "name": "1 · IVR Input → AI Agent → IVR Output",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "width": 1220,
+        "height": 820,
+        "content": "## 1. IVR Input → AI Agent → IVR Output\nNew report: ask once for date/numbers/details, then save the next reply. Missing fields stay blank. Queries get a direct one-line result.",
+        "color": 5
+      }
+    },
+    {
+      "id": "workflow-group-2",
+      "name": "2 · KnowledgeMCP",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1270,
+        0
+      ],
+      "parameters": {
+        "width": 650,
+        "height": 820,
+        "content": "## 2. Knowledge MCP\nExactly two tools: retrieve_knowledge and add_work_order. Both use the native work_orders Data Table inside this workflow.",
+        "color": 4
+      }
+    },
+    {
+      "id": "workflow-group-3",
+      "name": "3 · RAG",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        870
+      ],
+      "parameters": {
+        "width": 2050,
+        "height": 900,
+        "content": "## 3. RAG · Q/A + Work Orders\nNative Data Table nodes create/reuse work_orders, upsert caller reports and read saved rows for retrieval. Original source documents and the legacy JSON backup remain unchanged.",
+        "color": 6
+      }
+    },
+    {
+      "id": "register-ivr-turn",
+      "name": "Register caller turn",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        510,
+        150
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://knowledge:8085/call-turn",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ {sessionId:$json.sessionId,text:$json.text,user_transcripts:$json.user_transcripts} }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "retrieve-ivr-turn",
+      "name": "Retrieve current turn",
+      "type": "@n8n/n8n-nodes-langchain.mcpClient",
+      "typeVersion": 1.1,
+      "position": [
+        730,
+        150
+      ],
+      "parameters": {
+        "endpointUrl": "http://127.0.0.1:5678/mcp/ivr-maintenance",
+        "serverTransport": "httpStreamable",
+        "authentication": "none",
+        "tool": {
+          "__rl": true,
+          "value": "={{ $json.tool || 'retrieve_knowledge' }}",
+          "mode": "id"
+        },
+        "inputMode": "json",
+        "jsonInput": "={{ $json.tool === 'add_work_order' ? {sessionId:$json.sessionId} : {query:$json.query || $('Prepare IVR input').first().json.query} }}",
+        "options": {
+          "timeout": 240000
+        }
+      }
+    },
+    {
+      "id": "prepare-agent-context",
+      "name": "Prepare agent context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        70,
+        390
+      ],
+      "parameters": {
+        "jsCode": "// n8n MCP workflow tools may nest JSON strings, arrays and MCP content blocks.\nfunction payloads(value,depth=0){\n if(depth>12||value==null)return [];\n if(typeof value==='string'){try{return payloads(JSON.parse(value),depth+1);}catch{return [];}}\n if(Array.isArray(value))return value.flatMap(v=>payloads(v,depth+1));\n if(typeof value!=='object')return [];\n return [value,...Object.values(value).flatMap(v=>payloads(v,depth+1))];\n}\nconst input=$('Prepare IVR input').first().json;\nconst decision=$('Register caller turn').first().json;\nconst results=payloads($input.first().json);\nconst saved=results.find(v=>v.persisted===true&&v.work_order?.id);\nconst facts=results.find(v=>Array.isArray(v.work_orders)&&v.selection)||results.find(v=>Array.isArray(v.passages));\nif(decision.tool==='add_work_order'&&!saved)throw new Error('Knowledge MCP did not confirm saving the work order');\nif(!facts&&!saved)throw new Error('Knowledge MCP returned no fresh retrieval result');\nif(decision.selection&&facts?.selection!==decision.selection)throw new Error('Knowledge MCP returned the wrong work-order selection');\nif(decision.period&&facts?.period!==decision.period)throw new Error('Knowledge MCP returned the wrong work-order month');\nconst preview=saved?{persisted:true,work_order_id:saved.work_order.id}:facts.work_orders?{selection:facts.selection,period:facts.period,selected_count:facts.selected_count,undated_count:facts.undated_count,work_orders:facts.work_orders.slice(0,3).map(({fields:f})=>({fields:{派工單號:f['派工單號'],派工日期:f['派工日期'],負責人:f['負責人'],客戶名稱:f['客戶名稱'],派工項目:f['派工項目']}}))}:{passages:facts.passages.slice(0,3).map(text=>text.slice(0,500)),sources:[...new Set((facts.sources||[]).map(s=>s.source))]};\nreturn [{json:{...input,...decision,facts:facts||{},saved,executed_tool:decision.tool||'retrieve_knowledge',retrieval_json:JSON.stringify(preview)}}];\n"
+      }
+    },
+    {
+      "id": "add-work-order",
+      "name": "add_work_order",
+      "type": "@n8n/n8n-nodes-langchain.toolWorkflow",
+      "typeVersion": 2.1,
+      "position": [
+        1650,
+        430
+      ],
+      "parameters": {
+        "name": "add_work_order",
+        "description": "Save the registered caller reply after one follow-up question. No mandatory date, numbers or maintenance details; unknown fields stay blank. A native n8n Data Table upserts the work_orders row. Pass the current sessionId only.",
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "value": "ivrWorkflow",
+          "mode": "id"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "operation": "add",
+            "query": "",
+            "sessionId": "={{ $fromAI('sessionId','Current caller sessionId, unchanged','string') }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "operation",
+              "displayName": "operation",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            },
+            {
+              "id": "query",
+              "displayName": "query",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            },
+            {
+              "id": "sessionId",
+              "displayName": "sessionId",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        }
+      }
+    },
+    {
+      "id": "prepare-tool-request",
+      "name": "Prepare tool request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        290,
+        1000
+      ],
+      "parameters": {
+        "jsCode": "const input=$input.first().json;\nreturn [{json:{operation:input.operation||'retrieve',query:input.query||'',sessionId:input.sessionId||''}}];"
+      }
+    },
+    {
+      "id": "ensure-work-orders-table",
+      "name": "Ensure work_orders",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        510,
+        1000
+      ],
+      "parameters": {
+        "resource": "table",
+        "operation": "create",
+        "tableName": "work_orders",
+        "columns": {
+          "column": [
+            {
+              "name": "order_id",
+              "type": "string"
+            },
+            {
+              "name": "report_key",
+              "type": "string"
+            },
+            {
+              "name": "session_id",
+              "type": "string"
+            },
+            {
+              "name": "dispatch_date",
+              "type": "string"
+            },
+            {
+              "name": "reference_number",
+              "type": "string"
+            },
+            {
+              "name": "title",
+              "type": "string"
+            },
+            {
+              "name": "equipment_number",
+              "type": "string"
+            },
+            {
+              "name": "maintenance_items",
+              "type": "string"
+            },
+            {
+              "name": "quantity",
+              "type": "string"
+            },
+            {
+              "name": "notes",
+              "type": "string"
+            },
+            {
+              "name": "test_result",
+              "type": "string"
+            },
+            {
+              "name": "transcripts",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {
+          "createIfNotExists": true
+        }
+      }
+    },
+    {
+      "id": "route-tool-operation",
+      "name": "Store work order?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        730,
+        1000
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "operation-add",
+              "leftValue": "={{ $('Prepare tool request').first().json.operation }}",
+              "rightValue": "add",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "prepare-work-order-row",
+      "name": "Prepare work-order row",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1000,
+        1000
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://knowledge:8085/work-order-draft",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ {sessionId:$('Prepare tool request').first().json.sessionId} }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "save-work-orders-table",
+      "name": "Save work order · Data Table",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        1290,
+        1000
+      ],
+      "parameters": {
+        "resource": "row",
+        "operation": "upsert",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "work_orders"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "report_key",
+              "condition": "eq",
+              "keyValue": "={{ $json.report_key }}"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "order_id": "={{ $json.order_id }}",
+            "report_key": "={{ $json.report_key }}",
+            "session_id": "={{ $json.session_id }}",
+            "dispatch_date": "={{ $json.dispatch_date }}",
+            "reference_number": "={{ $json.reference_number }}",
+            "title": "={{ $json.title }}",
+            "equipment_number": "={{ $json.equipment_number }}",
+            "maintenance_items": "={{ $json.maintenance_items }}",
+            "quantity": "={{ $json.quantity }}",
+            "notes": "={{ $json.notes }}",
+            "test_result": "={{ $json.test_result }}",
+            "transcripts": "={{ $json.transcripts }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "order_id",
+              "displayName": "order_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "report_key",
+              "displayName": "report_key",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "session_id",
+              "displayName": "session_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "dispatch_date",
+              "displayName": "dispatch_date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "reference_number",
+              "displayName": "reference_number",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "title",
+              "displayName": "title",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "equipment_number",
+              "displayName": "equipment_number",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "maintenance_items",
+              "displayName": "maintenance_items",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "quantity",
+              "displayName": "quantity",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "notes",
+              "displayName": "notes",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "test_result",
+              "displayName": "test_result",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "transcripts",
+              "displayName": "transcripts",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "return-saved-work-order",
+      "name": "Return saved work order",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1580,
+        1000
+      ],
+      "parameters": {
+        "jsCode": "function tableRecord(row){\n const value=name=>String(row[name]??'');\n let transcripts=[];try{transcripts=JSON.parse(row.transcripts||'[]');if(!Array.isArray(transcripts))transcripts=[];}catch{transcripts=[];}\n const id=value('order_id')||`DT-${row.id}`;\n return {id,source:'n8n Data Table / work_orders',sessionId:value('session_id'),reportKey:value('report_key'),createdAt:row.createdAt,updatedAt:row.updatedAt,transcripts,fields:{派工單號:id,派工日期:value('dispatch_date'),工單編號:value('reference_number'),工單名稱:value('title'),設備編號:value('equipment_number'),維修內容:value('maintenance_items'),維修項目:value('maintenance_items'),數量:value('quantity'),備註:value('notes'),起機測試:value('test_result')}};\n}\n\nconst row=$input.first().json;\nif(!row.id||!row.order_id)throw new Error('Data Table did not confirm saving the row');\nreturn [{json:{persisted:true,work_order:tableRecord(row)}}];"
+      }
+    },
+    {
+      "id": "read-work-orders-table",
+      "name": "Read work orders · Data Table",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        70,
+        1240
+      ],
+      "parameters": {
+        "resource": "row",
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "work_orders"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": []
+        },
+        "returnAll": true
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "id": "pack-table-records",
+      "name": "Prepare table records",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        290,
+        1240
+      ],
+      "parameters": {
+        "jsCode": "function tableRecord(row){\n const value=name=>String(row[name]??'');\n let transcripts=[];try{transcripts=JSON.parse(row.transcripts||'[]');if(!Array.isArray(transcripts))transcripts=[];}catch{transcripts=[];}\n const id=value('order_id')||`DT-${row.id}`;\n return {id,source:'n8n Data Table / work_orders',sessionId:value('session_id'),reportKey:value('report_key'),createdAt:row.createdAt,updatedAt:row.updatedAt,transcripts,fields:{派工單號:id,派工日期:value('dispatch_date'),工單編號:value('reference_number'),工單名稱:value('title'),設備編號:value('equipment_number'),維修內容:value('maintenance_items'),維修項目:value('maintenance_items'),數量:value('quantity'),備註:value('notes'),起機測試:value('test_result')}};\n}\n\nconst records=$input.all().map(item=>item.json).filter(row=>row.id).map(tableRecord);\nreturn [{json:{query:$('Prepare tool request').first().json.query,records}}];"
+      }
+    }
+  ],
+  "connections": {
+    "IVR Input": {
+      "main": [
+        [
+          {
+            "node": "Prepare IVR input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare IVR input": {
+      "main": [
+        [
+          {
+            "node": "Register caller turn",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Register caller turn": {
+      "main": [
+        [
+          {
+            "node": "Retrieve current turn",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Retrieve current turn": {
+      "main": [
+        [
+          {
+            "node": "Prepare agent context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare agent context": {
+      "main": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent": {
+      "main": [
+        [
+          {
+            "node": "Prepare IVR output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare IVR output": {
+      "main": [
+        [
+          {
+            "node": "IVR Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load knowledge files": {
+      "main": [
+        [
+          {
+            "node": "Prepare guidance",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare guidance": {
+      "main": [
+        [
+          {
+            "node": "Seed Simple Vector Store",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Seed Simple Vector Store": {
+      "main": [
+        [
+          {
+            "node": "Retrieve guidance",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Retrieve guidance": {
+      "main": [
+        [
+          {
+            "node": "Return guidance",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Test RAG": {
+      "main": [
+        [
+          {
+            "node": "Test query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Local Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Simple Memory": {
+      "ai_memory": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_memory",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "KnowledgeMCP": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "retrieve_knowledge": {
+      "ai_tool": [
+        [
+          {
+            "node": "Knowledge MCP Server",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "add_work_order": {
+      "ai_tool": [
+        [
+          {
+            "node": "Knowledge MCP Server",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Default Document Loader": {
+      "ai_document": [
+        [
+          {
+            "node": "Seed Simple Vector Store",
+            "type": "ai_document",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Recursive Text Splitter": {
+      "ai_textSplitter": [
+        [
+          {
+            "node": "Default Document Loader",
+            "type": "ai_textSplitter",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Local Embeddings": {
+      "ai_embedding": [
+        [
+          {
+            "node": "Seed Simple Vector Store",
+            "type": "ai_embedding",
+            "index": 0
+          },
+          {
+            "node": "Retrieve guidance",
+            "type": "ai_embedding",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "RAG tool input": {
+      "main": [
+        [
+          {
+            "node": "Prepare tool request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Test query": {
+      "main": [
+        [
+          {
+            "node": "Prepare tool request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare tool request": {
+      "main": [
+        [
+          {
+            "node": "Ensure work_orders",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ensure work_orders": {
+      "main": [
+        [
+          {
+            "node": "Store work order?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Store work order?": {
+      "main": [
+        [
+          {
+            "node": "Prepare work-order row",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Read work orders · Data Table",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare work-order row": {
+      "main": [
+        [
+          {
+            "node": "Save work order · Data Table",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save work order · Data Table": {
+      "main": [
+        [
+          {
+            "node": "Return saved work order",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read work orders · Data Table": {
+      "main": [
+        [
+          {
+            "node": "Prepare table records",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare table records": {
+      "main": [
+        [
+          {
+            "node": "Validate query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate query": {
+      "main": [
+        [
+          {
+            "node": "Load knowledge files",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "executionTimeout": 300
+  },
+  "pinData": {},
+  "tags": [],
+  "meta": {
+    "ivrWorkflowRevision": 5
+  }
+}

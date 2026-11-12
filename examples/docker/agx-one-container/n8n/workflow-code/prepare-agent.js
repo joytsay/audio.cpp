@@ -1,0 +1,11 @@
+const input=$('Prepare IVR input').first().json;
+const decision=$('Register caller turn').first().json;
+const results=payloads($input.first().json);
+const saved=results.find(v=>v.persisted===true&&v.work_order?.id);
+const facts=results.find(v=>Array.isArray(v.work_orders)&&v.selection)||results.find(v=>Array.isArray(v.passages));
+if(decision.tool==='add_work_order'&&!saved)throw new Error('Knowledge MCP did not confirm saving the work order');
+if(!facts&&!saved)throw new Error('Knowledge MCP returned no fresh retrieval result');
+if(decision.selection&&facts?.selection!==decision.selection)throw new Error('Knowledge MCP returned the wrong work-order selection');
+if(decision.period&&facts?.period!==decision.period)throw new Error('Knowledge MCP returned the wrong work-order month');
+const preview=saved?{persisted:true,work_order_id:saved.work_order.id}:facts.work_orders?{selection:facts.selection,period:facts.period,selected_count:facts.selected_count,undated_count:facts.undated_count,work_orders:facts.work_orders.slice(0,3).map(({fields:f})=>({fields:{派工單號:f['派工單號'],派工日期:f['派工日期'],負責人:f['負責人'],客戶名稱:f['客戶名稱'],派工項目:f['派工項目']}}))}:{passages:facts.passages.slice(0,3).map(text=>text.slice(0,500)),sources:[...new Set((facts.sources||[]).map(s=>s.source))]};
+return [{json:{...input,...decision,facts:facts||{},saved,executed_tool:decision.tool||'retrieve_knowledge',retrieval_json:JSON.stringify(preview)}}];

@@ -1,116 +1,64 @@
-# GeoVision RAG and MCP
+# GeoVision · Workflow
 
-The voice assistant uses two n8n workflows:
+[workflow.json](workflow.json) contains three groups: **1. IVR Input → AI Agent → IVR Output**, **2. Knowledge MCP**, and **3. RAG · Q/A + Work Orders**. Groups 1 and 2 sit above group 3.
 
-| Workflow | Template | Editor |
-|---|---|---|
-| GeoVision · MCP | [maintenance-mcp-tools.json](maintenance-mcp-tools.json) | http://192.168.5.151:5678/workflow/ivrMaintenanceMcp |
-| GeoVision · RAG | [maintenance-knowledge-rag.json](maintenance-knowledge-rag.json) | http://192.168.5.151:5678/workflow/ivrMaintenanceKnowledge |
+## One question, then save
 
-ASR → local LLM → MCP tools → local LLM reply → TTS. ASR/TTS models and
-streaming settings are unchanged. MCP uses Streamable HTTP at
-`/mcp/ivr-maintenance`, exposed to the WebUI through `/n8n/mcp/ivr-maintenance`.
-No instance-level MCP/OAuth or Python runner is required.
+1. Caller: **「我增加工单。」** (also 「新增工單」「我要回報工單」).
+2. Assistant: **「工單日期、工單或設備編號、維修項目與數量是什麼？」**
+3. Caller supplies the next response. **Save it immediately**, even if it omits the date, numbers or maintenance details.
+4. Assistant: **「工單 GV-… 已新增。」**
 
-## Deploy or roll back the CRUD version
+There is exactly one follow-up question per new report. No second required-field question, confirmation phrase or normal-startup result is required. Unknown fields stay blank. Spoken dates/numbers and simplified/traditional Chinese are normalized for structured fields; raw transcripts are preserved. Later details and retries upsert the same row rather than creating duplicates. Explicit cancellation stops the report; lookup questions remain lookups.
 
-From `examples/docker/agx-one-container`, after syncing this code to the AGX:
+The phase is determined from registered caller turns before the model runs. The flow works even when a local model refuses tool calling or asks unnecessary questions. The acknowledgment is produced only after the storage node successfully returns a saved row.
 
-```sh
-docker compose up -d --build
-docker compose restart n8n
-```
+## Native n8n Data Table
 
-Startup waits for owner setup, imports missing local credentials and the two
-workflows, and checks existing workflows for migrations. Existing CRUD tools
-are removed with a workflow backup saved under `/home/node/.n8n/ivr-backups`.
-The RAG source is restored to `CSD資料庫.xlsx`. Republish **GeoVision · MCP**
-and **GeoVision · RAG**, then reload the WebUI with Ctrl+Shift+R and select
-**Dialogue source → n8n**.
+New entries are stored in **n8n → your project → Data tables → `work_orders`**. The table is created automatically on the first workflow tool execution, using native **Ensure work_orders** (Data Table / Create, reuse existing).
 
-The old CSV and transaction backups are left on disk; they are no longer mounted
-or used. No source files are converted or changed. There is no work-order
-subworkflow or database-writing endpoint.
+- **Save work order · Data Table** upserts rows using a stable `report_key`.
+- **Read work orders · Data Table** retrieves the saved rows for RAG and work-order queries.
+- **Return saved work order** acknowledges persistence only after the native save node succeeds.
 
-## Tools
+Columns are `order_id`, `report_key`, `session_id`, `dispatch_date`, `reference_number`, `title`, `equipment_number`, `maintenance_items`, `quantity`, `notes`, `test_result`, and `transcripts`. n8n adds its own row ID and creation/update timestamps. Identifiers and quantities use string columns to preserve leading zeros. `transcripts` contains the original caller turns as JSON text.
 
-| Tool | Purpose |
+The table persists with the existing n8n database in `/home/node/.n8n`, backed by **audiocpp-n8n-data**. No separate database server or additional credential is needed.
+
+New orders are no longer written to the knowledge service's JSON file. An existing `/data/work-orders.json` is retained read-only for recovery and legacy lookup; those old entries are not automatically copied into the Data Table UI. When IDs overlap, current Data Table values take precedence in lookup results. Original DOCX/XLSX/PDF files remain read-only.
+
+## Knowledge MCP and RAG
+
+The MCP endpoint remains `/mcp/ivr-maintenance`; its server node is **Knowledge MCP Server**, with exactly two tools:
+
+| Tool | Behavior |
 |---|---|
-| `lookup_maintenance_guidance` | Retrieve source passages and reporting rules through RAG |
-| `get_report_draft` | Inspect the simulated draft reconstructed from this call's ASR |
-| `read_back_maintenance` | Repeat reported equipment, items and quantities; end with 以上是否正確。 |
-| `read_back_notes` | Repeat reported part/SN/date/capacitance pairings; ask for confirmation |
-| `confirm_startup_test` | Return completion wording after the user confirms startup tested normally |
+| `retrieve_knowledge` | Read the Data Table and source-grounded Q/A or actual workbook dispatch records. |
+| `add_work_order` | Prepare the caller's response and execute the native Data Table upsert branch in this same workflow. |
 
-These tools do not create, edit or delete database records. Completion refers
-to the conversation draft. All source documents are read-only.
+Both tools invoke **RAG tool input → Prepare tool request → Ensure work_orders**. A branch then either saves the work order or reads table rows and performs RAG. The main IVR flow's **Retrieve current turn** executes the server-selected tool deterministically.
 
-Only approved maintenance tools are sent to the LLM, even if an older published
-workflow still advertises CRUD tools. Tools are offered by stage to keep local
-model prompts small. Initial tool selection has a 128-token limit and 5-second
-model-request timeout, with no retry. Missing tool calls return and speak:
-`我目前無法回答關於這個問題，請換個方式詢問。`
-Model loading, MCP connection, retrieval and TTS are outside that selection
-budget. Actual upstream errors are preserved for diagnosis.
+Latest/oldest/all queries use fresh facts on every turn. Month-only follow-ups inherit the query, “this month” uses Asia/Taipei time, and month filtering happens before date ranking. Unambiguous spreadsheet dates such as `202611/06` normalize to `2026-11-06` for sorting with the original value retained. Replies are one line and do not ask for lookup details or confirmation. Missing dates are not fabricated for ranking.
 
-## Knowledge sources
+DOCX scenario 2 supplies example field pairings and conversational context; its historic confirmation/startup sequence is not a storage requirement. XLSX Q/A uses actual rows across every worksheet. PDF source text/OCR stays attributed, with a few visually reviewed Q/A bound to the exact file hash. Each Q/A pair stays together in embedding input. Per-execution vector-store keys keep simultaneous queries separate. `prompt.csv` sample facts are not indexed as actual work orders.
 
-Place the original files in the AGX project root. They are mounted read-only
-into `ivr-knowledge`; port 8085 is internal to Compose.
+## Browser, SIP and deployment
 
-- `prompt.csv`: maintenance reporting rules.
-- `情境模擬_20261105.docx`: examples, not actual work-order records.
-- `CSD資料庫.xlsx`: every worksheet, including 派工、客戶設備、設備類型、通訊錄.
-- `(備品維修)PY252-0059-工單-20260602-2工-CL、JC.pdf`: PDF text or local Chinese/English OCR.
+Browser and SIP turns use `POST /webhook/ivr-agent` (browser proxy `/n8n/webhook/ivr-agent`). VAD/ASR and TTS/caller audio remain in audio.cpp. The UI receives workflow events, completed tool names and the spoken reply. Simple Memory keeps three exchanges per call; lookup results are refreshed every turn.
 
-RAG uses Load knowledge files → Prepare guidance → Default Document Loader →
-Recursive Text Splitter → Simple Vector Store → Retrieve guidance → Return guidance.
-Local Embeddings uses `http://voice-ai:8084/v1` on the Compose network, so
-changing the host's LAN address does not break embedding requests. The model
-remains `Qwen/Qwen3-Embedding-0.6B-GGUF:Q8_0` (1024 dimensions). The local
-credential is imported automatically for new installations.
+This is **workflow revision 5**. On your next deployment, rebuild the knowledge service for the new modules and recreate services as you normally do. Startup backs up the installed workflow, upgrades prior revisions, and preserves embedding credentials/model and top-K tuning. Then publish **GeoVision · Workflow** at `http://127.0.0.1:5678/workflow/ivrWorkflow`. Old `ivrMaintenanceMcp` installations migrate to this ID; the old workflow is unpublished to release its webhook routes and retained for recovery.
 
-For an existing installation, update both **Local Embeddings → Options → Base URL**
-and its **IVR local embeddings** credential's Base URL to
-`http://voice-ai:8084/v1`. Existing credentials and workflow edits are preserved
-by bootstrap, so rebuilding containers alone does not replace an old LAN URL.
-Save and republish the workflow after editing; keep chunking and top-K unchanged.
-Do not replace existing embedding credentials or retrieval tuning unnecessarily.
+Local Chat Model uses **IVR local LLM**, Base URL `http://voice-ai:8082/v1`. Embeddings remain `Qwen/Qwen3-Embedding-0.6B-GGUF:Q8_0` (1024 dimensions) at `http://voice-ai:8084/v1`. Known old bundled LAN URLs are backed up and repaired; custom URLs/API keys are preserved.
 
-Retrieved passages are not a complete work-order inventory. Do not treat a DOCX
-example as a real record, infer newest/oldest without evidence, or trust OCR
-codes/numbers without checking the original PDF.
-
-For manual RAG testing, open the **Test query** Code node, edit its `query`, and
-run **Test RAG**. The **RAG tool input** trigger expects a query from MCP; running
-it with empty input correctly fails validation.
-
-Office editors may replace files on save. Recreate the knowledge container
-following external source-file replacements to refresh its file bind mounts:
-`docker compose up -d --no-deps --force-recreate knowledge`.
-
-## Checks
+## Local checks
 
 ```sh
 node webui/native/tests/n8n-dialogue.mjs
+node webui/native/tests/sip-n8n-dialogue.mjs
 node webui/native/tests/n8n-bootstrap.mjs
 node webui/native/tests/n8n-compose.mjs
+python3 webui/native/tests/n8n-workflow-runtime.py
 TEST_HTTP=1 npm test --prefix examples/docker/agx-one-container/knowledge
 ```
 
-Tests cover Scenario 1 readbacks, source validation, no-tool fallback, rollback
-backups/idempotence, read-only mounts and rejection of source-writing requests.
-
-
-## Direct query results
-
-For newest/oldest/all dispatch questions, `Load knowledge files` passes the
-current query to the existing read-only `/documents` endpoint. It selects actual
-派工 rows by valid 派工日期, includes all rows tied at the selected date, and skips
-reporting-rule documents and PDF OCR for this query. Invalid/missing dates are
-counted and excluded from date sorting. `Return guidance` passes these selected
-facts through the same RAG workflow, without replacing them with top-K rule text.
-The LLM answers with the results, not tool names or reporting instructions.
-This adds no CRUD tools, write endpoints or extra workflows. Republish RAG after
-the automatic query/result wiring migration; embedding credentials and top-K
-settings are preserved.
+The runtime test starts/removes isolated n8n and knowledge containers using installed images. It verifies the actual native Data Table nodes and API-visible rows: zero rows after the opener, one row after the next response, saving incomplete responses without more questions, retries, enrichment and subsequent retrieval. Real source files are mounted read-only; LLM/embeddings and PDF OCR are synthetic. It also checks caller separation and workflow-ID migration. No live service is changed and no deployment images are built.

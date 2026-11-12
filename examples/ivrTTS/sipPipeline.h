@@ -10,7 +10,7 @@
 #include <vector>
 
 struct SipPipelineConfig {
-    std::string audio_url, llm_url, llm_model, rag_url;
+    std::string audio_url, llm_url, llm_model, rag_url, dialogue_url;
     bool use_rag = false;
     std::string vad_model = "silero-vad", stt_model = "qwen3-asr", tts_model = "zipvoice";
     std::string hotwords, prompt, language, voice = "lingCL";
@@ -34,6 +34,7 @@ private:
     void respond(const std::vector<unsigned char>& pcm);
     std::string upload(const std::vector<unsigned char>& pcm);
     SipPipelineConfig config_;
+    std::string session_id_;
     std::atomic<bool> stopping_{false};
     std::mutex mutex_;
     std::condition_variable ready_;

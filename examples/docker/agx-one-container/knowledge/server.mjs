@@ -7,6 +7,10 @@ import {promisify} from 'node:util';
 import {pathToFileURL} from 'node:url';
 import mammoth from 'mammoth';
 import ExcelJS from 'exceljs';
+import {createHash} from 'node:crypto';
+import {sourceQa,workbookQa} from './qa.mjs';
+import {lookupIntent} from './conversation.mjs';
+import {createWorkOrderStore} from './work-orders.mjs';
 const execFile=promisify(execFileCallback);
 export const filenames={prompt:'prompt.csv',word:'情境模擬_20261105.docx',excel:'CSD資料庫.xlsx',pdf:'(備品維修)PY252-0059-工單-20260602-2工-CL、JC.pdf'};
 function cellText(cell){const v=cell.result??cell.value;if(v instanceof Date)return v.toISOString().slice(0,10);if(typeof v==='number'&&/^0+$/.test(cell.numFmt||''))return String(v).padStart(cell.numFmt.length,'0');return cell.text?.trim()||'';}
@@ -37,18 +41,26 @@ export async function extractPdf(file,{languages=process.env.OCR_LANGUAGES||'chi
     }return {text:chunks.join('\n\n'),extraction:'ocr',pages,languages,notice:'OCR output is not authoritative; verify codes, quantities and dates against the PDF image.'};
   }finally{await fs.rm(dir,{recursive:true,force:true});}
 }
-export function workOrderSelection(query,sheets){
-  if(/回報|流程|規則|SOP|如何|怎麼|新增|刪除|修改|更新/.test(query))return;
-  if(!(/[工公]單/.test(query)&&/最新|最舊|最早|最近|列出|所有|全部|清單|查詢|哪些|歷史/.test(query))&&!/^(?:那)?(?:最舊|最早|最新|全部|所有)(?:的|呢|工單|[？?\s])*$/u.test(query))return;
+export function dispatchDate(value){
+  const text=String(value??'').trim();
+  const m=text.match(/^(\d{4})[-/年](\d{1,2})[-/月](\d{1,2})(?:日|號)?$/)||text.match(/^(\d{4})(\d{2})\/(\d{1,2})$/)||text.match(/^(\d{4})(\d{2})(\d{2})$/);
+  if(!m)return '';
+  const date=`${m[1]}-${m[2].padStart(2,'0')}-${m[3].padStart(2,'0')}`;
+  return !Number.isNaN(Date.parse(date))&&new Date(date).toISOString().slice(0,10)===date?date:'';
+}
+export function workOrderSelection(query,sheets,{now=new Date()}={}){
+  const intent=lookupIntent(query,null,now);if(!intent)return;
   const sheet=sheets.find(s=>s.name==='派工');if(!sheet)throw new Error('CSD資料庫.xlsx is missing 派工');
-  const mode=/最舊|最早/.test(query)?'oldest':/最新|最近/.test(query)?'newest':'all';
-  const dated=sheet.rows.filter(row=>{const d=row.fields['派工日期'];return /^\d{4}-\d{2}-\d{2}$/.test(d)&&!Number.isNaN(Date.parse(d))&&new Date(d).toISOString().slice(0,10)===d;}).sort((a,b)=>a.fields['派工日期'].localeCompare(b.fields['派工日期'])||a.row-b.row);
+  const {selection:mode,period}=intent;
+  const normalized=sheet.rows.map(row=>{const original=row.fields['派工日期'],date=dispatchDate(original);return date&&date!==original?{...row,original_dispatch_date:original,fields:{...row.fields,派工日期:date}}:row;});
+  const candidates=intent.invalidPeriod?[]:period?normalized.filter(r=>String(r.fields['派工日期']||'').startsWith(period+'-')):normalized;
+  const dated=candidates.filter(row=>{const d=row.fields['派工日期'];return /^\d{4}-\d{2}-\d{2}$/.test(d)&&!Number.isNaN(Date.parse(d))&&new Date(d).toISOString().slice(0,10)===d;}).sort((a,b)=>a.fields['派工日期'].localeCompare(b.fields['派工日期'])||a.row-b.row);
   const date=mode==='oldest'?dated[0]?.fields['派工日期']:dated.at(-1)?.fields['派工日期'];
-  const rows=mode==='all'?sheet.rows:dated.filter(row=>row.fields['派工日期']===date);
-  return {source:filenames.excel,sheet:'派工',selection:mode,total_count:sheet.rows.length,selected_count:rows.length,undated_count:sheet.rows.length-dated.length,work_orders:rows};
+  const rows=mode==='all'?candidates:dated.filter(row=>row.fields['派工日期']===date);
+  return {source:filenames.excel,sheet:'派工',selection:mode,period,total_count:candidates.length,selected_count:rows.length,undated_count:candidates.length-dated.length,work_orders:rows};
 }
 function workbookDocument(excel,sheet){return {source:excel.source,sheet:sheet.name,modified:excel.modified,kind:'workbook_records',extraction:'xlsx',rowCount:sheet.rows.length,text:sheet.rows.length?sheet.rows.map(row=>`來源：${excel.source}；工作表：${sheet.name}；列：${row.row}\n${JSON.stringify(row.fields)}`).join('\n\n'):'此資料表目前沒有記錄。'};}
-export function createKnowledgeStore({root=process.env.KNOWLEDGE_ROOT||'/files',pdf=extractPdf}={}){
+export function createKnowledgeStore({root=process.env.KNOWLEDGE_ROOT||'/files',pdf=extractPdf,orders=createWorkOrderStore()}={}){
   // File-only cache; concurrent requests share OCR. User queries are never cached.
   const cache=new Map();
   async function read(kind,extract){
@@ -62,18 +74,28 @@ export function createKnowledgeStore({root=process.env.KNOWLEDGE_ROOT||'/files',
   }
   const workbook=()=>read('excel',async file=>({sheets:await readWorkbook(file)}));
   return {
+    registerTurn:input=>orders.register(input),
+    prepareWorkOrder:sessionId=>orders.prepare(sessionId),
+    listWorkOrders:()=>orders.list(),
     async health(){for(const name of Object.values(filenames)){const file=path.join(root,name);await fs.access(file,constants.R_OK);if(!(await fs.stat(file)).isFile())throw new Error(`${name} must be a readable file`);}return {status:'ok',files:Object.values(filenames)};},
-    async documents(query=''){
+    async documents(query='',tableRecords=[]){
       // Work-order questions need actual dispatch records, not reporting rules.
       const excel=await workbook();
-      const result=workOrderSelection(query,excel.sheets);
-      if(result)return {documents:[workbookDocument(excel,{name:'派工',rows:result.work_orders})],result};
-      const prompt=await read('prompt',async file=>({text:await fs.readFile(file,'utf8'),kind:'rules',extraction:'utf8'}));
+      if(!Array.isArray(tableRecords)||tableRecords.some(r=>!r||typeof r.id!=='string'||!r.fields||typeof r.fields!=='object'))throw Object.assign(Error('Invalid Data Table records'),{status:400});
+      const local=[...new Map([...(await orders.list()),...tableRecords].map(r=>[r.id,r])).values()];
+      const sheets=excel.sheets.map(sheet=>sheet.name==='派工'?{...sheet,rows:[...sheet.rows,...local.map((record,index)=>({row:100000+index,source:record.source,fields:record.fields}))]}:sheet);
+      const result=workOrderSelection(query,sheets);
+      if(result){
+        if(local.length)result.source='CSD資料庫.xlsx + '+[...new Set(local.map(r=>r.source||'舊版 JSON 工單'))].join(' + ');
+        const document=workbookDocument(excel,{name:'派工',rows:result.work_orders});
+        const documents=result.work_orders.length?result.work_orders.flatMap(row=>workbookQa({...document,source:row.source||excel.source},[row])):workbookQa(document,[]);
+        return {documents,result,format:'qa'};
+      }
       const word=await read('word',async file=>{const r=await mammoth.extractRawText({path:file});return {text:r.value,kind:'scenario_examples',extraction:'docx',warnings:r.messages.map(m=>m.message)};});
-      const pdfDoc=await read('pdf',async file=>({...await pdf(file),kind:'work_order_document'}));
-      const documents=[prompt,word,...excel.sheets.map(sheet=>workbookDocument(excel,sheet)),pdfDoc];
+      const pdfDoc=await read('pdf',async file=>({...await pdf(file),kind:'work_order_document',sha256:createHash('sha256').update(await fs.readFile(file)).digest('hex')}));
+      const documents=[...sourceQa(word),...excel.sheets.flatMap(sheet=>workbookQa(workbookDocument(excel,sheet),sheet.rows)),...local.flatMap((record,index)=>workbookQa({source:record.source,sheet:'派工',kind:'workbook_records',extraction:record.source?.includes('n8n Data Table')?'n8n_data_table':'legacy_json'},[{row:100000+index,fields:record.fields}])),...sourceQa(pdfDoc)];
       for(const d of documents){if(!d.text.trim())throw new Error(`No text extracted from ${d.source}${d.sheet?' / '+d.sheet:''}`);if(d.text.length>500000)throw new Error(`Extracted text too large: ${d.source}`);}
-      return {documents};
+      return {documents,format:'qa'};
     },
 
   };
@@ -82,10 +104,16 @@ export function createKnowledgeServer(store=createKnowledgeStore()){
   return createServer(async(req,res)=>{
     res.setHeader('Content-Type','application/json; charset=utf-8');res.setHeader('Cache-Control','no-store');
     try{
-      if(req.method!=='GET'){res.writeHead(405);res.end(JSON.stringify({error:'Read-only knowledge service; GET only'}));return;}
       const url=new URL(req.url,'http://localhost');let data;
-      if(url.pathname==='/health')data=await store.health();
+      if(req.method==='POST'&&['/call-turn','/work-order-draft','/documents'].includes(url.pathname)){
+        let raw='';for await(const chunk of req){raw+=chunk;if(Buffer.byteLength(raw)>256*1024)throw Object.assign(Error('Request too large'),{status:413});}
+        let body;try{body=JSON.parse(raw);}catch{throw Object.assign(Error('Invalid JSON'),{status:400});}
+        data=url.pathname==='/call-turn'?await store.registerTurn(body):url.pathname==='/work-order-draft'?await store.prepareWorkOrder(body.sessionId):await store.documents(body.query||'',body.records??[]);
+      }
+      else if(req.method!=='GET'){res.writeHead(405);res.end(JSON.stringify({error:'Method not allowed'}));return;}
+      else if(url.pathname==='/health')data=await store.health();
       else if(url.pathname==='/documents')data=await store.documents(url.searchParams.get('query')||'');
+      else if(url.pathname==='/work-orders')data={work_orders:await store.listWorkOrders()};
       else{res.writeHead(404);res.end(JSON.stringify({error:'Unknown knowledge endpoint'}));return;}
       res.end(JSON.stringify(data));
     }catch(e){res.writeHead(e.status||500);res.end(JSON.stringify({error:e.message}));}

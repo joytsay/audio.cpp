@@ -2,121 +2,146 @@ import assert from 'node:assert/strict';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import {bootstrap,importMissing as realImportMissing,exists,originalSourceMigration,readOnlyMcpMigration,resultWorkflowMigration,promptSourceMigration} from '../../../examples/docker/agx-one-container/n8n/bootstrap-local.mjs';
-const importMissing = options => realImportMissing({read:async()=>null,...options});
+import {bootstrap,importMissing,exists,mergedWorkflowMigration,repairLocalCredentialUrls,workflowIdMigration} from '../../../examples/docker/agx-one-container/n8n/bootstrap-local.mjs';
 const templates=new URL('../../../examples/docker/agx-one-container/n8n',import.meta.url).pathname;
-const credentials=JSON.parse(await fs.readFile(path.join(templates,'local-credentials.json'),'utf8'));
-const workflow=JSON.parse(await fs.readFile(path.join(templates,'scenario-1-rag.json'),'utf8'));
-const existing=new Set([credentials[0].id]);
+const realImportMissing=importMissing;
+const retired=[];
+const installMissing=options=>realImportMissing({repairCredentials:async()=>{},retireWorkflow:async id=>{retired.push(id);entities.set(id,{...entities.get(id),active:false,activeVersionId:null});},...options});
+const readTemplate=async name=>JSON.parse(await fs.readFile(path.join(templates,name),'utf8'));
+const credentials=await readTemplate('local-credentials.json');
+const template=await readTemplate('workflow.json');
+const mcp=await readTemplate('maintenance-mcp-tools.json');
+const rag=await readTemplate('maintenance-knowledge-rag.json');
+const entities=new Map([[credentials[0].id,credentials[0]]]);
 const imports=[];
-await importMissing({templates,has:async(_kind,id)=>existing.has(id),run:async args=>{
-  imports.push(args[0]);
-  const data=JSON.parse(await fs.readFile(args[1].slice('--input='.length),'utf8'));
-  for(const entity of Array.isArray(data)?data:[data]) {
-    assert.ok(!existing.has(entity.id),'existing edits must not be overwritten');
-    existing.add(entity.id);
-  }
-}});
-assert.deepEqual(imports,['import:credentials','import:workflow','import:workflow']);
-await importMissing({templates,has:async(_kind,id)=>existing.has(id),run:async()=>assert.fail('a restart must preserve existing entities')});
-await assert.rejects(importMissing({templates,has:async()=>false,run:async()=>{}}),/import incomplete/);
-assert.equal(await exists('workflow','missing',{run:async()=>{throw new Error('No workflows found with specified filters');}}),false);
-await assert.rejects(exists('workflow','missing',{run:async()=>{throw new Error('database unavailable');}}),/database unavailable/);
-const directory=await fs.mkdtemp(path.join(os.tmpdir(),'ivr-bootstrap-test-'));
+const run=async args=>{
+ imports.push(args[0]);
+ const data=JSON.parse(await fs.readFile(args[1].slice('--input='.length),'utf8'));
+ for(const entity of Array.isArray(data)?data:[data])entities.set(entity.id,entity);
+};
+const has=async(_kind,id)=>entities.has(id);
+const read=async id=>entities.get(id);
+await installMissing({templates,has,read,run,log:()=>{}});
+assert.deepEqual(imports,['import:credentials','import:workflow']);
+assert.equal(entities.get(template.id).name,'GeoVision · Workflow');
+assert.ok(!entities.has(rag.id),'new installs contain only one workflow');
+await installMissing({templates,has,read,run:async()=>assert.fail('preserve existing unified edits'),log:()=>{}});
+await assert.rejects(installMissing({templates,has:async()=>false,run:async()=>{},log:()=>{}}),/import incomplete/);
+assert.equal(await exists('workflow','missing',{run:async()=>{throw Error('No workflows found');}}),false);
+await assert.rejects(exists('workflow','missing',{run:async()=>{throw Error('database unavailable');}}),/database unavailable/);
+
+const directory=await fs.mkdtemp(path.join(os.tmpdir(),'ivr-unified-migration-'));
 try {
-  const marker=path.join(directory,'installed');
-  let calls=0,installs=0,waits=0;
-  await bootstrap({marker,log:()=>{},fetchImpl:async()=>({ok:true,json:async()=>({data:{userManagement:{showSetupOnFirstLoad:++calls===1}}})}),wait:async()=>{waits++;},install:async()=>{if(++installs===1)throw new Error('database busy');}});
-  assert.equal(calls,3);
-  assert.equal(installs,2);
-  assert.equal(waits,2);
-  await fs.access(marker);
-  let repaired = false;
-  await bootstrap({marker,log:()=>{},fetchImpl:async()=>({ok:true,json:async()=>({data:{userManagement:{showSetupOnFirstLoad:false}}})}),install:async()=>{repaired=true;}});
-  assert.equal(repaired,true,'a stale marker must not skip checking for a missing workflow');
+ const oldRag=structuredClone(rag),oldMcp=structuredClone(mcp);
+ oldRag.nodes.find(n=>n.name==='Local Embeddings').credentials.openAiApi.id='custom-embeddings';
+ oldRag.nodes.find(n=>n.name==='Retrieve guidance').parameters.topK=7;
+ oldMcp.nodes.push({id:'custom-tool',name:'Custom read-only tool',type:'@n8n/n8n-nodes-langchain.toolCode',position:[0,0],parameters:{jsCode:'return "custom";'}});
+ oldMcp.connections['Custom read-only tool']={ai_tool:[[{node:'Maintenance MCP Server',type:'ai_tool',index:0}]]};
+ oldMcp.active=true;
+ entities.delete(template.id);
+ entities.set(mcp.id,oldMcp);entities.set(rag.id,oldRag);
+ imports.length=0;
+ await installMissing({templates,has,read,run,backupDir:directory,log:()=>{}});
+ assert.deepEqual(imports,['import:workflow']);
+ const merged=entities.get(template.id);
+ assert.equal(merged.id,'ivrWorkflow');
+ assert.deepEqual(retired,[mcp.id]);
+ assert.equal(entities.get(mcp.id).active,false);
+ assert.equal(merged.nodes.find(n=>n.name==='Local Embeddings').credentials.openAiApi.id,'custom-embeddings');
+ assert.equal(merged.nodes.find(n=>n.name==='Retrieve guidance').parameters.topK,7);
+ assert.ok(!merged.nodes.some(n=>n.name==='Custom read-only tool'),'requested two-tool set removes old tools');
+ assert.deepEqual(merged.connections.retrieve_knowledge.ai_tool[0].map(e=>e.node),['Knowledge MCP Server']);
+ assert.equal(merged.nodes.find(n=>n.name==='retrieve_knowledge').parameters.workflowId.value,template.id);
+ assert.equal(merged.name,'GeoVision · Workflow');
+ assert.equal(merged.nodes.filter(n=>n.type==='n8n-nodes-base.stickyNote').length,3);
+ assert.equal(new Set(merged.nodes.map(n=>n.id)).size,merged.nodes.length);
+ assert.deepEqual(entities.get(rag.id),oldRag,'legacy source remains recoverable');
+ const backups=await fs.readdir(directory);assert.equal(backups.length,1);
+ assert.deepEqual(JSON.parse(await fs.readFile(path.join(directory,backups[0]),'utf8')),{mcp:oldMcp,rag:oldRag});
+ assert.equal(mergedWorkflowMigration(merged,null,template),null);
+ await installMissing({templates,has,read,run:async()=>assert.fail('migration must be idempotent'),log:()=>{}});
+ const onlyMcp=mergedWorkflowMigration(mcp,null,template);
+ assert.ok(onlyMcp.nodes.some(n=>n.name==='Return guidance'),'missing legacy RAG uses bundled RAG');
+ const marker=path.join(directory,'installed');
+ let calls=0,installs=0,waits=0;
+ await bootstrap({marker,log:()=>{},fetchImpl:async()=>({ok:true,json:async()=>({data:{userManagement:{showSetupOnFirstLoad:++calls===1}}})}),wait:async()=>{waits++;},install:async()=>{if(++installs===1)throw Error('database busy');}});
+ assert.equal(calls,3);assert.equal(installs,2);assert.equal(waits,2);await fs.access(marker);
+ let repaired=false;
+ await bootstrap({marker,log:()=>{},fetchImpl:async()=>({ok:true,json:async()=>({data:{userManagement:{showSetupOnFirstLoad:false}}})}),install:async()=>{repaired=true;}});
+ assert.ok(repaired,'marker cannot suppress verification');
 } finally {await fs.rm(directory,{recursive:true,force:true});}
-console.log('PASS automatic n8n bootstrap: owner setup, retry, import verification, partial imports and preservation of existing edits');
-
-const ragTemplate=JSON.parse(await fs.readFile(path.join(templates,'maintenance-knowledge-rag.json'),'utf8'));
-const oldRag=structuredClone(ragTemplate);
-oldRag.nodes=oldRag.nodes.filter(n=>!['read-prompt-csv','decode-prompt-text','load-knowledge-files'].includes(n.id));
-oldRag.nodes.find(n=>n.id==='prepare-guidance').parameters.jsCode='return [{json:{query:"test",knowledge:"old embedded text"}}];';
-oldRag.nodes.find(n=>n.name==='Local Embeddings').credentials.openAiApi.id='custom-credential';
-oldRag.nodes.find(n=>n.name==='Retrieve guidance').parameters.topK=7;
-const migrated=promptSourceMigration(oldRag,ragTemplate);
-assert.equal(migrated.nodes.find(n=>n.name==='Local Embeddings').credentials.openAiApi.id,'custom-credential');
-assert.equal(migrated.nodes.find(n=>n.name==='Retrieve guidance').parameters.topK,7);
-assert.equal(migrated.nodes.find(n=>n.id==='load-knowledge-files').parameters.url,'http://knowledge:8085/documents');
-assert.equal(promptSourceMigration(migrated,ragTemplate),null);
-const upgradeDir=await fs.mkdtemp(path.join(os.tmpdir(),'ivr-rag-migration-test-'));
-try {
-  let stored=oldRag,updates=0;
-  await realImportMissing({templates,has:async()=>true,read:async()=>stored,backupDir:upgradeDir,run:async args=>{
-    assert.equal(args[0],'import:workflow');updates++;
-    stored=JSON.parse(await fs.readFile(args[1].slice('--input='.length),'utf8'));
-  },log:()=>{}});
-  assert.equal(updates,1);
-  const backups=await fs.readdir(upgradeDir);
-  assert.equal(backups.length,1);
-  assert.deepEqual(JSON.parse(await fs.readFile(path.join(upgradeDir,backups[0]),'utf8')),oldRag);
-  await realImportMissing({templates,has:async()=>true,read:async()=>stored,backupDir:upgradeDir,run:async()=>assert.fail('must not repeat the source migration'),log:()=>{}});
-} finally {await fs.rm(upgradeDir,{recursive:true,force:true});}
-console.log('PASS prompt.csv source migration: backup, preserved credentials/retrieval settings, verified import and idempotence');
-
-const mcpTemplate=JSON.parse(await fs.readFile(path.join(templates,'maintenance-mcp-tools.json'),'utf8'));
-const priorQueryFlow=structuredClone(ragTemplate);
-priorQueryFlow.nodes=priorQueryFlow.nodes.filter(n=>!['manual-rag-test','rag-test-query','validate-rag-query'].includes(n.id));
-priorQueryFlow.nodes.find(n=>n.id==='prepare-guidance').parameters.jsCode=priorQueryFlow.nodes.find(n=>n.id==='prepare-guidance').parameters.jsCode.replace("$('Validate query')","$('RAG tool input')");
-const repairedQueryFlow=promptSourceMigration(priorQueryFlow,ragTemplate);
-assert.ok(repairedQueryFlow.nodes.some(n=>n.name==='Test RAG'));
-assert.equal(repairedQueryFlow.connections['RAG tool input'].main[0][0].node,'Validate query');
-assert.equal(promptSourceMigration(repairedQueryFlow,ragTemplate),null);
-console.log('PASS migration of existing published RAG query wiring to support manual tests');
-const renamedIds=structuredClone(priorQueryFlow);
-for(const node of renamedIds.nodes)node.id='imported-'+node.name;
-const prep=renamedIds.nodes.find(n=>n.name==='Prepare guidance');
-prep.parameters.jsCode=prep.parameters.jsCode.replace("const query = $('RAG tool input').first().json.query;", "const query = $input.first().json.query || 'manual question';");
-prep.position=renamedIds.nodes.find(n=>n.name==='Load knowledge files').position;
-const repairedImport=promptSourceMigration(renamedIds,ragTemplate);
-assert.ok(repairedImport.nodes.some(n=>n.name==='Test query'));
-assert.ok(repairedImport.nodes.find(n=>n.name==='Prepare guidance').parameters.jsCode.includes("const query = $('Validate query').first().json.query;"));
-assert.notDeepEqual(repairedImport.nodes.find(n=>n.name==='Prepare guidance').position,repairedImport.nodes.find(n=>n.name==='Load knowledge files').position);
-assert.equal(promptSourceMigration(repairedImport,ragTemplate),null);
-console.log('PASS manual-test upgrade with GUI-remapped node IDs, edited query code and overlapping node positions');
-
-const legacyMcp=structuredClone(mcpTemplate);
-for(const name of ['create_work_order','read_work_order','update_work_order','delete_work_order','get_work_order','replace_work_order','list_work_orders']){
- legacyMcp.nodes.push({id:name,name,type:'n8n-nodes-base.httpRequestTool',parameters:{url:'http://knowledge:8085/work-orders'}});
- legacyMcp.connections[name]={ai_tool:[[{node:'Maintenance MCP Server',type:'ai_tool',index:0}]]};
-}
-legacyMcp.nodes.find(n=>n.name==='Maintenance MCP Server').parameters.instructions='CRUD writes ivrDataBase.csv';
-const rolledBack=readOnlyMcpMigration(legacyMcp,mcpTemplate);
-assert.equal(rolledBack.nodes.length,mcpTemplate.nodes.length);
-assert.equal(readOnlyMcpMigration(rolledBack,mcpTemplate),null);
-assert.equal(rolledBack.nodes.find(n=>n.name==='Maintenance MCP Server').parameters.instructions,mcpTemplate.nodes.find(n=>n.name==='Maintenance MCP Server').parameters.instructions);
-for(const [from,outputs] of Object.entries(rolledBack.connections)){
- assert.ok(rolledBack.nodes.some(n=>n.name===from));
- for(const groups of Object.values(outputs))for(const edges of groups)for(const edge of edges)assert.ok(rolledBack.nodes.some(n=>n.name===edge.node));
-}
-const oldCsvSource={nodes:[{parameters:{jsCode:"const source = 'ivrDataBase.csv';"}}]};
-assert.ok(originalSourceMigration(oldCsvSource).nodes[0].parameters.jsCode.includes('CSD資料庫.xlsx'));
-assert.equal(originalSourceMigration(mcpTemplate),null);
-console.log('PASS CRUD toolbox rollback removes nodes/connections and restores original XLSX source idempotently');
-const rollbackDir=await fs.mkdtemp(path.join(os.tmpdir(),'ivr-rollback-'));
+const previousMerged=structuredClone(template);
+previousMerged.meta.ivrWorkflowRevision=1;
+previousMerged.nodes=previousMerged.nodes.filter(n=>n.id!=='retrieve-ivr-turn');
+previousMerged.nodes.find(n=>n.name==='Local Embeddings').credentials.openAiApi.id='custom-installed-embedding';
+previousMerged.nodes.find(n=>n.name==='Retrieve guidance').parameters.topK=9;
+previousMerged.nodes.find(n=>n.name==='Local Chat Model').parameters.options.maxTokens=2048;
+const updatedMerged=mergedWorkflowMigration(previousMerged,null,template);
+assert.ok(updatedMerged.nodes.some(n=>n.id==='retrieve-ivr-turn'));
+assert.equal(updatedMerged.nodes.find(n=>n.name==='Local Embeddings').credentials.openAiApi.id,'custom-installed-embedding');
+assert.equal(updatedMerged.nodes.find(n=>n.name==='Retrieve guidance').parameters.topK,9);
+assert.equal(updatedMerged.nodes.find(n=>n.name==='Local Chat Model').parameters.options.maxTokens,160);
+assert.equal(mergedWorkflowMigration(updatedMerged,null,template),null);
+const installedOldId=structuredClone(template);
+installedOldId.id=mcp.id;
+installedOldId.active=true;
+installedOldId.activeVersionId='previous-published-version';
+installedOldId.versionId='previous-draft-version';
+installedOldId.nodes.find(n=>n.name==='retrieve_knowledge').parameters.workflowId.value=mcp.id;
+installedOldId.nodes.find(n=>n.name==='AI Agent').parameters.options.maxIterations=2;
+const renamed=workflowIdMigration(installedOldId,template.id);
+assert.equal(renamed.id,'ivrWorkflow');
+assert.equal(renamed.active,false);
+assert.ok(!('activeVersionId' in renamed)&&!('versionId' in renamed));
+assert.equal(renamed.nodes.find(n=>n.name==='retrieve_knowledge').parameters.workflowId.value,'ivrWorkflow');
+assert.equal(renamed.nodes.find(n=>n.name==='AI Agent').parameters.options.maxIterations,2);
+assert.equal(installedOldId.id,mcp.id,'original workflow is untouched');
+const renameDir=await fs.mkdtemp(path.join(os.tmpdir(),'ivr-workflow-id-test-'));
 try{
- let stored=legacyMcp;
- await realImportMissing({templates,has:async()=>true,read:async id=>id==='ivrMaintenanceMcp'?stored:ragTemplate,backupDir:rollbackDir,log:()=>{},run:async args=>{stored=JSON.parse(await fs.readFile(args[1].slice('--input='.length),'utf8'));}});
- assert.equal(stored.nodes.length,mcpTemplate.nodes.length);
- const backups=await fs.readdir(rollbackDir);assert.equal(backups.length,1);
- assert.deepEqual(JSON.parse(await fs.readFile(path.join(rollbackDir,backups[0]),'utf8')),legacyMcp);
-}finally{await fs.rm(rollbackDir,{recursive:true,force:true});}
-console.log('PASS existing MCP workflow is backed up before CRUD rollback');
+ entities.delete(template.id);entities.set(mcp.id,installedOldId);
+ imports.length=0;retired.length=0;
+ await installMissing({templates,has,read,run,backupDir:renameDir,log:()=>{}});
+ assert.equal(entities.get(template.id).nodes.find(n=>n.name==='AI Agent').parameters.options.maxIterations,2,'ID migration preserves current-revision user edits');
+ assert.deepEqual(retired,[mcp.id]);
+ await installMissing({templates,has,read,run:async()=>assert.fail('rename must be idempotent'),backupDir:renameDir,log:()=>{}});
+ // An interrupted retirement must resume without overwriting target edits.
+ entities.set(mcp.id,installedOldId);
+ entities.get(template.id).name='Custom installed title';
+ await installMissing({templates,has,read,run:async()=>assert.fail('preserve existing target'),backupDir:renameDir,log:()=>{}});
+ assert.equal(entities.get(template.id).name,'Custom installed title');
+ assert.deepEqual(retired,[mcp.id,mcp.id]);
+}finally{await fs.rm(renameDir,{recursive:true,force:true});}
+console.log('PASS workflow ID migration: preserved edits, rebound self-reference, released legacy routes, retry and idempotence');
+const revisionTwo=structuredClone(template);revisionTwo.meta.ivrWorkflowRevision=2;
+assert.equal(mergedWorkflowMigration(revisionTwo,null,template).meta.ivrWorkflowRevision,5,'existing revision 2 must receive the routing/save fixes');
+const revisionThree=structuredClone(template);revisionThree.meta.ivrWorkflowRevision=3;
+assert.equal(mergedWorkflowMigration(revisionThree,null,template).meta.ivrWorkflowRevision,5,'revision 3 upgrades to native Data Table intake');
+const revisionFour=structuredClone(template);revisionFour.meta.ivrWorkflowRevision=4;
+assert.equal(mergedWorkflowMigration(revisionFour,null,template).meta.ivrWorkflowRevision,5,'revision 4 upgrades to one-question Data Table saving');
+console.log('PASS unified bootstrap: one workflow, backups of both legacy flows, two tools, preserved credentials/top-K, same-workflow RAG, retry and idempotence');
 
-const beforeResults=structuredClone(ragTemplate);
-const beforeLoad=beforeResults.nodes.find(n=>n.name==='Load knowledge files');delete beforeLoad.parameters.sendQuery;delete beforeLoad.parameters.queryParameters;
-beforeResults.nodes.find(n=>n.name==='Return guidance').parameters.jsCode='return [{json:{passages:[]}}];';
-const resultUpgrade=resultWorkflowMigration(beforeResults,ragTemplate);
-assert.equal(resultUpgrade.nodes.find(n=>n.name==='Local Embeddings').credentials.openAiApi.id,beforeResults.nodes.find(n=>n.name==='Local Embeddings').credentials.openAiApi.id);
-assert.ok(resultUpgrade.nodes.find(n=>n.name==='Return guidance').parameters.jsCode.includes('if (prepared.result)'));
-assert.equal(resultWorkflowMigration(resultUpgrade,ragTemplate),null);
-console.log('PASS RAG result migration passes current query and structured facts without altering credentials');
+const credentialDir=await fs.mkdtemp(path.join(os.tmpdir(),'ivr-local-credential-test-'));
+try {
+ const stored=structuredClone(credentials);
+ stored[0].data={apiKey:'fixture-private-key',url:'http://192.168.5.151:8082/v1',other:'preserve'};
+ stored[1].data.url='http://custom-embedding.test/v1';
+ let imports=0;
+ await repairLocalCredentialUrls({credentials,backupDir:credentialDir,log:()=>{},run:async args=>{
+  if(args[0]==='export:credentials'){
+   const id=args.find(a=>a.startsWith('--id=')).slice(5);
+   const current=stored.find(c=>c.id===id);
+   const output=args.find(a=>a.startsWith('--output=')).slice(9);
+   await fs.writeFile(output,JSON.stringify([{...current,data:args.includes('--decrypted')?current.data:'ENCRYPTED_BACKUP'}]));
+  }else if(args[0]==='import:credentials'){
+   const next=JSON.parse(await fs.readFile(args[1].slice(8),'utf8'))[0];
+   Object.assign(stored.find(c=>c.id===next.id),next);imports++;
+  }else assert.fail(args[0]);
+ }});
+ assert.equal(imports,1);
+ assert.deepEqual(stored[0].data,{apiKey:'fixture-private-key',url:'http://voice-ai:8082/v1',other:'preserve'});
+ assert.equal(stored[1].data.url,'http://custom-embedding.test/v1');
+ const backups=await fs.readdir(credentialDir);assert.equal(backups.length,1);
+ assert.equal(JSON.parse(await fs.readFile(path.join(credentialDir,backups[0]),'utf8'))[0].data,'ENCRYPTED_BACKUP');
+ assert.equal((await fs.stat(path.join(credentialDir,backups[0]))).mode & 0o777,0o600);
+}finally{await fs.rm(credentialDir,{recursive:true,force:true});}
+console.log('PASS old bundled credential URL repair preserves API keys/custom settings and backs up encrypted credentials');

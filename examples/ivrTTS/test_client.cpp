@@ -154,7 +154,7 @@ public:
     std::string url, wav, pcm;
     std::filesystem::path player_audio;
     std::atomic<bool> early{false}, bad_catalog{false};
-    std::atomic<bool> pipeline_mode{false}, rag_fails{false}, stt_waits{false};
+    std::atomic<bool> pipeline_mode{false}, rag_fails{false}, stt_waits{false}, dialogue_fails{false};
     Server() {
         for (int i = 0; i < 24000; ++i) {
             int sample = int(16000 * std::sin(i * 6.283185307 * 440 / 24000));
@@ -237,6 +237,20 @@ private:
                 send_all(fd, std::string(success ? "HTTP/1.1 200 OK" : "HTTP/1.1 503 Busy") +
                     "\r\nConnection: close\r\nContent-Type: application/json\r\n\r\n" + json);
             };
+            if (route == "/dialogue") {
+                auto input = parse(body);
+                check(field(input.get(), "text") == "Where is the office?", "SIP transcript missing from shared dialogue request");
+                check(!field(input.get(), "sessionId").empty(), "SIP call session missing from dialogue request");
+                send_all(fd, "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: application/x-ndjson\r\n\r\n");
+                const std::string events = R"({"type":"configuration","source":"n8n","model":"saved-llm"})" "\n"
+                    R"({"type":"event","event":"MCP_TOOL_STARTED","summary":"lookup_maintenance_guidance"})" "\n";
+                const std::string result = dialogue_fails ? R"({"type":"error","message":"MCP unavailable"})" "\n" :
+                    R"({"type":"event","event":"MCP_TOOL_COMPLETED","summary":"lookup_maintenance_guidance"})" "\n"
+                    R"({"type":"reply","reply":"The office is on floor 3."})" "\n";
+                const auto payload = events + result;
+                for (size_t offset = 0; offset < payload.size(); offset += 7) send_all(fd, payload.substr(offset, 7));
+                return;
+            }
             if (route == "/v1/ui/upload") {
                 check(body.size() >= 44 && body.substr(0, 4) == "RIFF", "pipeline upload is not WAV");
                 check(static_cast<unsigned char>(body[24]) == 0x80 && static_cast<unsigned char>(body[25]) == 0x3e, "upload is not 16 kHz");
@@ -757,7 +771,7 @@ void test_sip(const std::string& executable) {
         SipServer sip(false, false, true, false, true);
         const auto options = settings.path / "gateway.env";
         write_file(options, "SIP_MODE= pipeline\nSIP_ACCOUNT=sip:1001@127.0.0.1\nSIP_PROXY=" + sip.uri +
-            "\nSIP_TARGET=listen\nSIP_WAIT_FOR_MEDIA=1\nSIP_ECHO_TEST=1\n");
+            "\nSIP_TARGET=listen\nSIP_WAIT_FOR_MEDIA=1\nSIP_ECHO_TEST=1\nSIP_DIALOGUE_URL=" + audio.url + "/dialogue\n");
         for (const char* key : {"SIP_MODE", "SIP_ACCOUNT", "SIP_PROXY", "SIP_TARGET", "SIP_WAIT_FOR_MEDIA", "SIP_ECHO_TEST", "SIP_GREETING"}) unsetenv(key);
         setenv("SIP_CONTINUOUS", "0", 1);
         setenv("SIP_CODEC", "PCMU", 1);
@@ -774,12 +788,12 @@ void test_sip(const std::string& executable) {
         check(client.output.find("echoing audio") == std::string::npos,
               "Use IVR echoed caller audio instead of running the conversation pipeline");
         const auto requests = audio.pipeline_requests();
-        const std::vector<std::string> stages{"/v1/tasks/run", "/v1/audio/transcriptions/details", "/v1/chat/completions", "/v1/audio/speech"};
+        const std::vector<std::string> stages{"/v1/tasks/run", "/v1/audio/transcriptions/details", "/dialogue", "/v1/audio/speech"};
         size_t stage = 0;
         for (const auto& request : requests) {
             if (stage < stages.size() && request.first == stages[stage]) ++stage;
-            if (request.first == "/v1/chat/completions")
-                check(request.second.find("Where is the office?") != std::string::npos, "SIP ASR transcript was not sent to the LLM");
+            if (request.first == "/dialogue")
+                check(request.second.find("Where is the office?") != std::string::npos, "SIP ASR transcript was not sent to shared dialogue");
         }
         check(stage == stages.size(), "Use IVR did not execute VAD -> ASR -> LLM -> TTS in order");
         check(std::any_of(requests.begin(), requests.end(), [&](const auto& request) {
@@ -791,8 +805,9 @@ void test_sip(const std::string& executable) {
         check(json_object_object_get_ex(snapshot.get(), "events", &event_array) &&
               json_object_object_get_ex(snapshot.get(), "messages", &message_array), "SIP demo snapshot missing events or messages");
         const std::string events = json_object_to_json_string(event_array);
-        for (const char* event : {"SIP_CALL_ESTABLISHED", "VAD_COMPLETED", "ASR_COMPLETED", "LLM_COMPLETED", "TTS_PLAYBACK_STARTED"})
+        for (const char* event : {"SIP_CALL_ESTABLISHED", "VAD_COMPLETED", "ASR_COMPLETED", "DIALOGUE_SOURCE", "MCP_TOOL_COMPLETED", "LLM_COMPLETED", "TTS_PLAYBACK_STARTED"})
             check(std::string(events).find(event) != std::string::npos, std::string("SIP demo event missing: ") + event);
+        check(field(snapshot.get(), "dialogue_source") == "n8n", "SIP monitor did not report the actual dialogue source");
         const std::string messages = json_object_to_json_string(message_array);
         check(messages.find("Where is the office?") != std::string::npos && messages.find("The office is on floor 3.") != std::string::npos,
               "SIP conversation text missing from demo monitor");
@@ -910,6 +925,27 @@ void test_pipeline() {
         }
         check(tts_count == 2, "normalized TTS requests missing");
         check(stt_count == 2 && llm_count == 2, "pipeline skipped a turn");
+    }
+    {
+        auto shared = config; shared.dialogue_url = server.url + "/dialogue";
+        const auto start = server.pipeline_requests().size();
+        SipPipeline pipeline(shared); pipeline.resume(); send_turn(pipeline); reply(pipeline);
+        pipeline.resume(); send_turn(pipeline); reply(pipeline);
+        const auto requests = server.pipeline_requests(); size_t turns = 0;
+        for (size_t i = start; i < requests.size(); ++i) {
+            check(requests[i].first != "/v1/chat/completions", "shared n8n dialogue was bypassed by direct LLM call");
+            if (requests[i].first != "/dialogue") continue;
+            auto body = parse(requests[i].second); json_object* history = nullptr;
+            check(json_object_object_get_ex(body.get(), "messages", &history), "dialogue history missing");
+            check(json_object_array_length(history) == turns * 2, "dialogue lost the SIP call history"); ++turns;
+        }
+        check(turns == 2, "SIP turns did not use shared dialogue");
+        server.dialogue_fails = true;
+        pipeline.resume(); send_turn(pipeline);
+        const auto deadline = Clock::now() + 6s;
+        while (pipeline.error().empty() && Clock::now() < deadline) std::this_thread::sleep_for(10ms);
+        check(pipeline.error().find("MCP unavailable") != std::string::npos, "n8n error silently fell back to prompt-only LLM");
+        server.dialogue_fails = false;
     }
     {
         auto rag_config = config; rag_config.use_rag = true;

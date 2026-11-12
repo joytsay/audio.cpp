@@ -114,9 +114,13 @@ services:
     restart: unless-stopped
     ports:
       - "${N8N_PORT:-5678}:5678"
+      # Native SIP worker reaches the shared dialogue handler over loopback.
+      - "127.0.0.1:8086:8086"
     environment:
       TZ: Asia/Taipei
       GENERIC_TIMEZONE: Asia/Taipei
+      SIP_DIALOGUE_AUDIO_URL: http://voice-ai:8081
+      SIP_DIALOGUE_LLM_URL: http://voice-ai:8082/v1
       N8N_SECURE_COOKIE: "false"
       N8N_DIAGNOSTICS_ENABLED: "false"
       N8N_PERSONALIZATION_ENABLED: "false"
@@ -135,8 +139,10 @@ services:
     volumes:
       - audiocpp-n8n-data:/home/node/.n8n
       - ./n8n:/templates:ro
+      - ../../../webui/native/src/lib/n8n-dialogue.ts:/dialogue/n8n-dialogue.ts:ro
+      - ../../../webui/native/src/lib/mcp-http.ts:/dialogue/mcp-http.ts:ro
     healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:5678/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      test: ["CMD", "node", "-e", "Promise.all(['http://127.0.0.1:5678/healthz','http://127.0.0.1:8086/health'].map(u=>fetch(u))).then(rs=>process.exit(rs.every(r=>r.ok)?0:1)).catch(()=>process.exit(1))"]
       interval: 20s
       timeout: 5s
       retries: 5
@@ -150,8 +156,10 @@ services:
     environment:
       PORT: 8085
       KNOWLEDGE_ROOT: /files
+      KNOWLEDGE_DATA_ROOT: /data
       OCR_LANGUAGES: chi_tra+eng
     volumes:
+      - audiocpp-knowledge-data:/data
       - type: bind
         source: ../../../prompt.csv
         target: /files/prompt.csv
@@ -215,11 +223,14 @@ services:
     depends_on:
       voice-ai:
         condition: service_healthy
+      n8n:
+        condition: service_healthy
     restart: unless-stopped
     init: true
     stop_grace_period: 15s
     environment:
       SIP_SETTINGS_DIR: /app/sip-data
+      SIP_DIALOGUE_URL: http://127.0.0.1:8086/dialogue
       SIP_ACCOUNT: ${SIP_ACCOUNT:-}
       SIP_PROXY: ${SIP_PROXY:-}
       SIP_SECRET: ${SIP_SECRET:-}
@@ -288,3 +299,4 @@ volumes:
   audiocpp-https-data:
   audiocpp-https-config:
   audiocpp-n8n-data:
+  audiocpp-knowledge-data:

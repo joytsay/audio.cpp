@@ -4,6 +4,7 @@
 #include <curl/curl.h>
 #include <json-c/json.h>
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
@@ -99,6 +100,59 @@ Json rpc(const std::string& url, const std::string& method, json_object* params,
     json_object_object_add(body.get(), "id", json_object_new_int(1));
     json_object_object_add(body.get(), "params", json_object_get(params)); return post(url, body.get(), stopping);
 }
+// The bridge executes the exact shared browser n8n dialogue code. It emits
+// configuration and tool events as NDJSON while the native RTP loop keeps running.
+std::string dialogue_reply(const std::string& url, json_object* body, const std::atomic<bool>& stopping) {
+    std::unique_ptr<CURL, decltype(&curl_easy_cleanup)> curl(curl_easy_init(), curl_easy_cleanup);
+    if (!curl) throw std::runtime_error("cannot allocate SIP dialogue HTTP handle");
+    struct State {
+        CURL* curl; std::string pending, answer, error; std::exception_ptr failure;
+    } state{curl.get(), {}, {}, {}, {}};
+    auto receive = +[](char* data, size_t size, size_t count, void* context) noexcept -> size_t {
+        auto& state = *static_cast<State*>(context); const size_t bytes = size * count;
+        try {
+            if (state.pending.size() + bytes > 256 * 1024) throw std::runtime_error("SIP dialogue response is too large");
+            state.pending.append(data, bytes);
+            long code = 0; curl_easy_getinfo(state.curl, CURLINFO_RESPONSE_CODE, &code);
+            if (code < 200 || code >= 300) return bytes;
+            size_t end;
+            while ((end = state.pending.find('\n')) != std::string::npos) {
+                const auto line = state.pending.substr(0, end); state.pending.erase(0, end + 1);
+                if (line.empty()) continue;
+                Json item(json_tokener_parse(line.c_str()), json_object_put);
+                if (!item) throw std::runtime_error("SIP dialogue returned invalid NDJSON");
+                const auto type = text(item.get(), "type");
+                if (type == "configuration") {
+                    const auto source = text(item.get(), "source"), model = text(item.get(), "model");
+                    SipMonitor::get().dialogue(source, model);
+                    SipMonitor::get().stage(source == "n8n" ? "Thinking · n8n" : "Thinking");
+                    SipMonitor::get().event("DIALOGUE_SOURCE", source + " · " + model);
+                } else if (type == "event") SipMonitor::get().event(text(item.get(), "event"), text(item.get(), "summary"));
+                else if (type == "reply") state.answer = text(item.get(), "reply");
+                else if (type == "error") state.error = text(item.get(), "message");
+            }
+        } catch (...) { state.failure = std::current_exception(); return 0; }
+        return bytes;
+    };
+    auto progress = +[](void* context, curl_off_t, curl_off_t, curl_off_t, curl_off_t) noexcept -> int {
+        return static_cast<const std::atomic<bool>*>(context)->load() ? 1 : 0;
+    };
+    std::unique_ptr<curl_slist, decltype(&curl_slist_free_all)> headers(curl_slist_append(nullptr, "Content-Type: application/json"), curl_slist_free_all);
+    const std::string payload = json_object_to_json_string_ext(body, JSON_C_TO_STRING_PLAIN);
+    auto set = [&](CURLoption key, auto value) { if (curl_easy_setopt(curl.get(), key, value) != CURLE_OK) throw std::runtime_error("cannot configure SIP dialogue HTTP"); };
+    set(CURLOPT_URL, url.c_str()); set(CURLOPT_POSTFIELDS, payload.data()); set(CURLOPT_POSTFIELDSIZE_LARGE, curl_off_t(payload.size()));
+    set(CURLOPT_HTTPHEADER, headers.get()); set(CURLOPT_WRITEFUNCTION, receive); set(CURLOPT_WRITEDATA, &state);
+    set(CURLOPT_NOPROGRESS, 0L); set(CURLOPT_XFERINFOFUNCTION, progress); set(CURLOPT_XFERINFODATA, &stopping);
+    set(CURLOPT_CONNECTTIMEOUT, 10L); set(CURLOPT_TIMEOUT, 300L); set(CURLOPT_NOSIGNAL, 1L);
+    const auto result = curl_easy_perform(curl.get());
+    if (state.failure) std::rethrow_exception(state.failure);
+    if (result != CURLE_OK) throw std::runtime_error(std::string("SIP dialogue HTTP: ") + curl_easy_strerror(result));
+    long code = 0; curl_easy_getinfo(curl.get(), CURLINFO_RESPONSE_CODE, &code);
+    if (code < 200 || code >= 300) throw std::runtime_error("SIP dialogue HTTP status " + std::to_string(code) + ": " + state.pending.substr(0, 1024));
+    if (!state.error.empty()) throw std::runtime_error("SIP dialogue: " + state.error);
+    if (state.answer.empty()) throw std::runtime_error("SIP dialogue returned no reply");
+    return state.answer;
+}
 std::vector<unsigned char> wav(const std::vector<unsigned char>& pcm) {
     std::vector<unsigned char> result;
     auto le = [&](unsigned n, int length) { while (length--) { result.push_back(n & 255); n >>= 8; } };
@@ -113,6 +167,9 @@ SipPipelineConfig SipPipelineConfig::from_environment() {
     SipPipelineConfig config;
     config.audio_url = base(env("AUDIOCPP_URL", "http://127.0.0.1:8081"));
     config.llm_url = base(env("LLM_URL", "http://127.0.0.1:8082/v1"));
+    config.dialogue_url = env("SIP_DIALOGUE_URL");
+    if (!config.dialogue_url.empty() && config.dialogue_url.rfind("http://", 0) != 0 && config.dialogue_url.rfind("https://", 0) != 0)
+        throw std::runtime_error("SIP_DIALOGUE_URL requires HTTP(S)");
     config.llm_model = env("LLM_MODEL");
     if (config.llm_model.empty() || config.llm_model == "REPLACE_WITH_REGISTERED_LLM_ID")
         throw std::runtime_error("set LLM_MODEL to a registered LLM model ID");
@@ -132,12 +189,13 @@ SipPipelineConfig SipPipelineConfig::from_environment() {
     if (!env("SYSTEM_PROMPT_FILE").empty()) config.prompt = file(env("SYSTEM_PROMPT_FILE"));
     return config;
 }
-SipPipeline::SipPipeline(SipPipelineConfig config) : config_(std::move(config)) {
+SipPipeline::SipPipeline(SipPipelineConfig config) : config_(std::move(config)), session_id_("sip-" + std::to_string(SipMonitor::now())) {
     struct Runtime {
         Runtime() { if (curl_global_init(CURL_GLOBAL_DEFAULT) != CURLE_OK) throw std::runtime_error("cannot initialize pipeline HTTP"); }
         ~Runtime() { curl_global_cleanup(); }
     };
     static Runtime runtime;
+    if (config_.dialogue_url.empty()) SipMonitor::get().dialogue("prompt.csv", config_.llm_model);
     worker_ = std::thread([this] { work(); });
 }
 SipPipeline::~SipPipeline() { stop(); }
@@ -218,28 +276,44 @@ void SipPipeline::respond(const std::vector<unsigned char>& pcm) {
         context = context.substr(0, 20000);
         if (context.empty()) context = "No relevant records were found.";
     }
-    SipMonitor::get().stage("Thinking");
-    SipMonitor::get().event("LLM_STARTED", config_.llm_model);
-    std::cout << "Pipeline: LLM\n";
-    auto llm = object(); add(llm.get(), "model", config_.llm_model);
-    json_object_object_add(llm.get(), "stream", json_object_new_boolean(false));
-    json_object_object_add(llm.get(), "max_tokens", json_object_new_int(256));
-    json_object_object_add(llm.get(), "temperature", json_object_new_double(0.2));
-    json_object* messages = json_object_new_array();
-    auto message = [&](const std::string& role, const std::string& content) {
-        auto item = object(); add(item.get(), "role", role); add(item.get(), "content", content);
-        json_object_array_add(messages, json_object_get(item.get()));
-    };
-    json_object_object_add(llm.get(), "messages", messages);
-    message("system", config_.prompt + (config_.use_rag ? "\n\nRetrieved reference data:\n" + context : ""));
-    for (const auto& previous : history_) message(previous.first, previous.second);
-    message("user", caller);
-    auto completion = post(config_.llm_url + "/chat/completions", llm.get(), stopping_, env("LLM_API_KEY"));
-    auto* choices = member(completion.get(), "choices");
-    if (!choices || !json_object_is_type(choices, json_type_array) || !json_object_array_length(choices))
-        throw std::runtime_error("LLM returned no choices");
-    auto answer = text(member(json_object_array_get_idx(choices, 0), "message"), "content");
-    if (answer.empty()) throw std::runtime_error("LLM returned no reply text");
+    std::string answer;
+    if (!config_.dialogue_url.empty()) {
+        auto input = object(); add(input.get(), "sessionId", session_id_);
+        add(input.get(), "text", caller); add(input.get(), "model", config_.llm_model);
+        add(input.get(), "prompt", config_.prompt + (config_.use_rag ? "\n\nRetrieved reference data:\n" + context : ""));
+        auto* history = json_object_new_array();
+        for (const auto& previous : history_) {
+            auto item = object(); add(item.get(), "role", previous.first); add(item.get(), "content", previous.second);
+            json_object_array_add(history, json_object_get(item.get()));
+        }
+        json_object_object_add(input.get(), "messages", history);
+        SipMonitor::get().stage("Thinking");
+        SipMonitor::get().event("LLM_STARTED", "Applying saved demo dialogue source");
+        answer = dialogue_reply(config_.dialogue_url, input.get(), stopping_);
+    } else {
+        SipMonitor::get().stage("Thinking");
+        SipMonitor::get().event("LLM_STARTED", config_.llm_model);
+        std::cout << "Pipeline: LLM\n";
+        auto llm = object(); add(llm.get(), "model", config_.llm_model);
+        json_object_object_add(llm.get(), "stream", json_object_new_boolean(false));
+        json_object_object_add(llm.get(), "max_tokens", json_object_new_int(256));
+        json_object_object_add(llm.get(), "temperature", json_object_new_double(0.2));
+        json_object* messages = json_object_new_array();
+        auto message = [&](const std::string& role, const std::string& content) {
+            auto item = object(); add(item.get(), "role", role); add(item.get(), "content", content);
+            json_object_array_add(messages, json_object_get(item.get()));
+        };
+        json_object_object_add(llm.get(), "messages", messages);
+        message("system", config_.prompt + (config_.use_rag ? "\n\nRetrieved reference data:\n" + context : ""));
+        for (const auto& previous : history_) message(previous.first, previous.second);
+        message("user", caller);
+        auto completion = post(config_.llm_url + "/chat/completions", llm.get(), stopping_, env("LLM_API_KEY"));
+        auto* choices = member(completion.get(), "choices");
+        if (!choices || !json_object_is_type(choices, json_type_array) || !json_object_array_length(choices))
+            throw std::runtime_error("LLM returned no choices");
+        answer = text(member(json_object_array_get_idx(choices, 0), "message"), "content");
+        if (answer.empty()) throw std::runtime_error("LLM returned no reply text");
+    }
     SipMonitor::get().message("assistant", answer);
     SipMonitor::get().event("LLM_COMPLETED", answer);
     SipMonitor::get().stage("Synthesizing");

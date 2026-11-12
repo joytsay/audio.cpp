@@ -14,6 +14,7 @@ services:
     stop_grace_period: 10s
     environment:
       SIP_SETTINGS_DIR: /app/sip-data
+      SIP_DIALOGUE_URL: http://127.0.0.1:8086/dialogue
       LLM_URL: http://127.0.0.1:8082/v1
       LLM_MODEL: ${SIP_LLM_MODEL:-bartowski/Qwen2.5-3B-Instruct-GGUF:Q4_K_M}
       VAD_MODEL: ${SIP_VAD_MODEL:-silero-vad}

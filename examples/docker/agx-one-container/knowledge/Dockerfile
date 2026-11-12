@@ -3,7 +3,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends poppler-utils t
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
-COPY server.mjs ./
+COPY server.mjs qa.mjs work-orders.mjs conversation.mjs ./
+RUN mkdir /data && chown node:node /data
 ENV NODE_ENV=production PORT=8085 KNOWLEDGE_ROOT=/files OCR_LANGUAGES=chi_tra+eng
 USER node
 EXPOSE 8085

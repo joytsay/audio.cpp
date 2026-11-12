@@ -1,17 +1,23 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import {execFileSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 const folder=fileURLToPath(new URL('../../../examples/docker/agx-one-container/',import.meta.url));
-const config=JSON.parse(execFileSync('docker',['compose','--env-file',folder+'.env.example','-f',folder+'compose.yml','config','--format','json'],{encoding:'utf8'}));
+const config=JSON.parse(process.env.N8N_COMPOSE_CONFIG ? fs.readFileSync(process.env.N8N_COMPOSE_CONFIG,'utf8') : execFileSync('docker',['compose','--env-file',folder+'.env.example','-f',folder+'compose.yml','--profile','sip','config','--format','json'],{encoding:'utf8'}));
 const n8n=config.services.n8n;
 assert.deepEqual(n8n.entrypoint,['/bin/sh','/templates/start-n8n.sh']);
 assert.ok(n8n.volumes.some(v=>v.target==='/templates'&&v.read_only),'startup scripts/templates must be mounted');
 assert.ok(n8n.volumes.some(v=>v.target==='/home/node/.n8n'&&v.source==='audiocpp-n8n-data'),'existing n8n database volume must be preserved');
-assert.equal(n8n.volumes.length,2,'document mounts belong on knowledge, not on n8n');
+assert.ok(!n8n.volumes.some(v=>v.target.startsWith('/files')),'document mounts belong on knowledge, not on n8n');
+for(const name of ['n8n-dialogue.ts','mcp-http.ts'])assert.ok(n8n.volumes.some(v=>v.target==='/dialogue/'+name&&v.read_only),'shared dialogue modules must be read-only');
+assert.ok(n8n.ports.some(p=>p.target===8086&&p.host_ip==='127.0.0.1'),'SIP dialogue port must only be exposed on loopback');
+assert.equal(config.services.sip.environment.SIP_DIALOGUE_URL,'http://127.0.0.1:8086/dialogue');
+assert.equal(config.services.sip.depends_on.n8n.condition,'service_healthy');
 assert.ok(!n8n.depends_on?.knowledge,'the editor must start even if knowledge files are missing');
-const documents=config.services.knowledge.volumes;
+const documents=config.services.knowledge.volumes.filter(v=>v.target.startsWith('/files/'));
+assert.ok(config.services.knowledge.volumes.some(v=>v.target==='/data'&&v.type==='volume'&&v.source==='audiocpp-knowledge-data'&&!v.read_only),'new orders need a separate persistent volume');
 assert.equal(documents.length,4);
 assert.equal(new Set(documents.map(v=>v.target)).size,4);
 for(const mount of documents){assert.equal(mount.read_only,true);assert.equal(mount.bind.create_host_path,false);assert.ok(mount.target.startsWith('/files/'));}
 assert.ok(!('DATABASE_FILE' in config.services.knowledge.environment));
-console.log('PASS Compose: only RAG/MCP workflows, no writable database directory, all knowledge files read-only');
+console.log('PASS Compose: separate persistent work-order volume, all original knowledge files read-only');
