@@ -639,6 +639,10 @@ tools retrieve knowledge and save work orders in a native n8n Data Table. New
 reports get one follow-up question, then the next reply is saved even with missing fields. Replies stay on one conversational line. ASR/TTS stay in audio.cpp;
 the original documents remain read-only. See the [n8n setup guide](n8n/README.md).
 
+The demo Scenarios dropdown also offers **Add New Scenario**. Upload PDF, DOCX,
+XLSX, TXT or Markdown documents to create persistent Q/A reference knowledge and
+run RAG indexing through n8n. Saved scenarios remain in the dropdown after reloads.
+
 `ivr-knowledge` reads `prompt.csv`, `情境模擬_20261105.docx`, all worksheets in
 `CSD資料庫.xlsx`, and `(備品維修)PY252-0059-工單-20260602-2工-CL、JC.pdf`.
 All four file mounts are read-only; extraction uses Node.js and local Chinese/

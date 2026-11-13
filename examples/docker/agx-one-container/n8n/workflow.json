@@ -478,7 +478,7 @@
       ],
       "parameters": {
         "width": 2050,
-        "height": 900,
+        "height": 1500,
         "content": "## 3. RAG · Q/A + Work Orders\nNative Data Table nodes create/reuse work_orders, upsert caller reports and read saved rows for retrieval. Original source documents and the legacy JSON backup remain unchanged.",
         "color": 6
       }
@@ -958,6 +958,182 @@
       "parameters": {
         "jsCode": "function tableRecord(row){\n const value=name=>String(row[name]??'');\n let transcripts=[];try{transcripts=JSON.parse(row.transcripts||'[]');if(!Array.isArray(transcripts))transcripts=[];}catch{transcripts=[];}\n let resultFields={};try{resultFields=JSON.parse(row.results||'{}')?.fields||{};}catch{}\n const id=value('order_id')||`DT-${row.id}`;\n return {id,source:'n8n Data Table / work_orders',sessionId:value('session_id'),reportKey:value('report_key'),createdAt:row.createdAt,updatedAt:row.updatedAt,transcripts,fields:{...resultFields,派工單號:value('reference_number')||id,派工日期:value('dispatch_date'),工單編號:value('reference_number'),工單名稱:value('title'),設備編號:value('equipment_number'),維修內容:value('maintenance_items'),維修項目:value('maintenance_items'),數量:value('quantity'),備註:value('notes'),起機測試:value('test_result')}};\n}\n\nconst records=$input.all().map(item=>item.json).filter(row=>row.id).map(tableRecord);\nreturn [{json:{query:$('Prepare tool request').first().json.query,records}}];"
       }
+    },
+    {
+      "id": "scenario-upload-webhook",
+      "name": "Add scenario upload",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        70,
+        1840
+      ],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ivr-add-scenario",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "webhookId": "ivr-add-scenario"
+    },
+    {
+      "id": "prepare-scenario-upload",
+      "name": "Validate scenario files",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        360,
+        1840
+      ],
+      "parameters": {
+        "jsCode": "const body=$input.first().json.body;\nif(!body||typeof body.name!=='string'||!body.name.trim()||body.name.length>120||!Array.isArray(body.files)||!body.files.length||body.files.length>8)throw new Error('Scenario name and 1–8 files are required');\nif(body.files.some(f=>!f||typeof f.name!=='string'||typeof f.data!=='string'||!f.data.length||!/^.+\\.(pdf|docx|xlsx|txt|md)$/i.test(f.name)))throw new Error('Choose PDF, DOCX, XLSX, TXT or Markdown files');\nif(body.files.reduce((n,f)=>n+f.data.length,0)>14*1024*1024)throw new Error('Scenario upload is too large');\nreturn [{json:{name:body.name.trim(),files:body.files}}];"
+      }
+    },
+    {
+      "id": "create-scenario-qa",
+      "name": "Create scenario Q/A",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        730,
+        1840
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://knowledge:8085/scenarios",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json }}",
+        "options": {
+          "timeout": 600000
+        }
+      }
+    },
+    {
+      "id": "index-scenario-qa",
+      "name": "Index scenario Q/A",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.3,
+      "position": [
+        1100,
+        1840
+      ],
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "value": "ivrWorkflow",
+          "mode": "id"
+        },
+        "mode": "once",
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "operation": "retrieve",
+            "query": "情境文件參考資料摘要",
+            "sessionId": ""
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "operation",
+              "displayName": "operation",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            },
+            {
+              "id": "query",
+              "displayName": "query",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            },
+            {
+              "id": "sessionId",
+              "displayName": "sessionId",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string"
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "scenario-upload-response",
+      "name": "Scenario upload result",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        1490,
+        1840
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ {...$('Create scenario Q/A').first().json,indexed:!$json.error,index_error:$json.error?.message||($json.error?String($json.error):'')} }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "scenario-list-webhook",
+      "name": "List uploaded scenarios",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        70,
+        2090
+      ],
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "ivr-scenarios",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "webhookId": "ivr-scenarios"
+    },
+    {
+      "id": "read-scenarios",
+      "name": "Read saved scenarios",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        400,
+        2090
+      ],
+      "parameters": {
+        "url": "http://knowledge:8085/scenarios",
+        "options": {
+          "timeout": 30000
+        }
+      }
+    },
+    {
+      "id": "scenario-list-response",
+      "name": "Scenario list result",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        730,
+        2090
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {}
+      }
     }
   ],
   "connections": {
@@ -1302,6 +1478,72 @@
           }
         ]
       ]
+    },
+    "Add scenario upload": {
+      "main": [
+        [
+          {
+            "node": "Validate scenario files",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate scenario files": {
+      "main": [
+        [
+          {
+            "node": "Create scenario Q/A",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create scenario Q/A": {
+      "main": [
+        [
+          {
+            "node": "Index scenario Q/A",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Index scenario Q/A": {
+      "main": [
+        [
+          {
+            "node": "Scenario upload result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "List uploaded scenarios": {
+      "main": [
+        [
+          {
+            "node": "Read saved scenarios",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read saved scenarios": {
+      "main": [
+        [
+          {
+            "node": "Scenario list result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     }
   },
   "active": false,
@@ -1312,6 +1554,6 @@
   "pinData": {},
   "tags": [],
   "meta": {
-    "ivrWorkflowRevision": 8
+    "ivrWorkflowRevision": 9
   }
 }

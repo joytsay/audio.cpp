@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy, tick } from "svelte";
   import { n8nDialogue, type DialogueSource } from "$lib/n8n-dialogue";
+  import {addKnowledgeScenario,listKnowledgeScenarios,type KnowledgeScenario} from "$lib/knowledge-scenarios";
   import SipSidebar from "$lib/SipSidebar.svelte";
   import type { SipSettings, SipLive } from "$lib/sip";
   import PanelDivider from "$lib/PanelDivider.svelte";
@@ -500,7 +501,41 @@
     audioUrls.clear();
     chatAudioElements = {};
   }
-  let scenarioMode: "audio" | "maintenance" | "maintenance-audio" = "audio";
+  let scenarioMode: "audio" | "maintenance" | "maintenance-audio" | "add-scenario" | `scenario:${string}` = "audio";
+  let knowledgeScenarios: KnowledgeScenario[] = [];
+  let newScenarioName = "", newScenarioFiles: File[] = [], knowledgeUploading = false, knowledgeStatus = "";
+  let knowledgeAborter: AbortController | null = null;
+  $: selectedKnowledgeScenario = knowledgeScenarios.find(scenario => scenarioMode === `scenario:${scenario.id}`);
+  async function refreshKnowledgeScenarios() {
+    try { knowledgeScenarios = await listKnowledgeScenarios(); }
+    catch (cause) { if (scenarioMode === "add-scenario") knowledgeStatus = String(cause); }
+  }
+  function chooseKnowledgeFiles(files: FileList | null) {
+    newScenarioFiles = Array.from(files || []);
+    if (!newScenarioName.trim() && newScenarioFiles[0]) newScenarioName = newScenarioFiles[0].name.replace(/\.[^.]+$/, "");
+    knowledgeStatus = "";
+  }
+  async function uploadKnowledgeScenario() {
+    if (knowledgeUploading) return;
+    knowledgeUploading = true; knowledgeAborter = new AbortController();
+    knowledgeStatus = "Uploading files, creating Q/A and indexing knowledge…";
+    try {
+      const result = await addKnowledgeScenario(newScenarioName,newScenarioFiles,AbortSignal.any([knowledgeAborter.signal,AbortSignal.timeout(900000)]));
+      await refreshKnowledgeScenarios();
+      if (!result.indexed) {
+        knowledgeStatus = `${result.scenario.qaCount} Q/A pairs saved. Indexing failed: ${result.index_error || "retry Add scenario"}. You can retry with the same files.`;
+        return;
+      }
+      knowledgeStatus = `${result.scenario.name} added · ${result.scenario.qaCount} Q/A pairs ready`;
+      record("SCENARIO_ADDED", knowledgeStatus);
+      scenarioMode = `scenario:${result.scenario.id}`;
+      dialogueSource = "n8n";
+      await saveCallOption({dialogue_source:"n8n"});
+      newScenarioFiles = []; newScenarioName = "";
+    } catch (cause) {
+      if (!knowledgeAborter.signal.aborted) knowledgeStatus = cause instanceof Error ? cause.message : String(cause);
+    } finally { knowledgeUploading = false; knowledgeAborter = null; }
+  }
   let scenarioPreviewUrl = "",
     selectedExampleName = "",
     activeExampleName = "",
@@ -543,7 +578,8 @@
     scenarioMode === "maintenance-audio"
       ? maintenanceAudioExamples
       : locationAudioExamples;
-  $: isAudioScenario = scenarioMode !== "maintenance";
+  $: isAudioScenario = scenarioMode === "audio" || scenarioMode === "maintenance-audio";
+  $: isMaintenanceScenario = scenarioMode === "maintenance" || scenarioMode === "maintenance-audio";
   $: scenarioNumber =
     scenarioMode === "maintenance-audio"
       ? 2
@@ -551,10 +587,13 @@
         ? 1
         : 0;
   function changeScenario() {
+    knowledgeStatus = "";
     setScenarioFile(null);
     if (scenarioUploadInput) scenarioUploadInput.value = "";
     scenarioStatus = "";
     scenarioStep = 0;
+    if (scenarioMode === "add-scenario") void refreshKnowledgeScenarios();
+    if (scenarioMode.startsWith("scenario:")) { dialogueSource = "n8n"; void saveCallOption({dialogue_source:"n8n"}); }
   }
   $: technicianVoice = voiceChoices.find((id) => id !== voice) || "";
   let events: Event[] = [],
@@ -1387,7 +1426,7 @@
           reportedRtf(result),
         );
       }
-      if (scenarioMode !== "audio")
+      if (isMaintenanceScenario)
         text = maintenanceTranscript(text, hotwords);
       if (generation !== epoch) return;
       if (useSip) { await sendSipText(normalizeTranscript(text, hotwords), signal); return; }
@@ -1437,7 +1476,7 @@
 
       let reply = text;
       const readback =
-        scenarioMode !== "audio" && useLlm && dialogueSource === "prompt.csv"
+        isMaintenanceScenario && useLlm && dialogueSource === "prompt.csv"
           ? maintenanceReply(text, messages)
           : undefined;
       if (readback !== undefined)
@@ -1567,7 +1606,7 @@
         const body: Record<string, unknown> = {
           model: ttsId,
           input:
-            scenarioMode === "audio" ? reply : maintenanceSpeechText(reply),
+            isMaintenanceScenario ? maintenanceSpeechText(reply) : reply,
           response_format: "wav",
         };
         if (referencePath && supportsReference) {
@@ -2597,6 +2636,7 @@
     restorePanelLayout();
     restorePanelVisibility();
     void loadSystemInfo();
+    void refreshKnowledgeScenarios();
     void initializeSidebar();
     try {
       const saved = JSON.parse(localStorage.getItem(historyKey) || "[]");
@@ -2627,6 +2667,7 @@
     if (referencePreviewUrl.startsWith("blob:"))
       URL.revokeObjectURL(referencePreviewUrl);
     mounted = false;
+    knowledgeAborter?.abort();
     llmDownloading = false;
     stopLlmDownloadWatch();
     clearTimeout(greetingTimer);
@@ -3493,18 +3534,36 @@
             ><select
               aria-label="Scenario"
               bind:value={scenarioMode}
-              disabled={scenarioRunning || exampleLoading}
+              disabled={scenarioRunning || exampleLoading || knowledgeUploading}
               on:change={changeScenario}
               ><option value="audio">Scenario 0 · audio examples</option><option
                 value="maintenance"
                 >Scenario 1 · 現場維修保養後的語音回報</option
               >
               <option value="maintenance-audio"
-                >Scenario 2 · maintenance audio</option
-              ></select
+                >Scenario 2 · maintenance audio</option>
+              {#each knowledgeScenarios as scenario}<option value={`scenario:${scenario.id}`}>{scenario.name}</option>{/each}
+              <option value="add-scenario">Add New Scenario</option></select
             ></label
           >
-          {#if isAudioScenario}
+          {#if scenarioMode === "add-scenario"}
+            <label>Scenario name<input aria-label="New scenario name" bind:value={newScenarioName} maxlength="120" disabled={knowledgeUploading} /></label>
+            <label class="audio-choice">Choose documents<input
+              class="audio-file-input" aria-label="Scenario documents" type="file" multiple accept=".pdf,.docx,.xlsx,.txt,.md"
+              disabled={knowledgeUploading} on:change={(event) => chooseKnowledgeFiles(event.currentTarget.files)}
+            /></label>
+            <small>PDF, DOCX, XLSX, TXT, Markdown · up to 8 files, 10 MiB total</small>
+            {#each newScenarioFiles as file}<p>{file.name} · {Math.ceil(file.size / 1024)} KB</p>{/each}
+            <button disabled={knowledgeUploading || !newScenarioName.trim() || !newScenarioFiles.length} on:click={uploadKnowledgeScenario}>
+              {knowledgeUploading ? "Adding scenario…" : "Add scenario"}
+            </button>
+            <p role="status">{knowledgeStatus}</p>
+          {:else if selectedKnowledgeScenario}
+            <p><strong>{selectedKnowledgeScenario.name}</strong> · {selectedKnowledgeScenario.qaCount} Q/A pairs</p>
+            {#each selectedKnowledgeScenario.files as file}<p>{file.name}</p>{/each}
+            <small>These documents are available to n8n knowledge retrieval. Speak or type a question during a call.</small>
+            <p role="status">{knowledgeStatus}</p>
+          {:else if isAudioScenario}
             <div class="scenario-upload">
               <strong title={scenarioAudioName || "No audio selected"}
                 >{scenarioAudioName || "No audio selected"}</strong

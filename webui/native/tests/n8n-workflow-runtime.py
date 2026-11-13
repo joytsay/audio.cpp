@@ -33,17 +33,18 @@ def knowledge_api(path,body=None):
  request=urllib.request.Request(knowledge_url+path,data=json.dumps(body,ensure_ascii=False).encode() if body is not None else None,headers={'Content-Type':'application/json'})
  with urllib.request.urlopen(request,timeout=30) as response:return json.load(response)
 
-calls=[];embedding=[]
+calls=[];embedding=[];embedding_fail=False
 class Mock(http.server.BaseHTTPRequestHandler):
  def log_message(self,*a):pass
- def send(self,data):
-  raw=json.dumps(data,ensure_ascii=False).encode();self.send_response(200);self.send_header('Content-Type','application/json');self.send_header('Content-Length',str(len(raw)));self.end_headers();self.wfile.write(raw)
+ def send(self,data,status=200):
+  raw=json.dumps(data,ensure_ascii=False).encode();self.send_response(status);self.send_header('Content-Type','application/json');self.send_header('Content-Length',str(len(raw)));self.end_headers();self.wfile.write(raw)
  def do_GET(self):return self.send({'data':[{'id':'fixture-model','object':'model'}]})
  def do_POST(self):
   body=json.loads(self.rfile.read(int(self.headers['Content-Length'])))
   if self.path=='/v1/embeddings':
+   if embedding_fail:return self.send({'error':{'message':'Synthetic indexing failure'}},400)
    embedding.append(body);inputs=body['input'];inputs=inputs if isinstance(inputs,list) else [inputs]
-   return self.send({'object':'list','model':'fixture-embedding','data':[{'object':'embedding','index':i,'embedding':[1.0,0.25,0.5]} for i in range(len(inputs))],'usage':{'prompt_tokens':10,'total_tokens':10}})
+   return self.send({'object':'list','model':'fixture-embedding','data':[{'object':'embedding','index':i,'embedding':([0.0,1.0,0.0] if 'LAB-ZETA' in str(inputs[i]) else [1.0,0.25,0.5])} for i in range(len(inputs))],'usage':{'prompt_tokens':10,'total_tokens':10}})
   if self.path=='/v1/chat/completions':
    calls.append(body)
    last=body['messages'][-1]
@@ -53,6 +54,9 @@ class Mock(http.server.BaseHTTPRequestHandler):
    # Deliberately refuse to call tools and ask an unnecessary question, matching
    # the reported model failure. Routing, saving and factual replies must still work.
    msg={'role':'assistant','content':'請提供最新工單的詳細信息，我會查詢並列出最新的工單。'}
+   if 'LAB-ZETA' in current_text:
+    assert '7654' in current,'uploaded Q/A was not retrieved into agent context'
+    msg={'role':'assistant','content':'LAB-ZETA 每週三回收，聯絡分機 7654。'}
    return self.send({'id':'chat-check','object':'chat.completion','created':int(time.time()),'model':'fixture-model','choices':[{'index':0,'message':msg,'finish_reason':'tool_calls' if msg.get('tool_calls') else 'stop'}],'usage':{'prompt_tokens':10,'completion_tokens':10,'total_tokens':20}})
   raise Exception(self.path)
 server=http.server.ThreadingHTTPServer(('127.0.0.1',0),Mock);threading.Thread(target=server.serve_forever,daemon=True).start()
@@ -84,6 +88,7 @@ if __name__=='__main__':
    if 'credentials' in n:n['credentials']={'openAiApi':{'id':cred['id'],'name':cred['name']}}
    if n['name']=='Local Embeddings':n['parameters']['options']['baseURL']=mock+'/v1'
    if n['name'] in ['KnowledgeMCP','Retrieve current turn']:n['parameters']['endpointUrl']=base+'/mcp/ivr-maintenance'
+   if n['name'] in ['Create scenario Q/A','Read saved scenarios']:n['parameters']['url']=knowledge_url+'/scenarios'
    if n['name']=='Load knowledge files':n['parameters']['url']=knowledge_url+'/documents'
    if n['name']=='Register caller turn':n['parameters']['url']=knowledge_url+'/call-turn'
    if n['name']=='Prepare work-order row':n['parameters']['url']=knowledge_url+'/work-order-draft'
@@ -93,7 +98,9 @@ if __name__=='__main__':
    assert imported.returncode==0,imported.stderr+imported.stdout
   # Reproduce an installed workflow with the old ID and active webhook paths.
   old=json.loads(json.dumps(workflow));old['id']='ivrMaintenanceMcp'
-  next(n for n in old['nodes'] if n['name']=='retrieve_knowledge')['parameters']['workflowId']['value']=old['id']
+  for node in old['nodes']:
+   target=node['parameters'].get('workflowId')
+   if isinstance(target,dict) and target.get('value')==workflow['id']:target['value']=old['id']
   import_fixture(old)
   api('/api/v1/workflows/'+old['id']+'/publish',{})
   import_fixture(workflow)
@@ -215,6 +222,22 @@ if __name__=='__main__':
    assert '已新增' not in answer['reply'] and len(rows())==count
    if 'F15P1' in question:assert 'F15P1/2_ME' in answer['reply'] and '14' in answer['reply']
    if question=='FAN幾個':assert '14' in answer['reply'] and '強排 4 個' in answer['reply'] and '間面 10 個' in answer['reply']
+  import base64
+  assert api('/webhook/ivr-scenarios')['scenarios']==[]
+  content='Q: LAB-ZETA 包材何時回收？\nA: LAB-ZETA 每週三回收，聯絡分機 7654。'
+  scenarioUpload={'name':'LAB-ZETA 上傳測試','files':[{'name':'服務.txt','data':base64.b64encode(content.encode()).decode()}]}
+  embedding_fail=True
+  savedOnly=api('/webhook/ivr-add-scenario',scenarioUpload)
+  assert savedOnly['indexed'] is False and savedOnly['scenario']['qaCount']>=1,savedOnly
+  embedding_fail=False
+  added=api('/webhook/ivr-add-scenario',scenarioUpload)
+  assert added['indexed'] is True and added['scenario']['qaCount']>=1,added
+  assert api('/webhook/ivr-scenarios')['scenarios'][0]['id']==added['scenario']['id']
+  again=api('/webhook/ivr-add-scenario',scenarioUpload)
+  assert again['duplicate'] is True and len(api('/webhook/ivr-scenarios')['scenarios'])==1
+  knowledgeAnswer=turn('uploaded-scenario-call','LAB-ZETA 包材何時回收？')
+  assert '7654' in knowledgeAnswer['reply'] and '每週三' in knowledgeAnswer['reply']
+  assert any('LAB-ZETA' in str(batch['input']) for batch in embedding),'upload did not trigger embedding'
   print('PASS workflow ID migration and isolated n8n with real knowledge service: split spoken-number report, one follow-up question then native Data Table upsert even with missing fields, table-backed retrieval and enrichment despite model refusing tools, persisted record/retry, simplified Chinese lookups, month filtering/date follow-ups, direct one-line answers and isolated call memory (synthetic LLM/embeddings/PDF OCR).')
 
  except Exception:

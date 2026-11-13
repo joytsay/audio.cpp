@@ -1,3 +1,4 @@
+import {createScenarioStore} from './scenarios.mjs';
 import {createServer} from 'node:http';
 import {promises as fs,constants} from 'node:fs';
 import path from 'node:path';
@@ -62,7 +63,13 @@ export function workOrderSelection(query,sheets,{now=new Date()}={}){
   return {source:filenames.excel,sheet:'派工',selection:mode,period,reference:intent.reference,view:intent.view,total_count:candidates.length,selected_count:rows.length,undated_count:candidates.length-dated.length,work_orders:rows};
 }
 function workbookDocument(excel,sheet){return {source:excel.source,sheet:sheet.name,modified:excel.modified,kind:'workbook_records',extraction:'xlsx',rowCount:sheet.rows.length,text:sheet.rows.length?sheet.rows.map(row=>`來源：${excel.source}；工作表：${sheet.name}；列：${row.row}\n${JSON.stringify(row.fields)}`).join('\n\n'):'此資料表目前沒有記錄。'};}
-export function createKnowledgeStore({root=process.env.KNOWLEDGE_ROOT||'/files',pdf=extractPdf,orders=createWorkOrderStore()}={}){
+export function createKnowledgeStore({root=process.env.KNOWLEDGE_ROOT||'/files',pdf=extractPdf,orders=createWorkOrderStore(),scenarioRoot}={}){
+  const scenarios=createScenarioStore({root:scenarioRoot,extract:async(file,upload)=>{
+    if(upload.extension==='.pdf')return [{...await pdf(file)}];
+    if(upload.extension==='.docx'){const result=await mammoth.extractRawText({path:file});return [{text:result.value,extraction:'docx',kind:/情境\s*\d/.test(result.value)?'scenario_examples':'uploaded_reference'}];}
+    if(upload.extension==='.xlsx')return (await readWorkbook(file)).flatMap(sheet=>sheet.rows.map(row=>({text:Object.entries(row.fields).filter(([,value])=>value).map(([key,value])=>`${key}：${value}`).join('；'),sheet:sheet.name,row:row.row,topic:`${sheet.name} 第 ${row.row} 列`,extraction:'xlsx'})));
+    const bytes=await fs.readFile(file);const text=new TextDecoder('utf-8',{fatal:true}).decode(bytes);return [{text,extraction:'text'}];
+  }});
   // File-only cache; concurrent requests share OCR. User queries are never cached.
   const cache=new Map();
   async function read(kind,extract){
@@ -76,6 +83,8 @@ export function createKnowledgeStore({root=process.env.KNOWLEDGE_ROOT||'/files',
   }
   const workbook=()=>read('excel',async file=>({sheets:await readWorkbook(file)}));
   return {
+    addScenario:input=>scenarios.add(input),
+    listScenarios:()=>scenarios.list(),
     registerTurn:input=>orders.register(input),
     prepareWorkOrder:sessionId=>orders.prepare(sessionId),
     listWorkOrders:()=>orders.list(),
@@ -95,7 +104,7 @@ export function createKnowledgeStore({root=process.env.KNOWLEDGE_ROOT||'/files',
       }
       const word=await read('word',async file=>{const r=await mammoth.extractRawText({path:file});return {text:r.value,kind:'scenario_examples',extraction:'docx',warnings:r.messages.map(m=>m.message)};});
       const pdfDoc=await read('pdf',async file=>({...await pdf(file),kind:'work_order_document',sha256:createHash('sha256').update(await fs.readFile(file)).digest('hex')}));
-      const documents=[...sourceQa(word),...excel.sheets.flatMap(sheet=>workbookQa(workbookDocument(excel,sheet),sheet.rows)),...local.flatMap((record,index)=>workbookQa({source:record.source,sheet:'派工',kind:'workbook_records',extraction:record.source?.includes('n8n Data Table')?'n8n_data_table':'legacy_json'},[{row:100000+index,fields:record.fields}])),...sourceQa(pdfDoc)];
+      const documents=[...sourceQa(word),...excel.sheets.flatMap(sheet=>workbookQa(workbookDocument(excel,sheet),sheet.rows)),...local.flatMap((record,index)=>workbookQa({source:record.source,sheet:'派工',kind:'workbook_records',extraction:record.source?.includes('n8n Data Table')?'n8n_data_table':'legacy_json'},[{row:100000+index,fields:record.fields}])),...sourceQa(pdfDoc),...await scenarios.documents()];
       for(const d of documents){if(!d.text.trim())throw new Error(`No text extracted from ${d.source}${d.sheet?' / '+d.sheet:''}`);if(d.text.length>500000)throw new Error(`Extracted text too large: ${d.source}`);}
       return {documents,format:'qa'};
     },
@@ -107,14 +116,16 @@ export function createKnowledgeServer(store=createKnowledgeStore()){
     res.setHeader('Content-Type','application/json; charset=utf-8');res.setHeader('Cache-Control','no-store');
     try{
       const url=new URL(req.url,'http://localhost');let data;
-      if(req.method==='POST'&&['/call-turn','/work-order-draft','/documents'].includes(url.pathname)){
-        let raw='';for await(const chunk of req){raw+=chunk;if(Buffer.byteLength(raw)>256*1024)throw Object.assign(Error('Request too large'),{status:413});}
+      if(req.method==='POST'&&['/call-turn','/work-order-draft','/documents','/scenarios'].includes(url.pathname)){
+        req.setEncoding('utf8');
+        let raw='';for await(const chunk of req){raw+=chunk;if(Buffer.byteLength(raw)>(url.pathname==='/scenarios'?16*1024*1024:256*1024))throw Object.assign(Error('Request too large'),{status:413});}
         let body;try{body=JSON.parse(raw);}catch{throw Object.assign(Error('Invalid JSON'),{status:400});}
-        data=url.pathname==='/call-turn'?await store.registerTurn(body):url.pathname==='/work-order-draft'?await store.prepareWorkOrder(body.sessionId):await store.documents(body.query||'',body.records??[]);
+        data=url.pathname==='/scenarios'?await store.addScenario(body):url.pathname==='/call-turn'?await store.registerTurn(body):url.pathname==='/work-order-draft'?await store.prepareWorkOrder(body.sessionId):await store.documents(body.query||'',body.records??[]);
       }
       else if(req.method!=='GET'){res.writeHead(405);res.end(JSON.stringify({error:'Method not allowed'}));return;}
       else if(url.pathname==='/health')data=await store.health();
       else if(url.pathname==='/documents')data=await store.documents(url.searchParams.get('query')||'');
+      else if(url.pathname==='/scenarios')data={scenarios:await store.listScenarios()};
       else if(url.pathname==='/work-orders')data={work_orders:await store.listWorkOrders()};
       else{res.writeHead(404);res.end(JSON.stringify({error:'Unknown knowledge endpoint'}));return;}
       res.end(JSON.stringify(data));

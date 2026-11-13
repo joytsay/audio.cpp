@@ -31,6 +31,32 @@ try{
  assert.notEqual(oldest.result.work_orders[0].fields['派工日期'],latest.result.work_orders[0].fields['派工日期']);
  assert.equal(ocrCalls,1,'fresh structured lookups do not invoke PDF OCR');
  assert.ok(!latest.documents.some(d=>d.source!==filenames.excel));
+ const scenarioRoot=path.join(dir,'uploaded-scenarios');
+ const scenarioStore=createKnowledgeStore({root:dir,orders,scenarioRoot,pdf:async()=>({text:'測試 PDF 的服務時間為星期三。',extraction:'pdf_text'})});
+ const encoded=(name,text)=>({name,data:Buffer.from(text).toString('base64')});
+ const upload={name:'LAB-ZETA 服務',files:[encoded('服務.txt','Q: LAB-ZETA 包材何時回收？\nA: LAB-ZETA 每週三回收，聯絡分機 7654。'),encoded('保固.md','# LAB-ZETA 保固\nLAB-ZETA 維修保固為十二個月。')]};
+ const scenario=await scenarioStore.addScenario(upload);
+ assert.ok(scenario.scenario.qaCount>=2);assert.equal(scenario.duplicate,false);
+ assert.deepEqual((await scenarioStore.listScenarios()).map(s=>s.name),['LAB-ZETA 服務']);
+ assert.equal((await scenarioStore.addScenario(upload)).duplicate,true);
+ await assert.rejects(scenarioStore.addScenario({...upload,files:[encoded('其他.txt','不同內容。')]}),/already exists/);
+ await assert.rejects(scenarioStore.addScenario({name:'bad',files:[encoded('../bad.txt','unsafe')]}),/Supported files/);
+ await assert.rejects(scenarioStore.addScenario({name:'bad',files:[{name:'bad.txt',data:'invalid-base64'}]}),/Invalid/);
+ const loadedAfterRestart=createKnowledgeStore({root:dir,orders,scenarioRoot});
+ assert.equal((await loadedAfterRestart.listScenarios())[0].id,scenario.scenario.id);
+ const uploadedKnowledge=await loadedAfterRestart.documents('LAB-ZETA 包材何時回收');
+ assert.ok(uploadedKnowledge.documents.some(d=>d.source==='服務.txt'&&d.answer.includes('7654')));
+ assert.ok(uploadedKnowledge.documents.some(d=>d.source==='保固.md'&&d.answer.includes('十二個月')));
+ for(const extension of ['word','excel']){
+  const filename=filenames[extension];
+  const added=await scenarioStore.addScenario({name:'Office '+extension,files:[{name:filename,data:(await fs.readFile(path.join(dir,filename))).toString('base64')}]});
+  assert.ok(added.scenario.qaCount>0);
+ }
+ const corruptedOffice=Buffer.from(await fs.readFile(path.join(dir,filenames.word)));
+ for(let at=0;at+46<corruptedOffice.length;at++)if(corruptedOffice.readUInt32LE(at)===0x02014b50&&corruptedOffice.readUInt32LE(at+24)>0){corruptedOffice.writeUInt32LE(0,at+24);break;}
+ await assert.rejects(scenarioStore.addScenario({name:'Unsafe archive',files:[{name:'bad.docx',data:corruptedOffice.toString('base64')}]}),/Office archive/);
+ const pdfScenario=await scenarioStore.addScenario({name:'PDF 文件',files:[{name:'維修.pdf',data:(await fs.readFile(path.join(dir,filenames.pdf))).toString('base64')}]});
+ assert.ok(pdfScenario.scenario.qaCount>0);
  const sessionId='single-followup';
  const opener=orders.register({sessionId,text:'我增加工单。'});
  assert.equal(opener.tool,'retrieve_knowledge');assert.equal(opener.report_reply.match(/？/g).length,1);
