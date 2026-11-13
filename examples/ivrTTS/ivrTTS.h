@@ -26,7 +26,7 @@ public:
     };
     static std::vector<Model> list_models(const std::string& server_url,
                                           const CancelCheck& cancel = {});
-    enum class AudioMode { Wav, StreamingPcm }; // PCM: signed 16-bit little endian
+    enum class AudioMode { Wav, StreamingPcm, StreamingWavChunks }; // PCM: signed 16-bit little endian
     void run_stream(const std::string& text, const AudioSink& sink,
                     AudioMode mode = AudioMode::Wav, const CancelCheck& cancel = {}) const;
     void clone_stream(const std::string& text, const std::string& reference_wav,

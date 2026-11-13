@@ -30,6 +30,8 @@ export async function n8nDialogue(
   options: {
     workflowUrl?: string;
     onTool?: (name: string, state: "started" | "completed" | "failed") => void;
+    noticeDelaySeconds?: number;
+    prepareModel?: () => Promise<string>;
     onProgress?: (text: string, signal: AbortSignal) => void | Promise<void>;
     onWorkflow?: (state: "started" | "completed" | "failed") => void;
   } = {},
@@ -40,17 +42,21 @@ export async function n8nDialogue(
   const noticeSignal = AbortSignal.any([signal, noticeController.signal]);
   let notice: Promise<void> = Promise.resolve();
   let noticeTimer: ReturnType<typeof setTimeout> | undefined;
+  const configuredDelay = options.noticeDelaySeconds;
+  const delaySeconds = typeof configuredDelay === "number" && Number.isInteger(configuredDelay) && configuredDelay >= 1 && configuredDelay <= 60 ? configuredDelay : 3;
   try {
-    const request = fetch(options.workflowUrl || "/n8n/webhook/ivr-agent", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(input),
-      signal,
-    });
     if (options.onProgress && isN8nLookup(input.text, input.messages))
       noticeTimer = setTimeout(() => {
         if (!noticeSignal.aborted) notice = Promise.resolve().then(()=>options.onProgress!(N8N_LOOKUP_NOTICE, noticeSignal)).catch(()=>undefined);
-      }, 5000);
+      }, delaySeconds * 1000);
+    const model = options.prepareModel ? await options.prepareModel() : input.model;
+    signal.throwIfAborted();
+    const request = fetch(options.workflowUrl || "/n8n/webhook/ivr-agent", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({...input, model}),
+      signal,
+    });
     const response = await request;
     const raw = await response.text();
     let result: any;

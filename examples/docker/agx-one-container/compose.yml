@@ -119,6 +119,7 @@ services:
     environment:
       TZ: Asia/Taipei
       GENERIC_TIMEZONE: Asia/Taipei
+      N8N_AUTO_PUBLISH_WORKFLOW: ${N8N_AUTO_PUBLISH_WORKFLOW:-true}
       SIP_DIALOGUE_AUDIO_URL: http://voice-ai:8081
       SIP_DIALOGUE_LLM_URL: http://voice-ai:8082/v1
       N8N_SECURE_COOKIE: "false"

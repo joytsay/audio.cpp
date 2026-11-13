@@ -106,7 +106,24 @@ if __name__=='__main__':
   assert not api('/api/v1/workflows/'+old['id'])['active']
   cleanup='const{DatabaseSync}=require("node:sqlite");const db=new DatabaseSync("/home/node/.n8n/database.sqlite",{readOnly:true});console.log(db.prepare("SELECT count(*) AS n FROM user_api_keys WHERE label LIKE ?").get("Temporary workflow ID migration%").n)'
   assert subprocess.check_output(['docker','exec',CONTAINER,'node','-e',cleanup],text=True).strip()=='0','temporary migration API key must be removed'
-  api('/api/v1/workflows/ivrWorkflow/publish',{})
+  subprocess.run(['docker','cp',str(ROOT/'examples/docker/agx-one-container/n8n/publish-workflow.mjs'),CONTAINER+':/tmp/publish-workflow.mjs'],check=True)
+  publish_code='process.argv[1]="/usr/local/lib/node_modules/n8n/bin/n8n"; const {publishWorkflow}=await import("/tmp/publish-workflow.mjs"); const {withN8nApi}=await import("/tmp/unpublish-workflow.mjs"); await withN8nApi(["dataTable:list"],api=>api("/data-tables"),{apiUrl:'+json.dumps(base)+'}); console.log(await publishWorkflow("ivrWorkflow",{apiUrl:'+json.dumps(base)+'}));'
+  def auto_publish():
+   result=subprocess.run(['docker','exec',CONTAINER,'node','--input-type=module','-e',publish_code],text=True,capture_output=True)
+   assert result.returncode==0,result.stdout+result.stderr
+   return result.stdout.strip()
+  assert auto_publish().endswith('true'),'startup must publish the imported workflow'
+  assert auto_publish().endswith('false'),'restarting with the same version must skip publication'
+  installed=api('/api/v1/workflows/ivrWorkflow');previousVersion=installed['activeVersionId']
+  edited={k:installed[k] for k in ['name','nodes','connections','settings']};edited['name']='GeoVision · Workflow · Local edit'
+  next(n for n in edited['nodes'] if n['name']=='Local Chat Model')['parameters']['options']['temperature']=0.17
+  api('/api/v1/workflows/ivrWorkflow?publishIfActive=false',edited,method='PUT')
+  draft=api('/api/v1/workflows/ivrWorkflow');assert draft['versionId']!=draft['activeVersionId'],'node edit must produce a new draft version'
+  assert auto_publish().endswith('true'),'startup must publish a newer installed draft'
+  installed=api('/api/v1/workflows/ivrWorkflow')
+  assert installed['name']==edited['name'] and installed['activeVersionId']!=previousVersion
+  assert installed['activeVersionId']==installed['versionId']
+  assert subprocess.check_output(['docker','exec',CONTAINER,'node','-e',cleanup],text=True).strip()=='0','temporary publication keys must be removed'
   time.sleep(1)
   assert knowledge_api('/health')['status']=='ok'
   histories={}

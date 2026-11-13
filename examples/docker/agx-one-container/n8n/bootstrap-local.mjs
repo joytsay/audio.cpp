@@ -1,3 +1,4 @@
+import {publishWorkflow} from './publish-workflow.mjs';
 import {unpublishWorkflow,upgradeResultsColumn} from './unpublish-workflow.mjs';
 import { spawn } from 'node:child_process';
 import { promises as fs } from 'node:fs';
@@ -250,7 +251,7 @@ export async function importMissing({ templates = '/templates', run = runCli, ha
         const installed = await read(workflow.data.id, {run, files});
         if (installed?.id!==workflow.data.id || !installed.nodes.some(n=>n.id==='retrieve-ivr-turn') || mergedWorkflowMigration(installed, null, workflow.data))
           throw new Error('Unified workflow migration did not complete');
-        log(`[ivr-n8n] Updated GeoVision · Workflow. Backup: ${backup}. Publish /workflow/${workflow.data.id}.`);
+        log(`[ivr-n8n] Updated GeoVision · Workflow. Backup: ${backup}. Workflow: /workflow/${workflow.data.id}.`);
       }
     }
     // Verify the new workflow before retiring its predecessor. Retrying after
@@ -262,7 +263,7 @@ export async function importMissing({ templates = '/templates', run = runCli, ha
         await files.writeFile(path.join(backupDir,`legacy-workflow-id-${Date.now()}.json`),JSON.stringify(legacy),{mode:0o600});
       }
       await retireWorkflow(legacyId);
-      log(`[ivr-n8n] Unpublished ${legacyId} to release its MCP/webhook routes. Publish /workflow/${workflow.data.id}.`);
+      log(`[ivr-n8n] Unpublished ${legacyId} to release its MCP/webhook routes. Workflow: /workflow/${workflow.data.id}.`);
     }
   }
 
@@ -272,6 +273,21 @@ export async function importMissing({ templates = '/templates', run = runCli, ha
   for (const workflow of workflows) {
     if (!await has('workflow', workflow.data.id, { run, files })) throw new Error(`Workflow import incomplete: ${workflow.data.name}`);
   }
+}
+
+export async function prepareStartupWorkflow({
+  install=importMissing,
+  upgradeTables=upgradeResultsColumn,
+  publish=publishWorkflow,
+  autoPublish=process.env.N8N_AUTO_PUBLISH_WORKFLOW!=='false',
+  log=console.log,
+}={}){
+  await install();
+  await upgradeTables();
+  if(autoPublish){
+    const changed=await publish('ivrWorkflow');
+    log(changed?'[ivr-n8n] Published GeoVision · Workflow automatically.':'[ivr-n8n] GeoVision · Workflow is already published at its current version.');
+  }else log('[ivr-n8n] Automatic publishing disabled. Publish GeoVision · Workflow manually.');
 }
 
 export async function bootstrap({
@@ -299,7 +315,7 @@ export async function bootstrap({
         log('[ivr-n8n] Owner account is ready; checking the n8n database.');
         await install();
         await files.writeFile(marker, 'Scenario 1 and local credentials imported\n', { mode: 0o600 });
-        log('[ivr-n8n] Scenario 1 is ready. Existing edits were preserved. Publish GeoVision · Workflow at /workflow/ivrWorkflow.');
+        log('[ivr-n8n] Scenario 1 is ready. Existing edits were preserved. GeoVision · Workflow: /workflow/ivrWorkflow.');
         return;
       }
     } catch (error) {
@@ -310,5 +326,5 @@ export async function bootstrap({
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  bootstrap({install:async()=>{await importMissing();await upgradeResultsColumn();}}).catch(error => { console.error('[ivr-n8n] Bootstrap failed:', error.message); process.exitCode = 1; });
+  bootstrap({install:prepareStartupWorkflow}).catch(error => { console.error('[ivr-n8n] Bootstrap failed:', error.message); process.exitCode = 1; });
 }

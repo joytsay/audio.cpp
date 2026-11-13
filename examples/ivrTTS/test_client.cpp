@@ -154,6 +154,7 @@ public:
     std::string url, wav, pcm;
     std::filesystem::path player_audio;
     std::atomic<bool> early{false}, bad_catalog{false};
+    std::atomic<bool> streaming_tts{false}, stream_hold{false}, stream_first{false};
     std::atomic<bool> pipeline_mode{false}, rag_fails{false}, stt_waits{false}, dialogue_fails{false}, dialogue_progress{false};
     Server() {
         for (int i = 0; i < 24000; ++i) {
@@ -237,6 +238,8 @@ private:
                 send_all(fd, std::string(success ? "HTTP/1.1 200 OK" : "HTTP/1.1 503 Busy") +
                     "\r\nConnection: close\r\nContent-Type: application/json\r\n\r\n" + json);
             };
+            if (route == "/settings") { respond(R"({"vad_end_silence_ms":2000})"); return; }
+            if (route == "/tts-config") { respond(streaming_tts ? R"({"model":"streaming-test","streaming":true})" : R"({"model":"test-tts","streaming":false})"); return; }
             if (route == "/normalize") { respond(body); return; }
             if (route == "/dialogue") {
                 auto input = parse(body);
@@ -287,6 +290,13 @@ private:
         if (input == "wait") { for (int i = 0; i < 200 && !stopped_; ++i) std::this_thread::sleep_for(20ms); return; }
         if (input == "fail") { send_all(fd, "HTTP/1.1 503 Busy\r\nConnection: close\r\n\r\n{\"error\":\"server_busy\"}"); return; }
         if (input == "bad") { send_all(fd, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"error\":\"bad audio\"}"); return; }
+        if (field(json.get(), "stream_format") == "sse") {
+            send_all(fd,"HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: text/event-stream\r\n\r\n");
+            auto delta=[&](const std::string& chunk){const auto event=std::string("data: {\"type\":\"speech.audio.delta\",\"audio\":\"")+b64(chunk)+"\",\"sample_rate\":24000,\"channels\":1,\"format\":\"pcm_s16le\"}\n\n";for(size_t i=0;i<event.size();i+=257)send_all(fd,event.substr(i,257));};
+            delta(pcm.substr(0,pcm.size()/2));stream_first=true;
+            while(stream_hold&&!stopped_)std::this_thread::sleep_for(10ms);
+            delta(pcm.substr(pcm.size()/2));send_all(fd,"data: {\"type\":\"speech.audio.done\"}\n\ndata: [DONE]\n\n");return;
+        }
         bool raw = field(json.get(), "response_format") == "pcm";
         send_all(fd, std::string("HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: ") + (raw ? "application/octet-stream" : "audio/wav") + "\r\n\r\n");
         if (input == "early") {
@@ -768,7 +778,7 @@ void test_sip(const std::string& executable) {
     {
         // Exercise the sidebar's Use IVR mode with the deployed defaults:
         // incoming call, wait-for-media enabled, and no #1/#2 selection.
-        Server audio; audio.pipeline_mode = true; audio.dialogue_progress = true; Temp settings;
+        Server audio; audio.pipeline_mode = true; audio.dialogue_progress = true; audio.streaming_tts = true; audio.stream_hold = true; Temp settings;
         SipServer sip(false, false, true, false, true);
         sip.conversation_packet_goal = 125;
         const auto options = settings.path / "gateway.env";
@@ -782,7 +792,16 @@ void test_sip(const std::string& executable) {
         setenv("LLM_MODEL", "test-llm", 1);
         setenv("SIP_MONITOR_DIR", settings.path.c_str(), 1);
         Process client(executable, {"--env", options.string()});
-        check(client.finish(12) == 0, "incoming Use IVR failed: " + client.output);
+        bool played_before_completion=false;
+        std::thread stream_gate([&]{
+            const auto deadline=Clock::now()+10s;
+            while(Clock::now()<deadline&&!(audio.stream_first&&sip.voiced_packets>60))std::this_thread::sleep_for(10ms);
+            played_before_completion=audio.stream_first&&sip.voiced_packets>60;
+            audio.stream_hold=false;
+        });
+        const auto exit_code=client.finish(16);stream_gate.join();
+        check(exit_code == 0, "incoming Use IVR failed: " + client.output);
+        check(played_before_completion,"SIP RTP did not play the first audio chunk before the TTS response completed");
         sip.verify();
         check(sip.voiced_packets > 125 && sip.unregistered, "Use IVR did not play both the lookup notice and final reply over RTP");
         check(client.output.find("Waiting for greeting selection") == std::string::npos,
@@ -893,7 +912,7 @@ void test_pipeline() {
     config.audio_url = server.url; config.llm_url = server.url + "/v1"; config.llm_model = "test-llm";
     config.rag_url = server.url + "/v1/rag"; config.hotwords = "Office Acme ASML"; config.prompt = "Answer from the reference data.";
     auto send_turn = [](SipPipeline& pipeline) {
-        std::vector<unsigned char> speech(16000, 1), silence(32000, 0);
+        std::vector<unsigned char> speech(16000, 1), silence(64000, 0);
         pipeline.feed(speech.data(), speech.size()); pipeline.feed(silence.data(), silence.size());
     };
     auto reply = [&](SipPipeline& pipeline) {
@@ -903,7 +922,14 @@ void test_pipeline() {
         check(std::string(output.begin(), output.end()) == server.wav, "pipeline returned no WAV reply");
     };
     {
-        SipPipeline pipeline(config); pipeline.resume(); send_turn(pipeline); reply(pipeline);
+        SipPipeline pipeline(config); pipeline.resume();
+        std::vector<unsigned char> partialSpeech(16000,1), shortPause(32000,0);
+        const auto beforePause=server.pipeline_requests().size();
+        pipeline.feed(partialSpeech.data(),partialSpeech.size());pipeline.feed(shortPause.data(),shortPause.size());
+        std::this_thread::sleep_for(100ms);
+        auto duringPause=server.pipeline_requests();
+        check(std::none_of(duringPause.begin()+beforePause,duringPause.end(),[](const auto& request){return request.first=="/v1/audio/transcriptions/details";}),"ASR started during a one-second pause");
+        send_turn(pipeline); reply(pipeline);
         pipeline.resume(); send_turn(pipeline); reply(pipeline);
         auto requests = server.pipeline_requests(); size_t stt_count = 0, llm_count = 0;
         for (const auto& request : requests) {
@@ -927,6 +953,16 @@ void test_pipeline() {
         }
         check(tts_count == 2, "normalized TTS requests missing");
         check(stt_count == 2 && llm_count == 2, "pipeline skipped a turn");
+    }
+    {
+        SipPipeline longTurn(config);longTurn.resume();
+        const auto before=server.pipeline_requests().size();
+        std::vector<unsigned char> speaking(16000,1),quiet(64000,0);
+        for(int i=0;i<32;++i){longTurn.feed(speaking.data(),speaking.size());std::this_thread::sleep_for(5ms);}
+        std::this_thread::sleep_for(100ms);
+        const auto held=server.pipeline_requests();
+        check(std::none_of(held.begin()+before,held.end(),[](const auto& request){return request.first=="/v1/audio/transcriptions/details";}),"continuous speech was cut off at 15 seconds");
+        longTurn.feed(quiet.data(),quiet.size());reply(longTurn);
     }
     {
         auto shared = config; shared.dialogue_url = server.url + "/dialogue";
@@ -957,6 +993,16 @@ void test_pipeline() {
         while (Clock::now() < progress_deadline && !pipeline.take_reply(final, &interim) && pipeline.error().empty()) std::this_thread::sleep_for(10ms);
         check(!interim && std::string(final.begin(), final.end()) == server.wav, "final SIP reply did not follow the lookup notice");
         server.dialogue_progress = false;
+        server.streaming_tts = true; server.stream_hold = true; server.stream_first = false;
+        pipeline.resume(); check(pipeline.submit_text("Where is the office?"), "streaming text turn rejected");
+        auto stream_deadline=Clock::now()+8s;std::vector<unsigned char> chunk;bool chunked=false,done=false;
+        while(Clock::now()<stream_deadline&&!pipeline.take_reply(chunk,nullptr,&chunked,&done)&&pipeline.error().empty())std::this_thread::sleep_for(10ms);
+        check(pipeline.error().empty(),pipeline.error());check(server.stream_first&&chunked&&!done&&!chunk.empty(),"SIP did not expose audio before synthesis completed");
+        server.stream_hold=false;
+        bool completed=false;while(Clock::now()<stream_deadline&&!completed&&pipeline.error().empty()){
+            if(pipeline.take_reply(chunk,nullptr,&chunked,&done))completed=chunked&&done;else std::this_thread::sleep_for(10ms);
+        }
+        check(completed,"SIP speech stream missing its completion marker");server.streaming_tts=false;
         server.dialogue_fails = true;
         pipeline.resume(); send_turn(pipeline);
         const auto deadline = Clock::now() + 6s;

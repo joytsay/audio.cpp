@@ -170,11 +170,29 @@ public:
     void play(Playback prepared) {
         std::lock_guard<std::mutex> lock(mutex_);
         pcm_ = std::move(prepared.wide); narrow_pcm_ = std::move(prepared.narrow);
-        position_ = 0; playing_ = true; finished_ = false;
+        position_ = 0; playing_ = true; streaming_ = false; finished_ = false;
+    }
+    void begin_stream() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        pcm_.clear(); narrow_pcm_.clear(); stream_pending_.clear(); position_ = 0;
+        auresamp_init(&stream_resampler_);
+        if (auresamp_setup(&stream_resampler_, 48000, 1, 8000, 1)) throw std::runtime_error("cannot configure streaming telephone resampler");
+        streaming_ = true; playing_ = true; finished_ = false;
+    }
+    void append_stream(const std::vector<unsigned char>& wav) {
+        auto chunk = prepare(wav);
+        std::lock_guard<std::mutex> lock(mutex_);
+        pcm_.insert(pcm_.end(), chunk.wide.begin(), chunk.wide.end());
+        stream_pending_.insert(stream_pending_.end(), chunk.wide.begin(), chunk.wide.end());
+        flush_stream(false);
+    }
+    void finish_stream() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        flush_stream(true); streaming_ = false;
     }
     void stop_playback() {
         std::lock_guard<std::mutex> lock(mutex_);
-        playing_ = false; finished_ = false; pcm_.clear(); narrow_pcm_.clear(); position_ = 0;
+        playing_ = false; streaming_ = false; finished_ = false; pcm_.clear(); narrow_pcm_.clear(); position_ = 0;
     }
     void enable_echo(bool enabled) { echo_enabled_ = enabled; }
     bool echo_active() {
@@ -198,7 +216,7 @@ public:
         }
         echo_.clear(); echo_position_ = 0;
         if (!playing_) return;
-        for (size_t i = 0; i < frames && position_ < pcm_.size(); ++i) {
+        for (size_t i = 0; i < frames && position_ < pcm_.size() && (rate != 8000 || position_ / 6 < narrow_pcm_.size()); ++i) {
             const auto& buffer = rate == 8000 ? narrow_pcm_ : pcm_;
             const double position = rate == 8000 ? position_ / 6 : position_;
             size_t a = std::min(size_t(position), buffer.size() - 1), b = std::min(a + 1, buffer.size() - 1);
@@ -206,7 +224,7 @@ public:
             for (unsigned c = 0; c < channels; ++c) output[i * channels + c] = value;
             position_ += 48000.0 / rate;
         }
-        if (position_ >= pcm_.size()) { playing_ = false; finished_ = true; }
+        if (position_ >= pcm_.size() && !streaming_) { playing_ = false; finished_ = true; }
     }
     void receive(const int16_t* input, size_t frames, unsigned channels, unsigned rate) {
         if (active_) SipMonitor::get().levels(true, input, frames * channels);
@@ -263,6 +281,15 @@ private:
         recording_.put(static_cast<char>(value & 255));
         recording_.put(static_cast<char>((unsigned(value) >> 8) & 255));
     }
+    void flush_stream(bool final) {
+        if (final && stream_pending_.size() % 6) stream_pending_.resize((stream_pending_.size() + 5) / 6 * 6, 0);
+        const size_t length = stream_pending_.size() / 6 * 6;
+        if (!length) return;
+        std::vector<int16_t> converted(length); size_t count = converted.size();
+        if (auresamp(&stream_resampler_, converted.data(), &count, stream_pending_.data(), length)) throw std::runtime_error("cannot resample SIP speech stream");
+        narrow_pcm_.insert(narrow_pcm_.end(), converted.begin(), converted.begin() + count);
+        stream_pending_.erase(stream_pending_.begin(), stream_pending_.begin() + length);
+    }
     void write_recording_header() {
         auto little = [&](uint32_t value, unsigned bytes) {
             while (bytes--) { recording_.put(static_cast<char>(value & 255)); value >>= 8; }
@@ -289,7 +316,9 @@ private:
     std::deque<int16_t> echo_;
     double echo_position_ = 0;
     Clock::time_point speech_until_{};
-    bool playing_ = false, finished_ = false;
+    bool playing_ = false, finished_ = false, streaming_ = false;
+    struct auresamp stream_resampler_{};
+    std::vector<int16_t> stream_pending_;
     std::atomic<bool> active_{false}, failed_{false}, listening_{true};
 };
 AudioBridge* bridge = nullptr; // libbaresip is a process-wide singleton.
@@ -729,13 +758,7 @@ private:
                 const auto typed = SipMonitor::get().take_text();
                 if (!typed.empty() && !pipeline_->submit_text(typed)) SipMonitor::get().event("TEXT_INPUT_REJECTED", "SIP pipeline is busy");
                 auto error = pipeline_->error(); if (!error.empty()) throw std::runtime_error(error);
-                std::vector<unsigned char> reply;
-                if (!announcement_playing_ && !pipeline_playing_ && pipeline_->take_reply(reply, &pipeline_interim_)) {
-                    pipeline_playing_ = true;
-                    audio_.listen(false); audio_.play(reply); draining_ = false;
-                    SipMonitor::get().event("TTS_PLAYBACK_STARTED", "Playing IVR reply into SIP call");
-                    SipMonitor::get().stage("Speaking");
-                }
+                poll_pipeline_audio();
             }
             if (audio_.finished()) { draining_ = true; playback_end_ = Clock::now() + std::chrono::milliseconds(300); }
             if (draining_ && audio_.echo_active())
@@ -748,17 +771,32 @@ private:
                 SipMonitor::get().event("PLAYBACK_COMPLETED", "SIP audio playback completed");
                 SipMonitor::get().stage("Listening");
                 if (pipeline_) {
-                    std::vector<unsigned char> reply;
-                    if (pipeline_->take_reply(reply, &pipeline_interim_)) {
-                        pipeline_playing_ = true; audio_.play(reply);
-                        SipMonitor::get().stage("Speaking");
-                        SipMonitor::get().event("TTS_PLAYBACK_STARTED", "Playing queued IVR audio into SIP call");
-                    } else if (was_interim) SipMonitor::get().stage("Thinking · n8n");
+                    if (poll_pipeline_audio()) {}
+                    else if (was_interim) SipMonitor::get().stage("Thinking · n8n");
                     else { pipeline_->resume(); audio_.listen(true); }
                 } else if (!keep_open_) close();
             }
         }
         tmr_start(&timer_, 20, tick_handler, this);
+    }
+    bool poll_pipeline_audio() {
+        bool started = false;
+        while (!announcement_playing_ && (!pipeline_playing_ || pipeline_streaming_)) {
+            std::vector<unsigned char> reply; bool interim = false, streaming = false, complete = true;
+            if (!pipeline_->take_reply(reply, &interim, &streaming, &complete)) break;
+            if (!pipeline_playing_) {
+                pipeline_playing_ = true; pipeline_interim_ = interim; pipeline_streaming_ = streaming;
+                audio_.listen(false); draining_ = false; started = true;
+                if (streaming) audio_.begin_stream();
+                SipMonitor::get().event("TTS_PLAYBACK_STARTED", streaming ? "Streaming IVR audio into SIP call" : "Playing IVR reply into SIP call");
+                SipMonitor::get().stage("Speaking");
+            }
+            if (streaming) {
+                if (!reply.empty()) audio_.append_stream(reply);
+                if (complete) { audio_.finish_stream(); pipeline_streaming_ = false; }
+            } else audio_.play(reply);
+        }
+        return started;
     }
     void fail(const std::string& error) noexcept {
         try { SipMonitor::get().event("ERROR", error); error_ = error; close(); } catch (...) { re_cancel(); }
@@ -793,7 +831,7 @@ private:
     struct tmr timer_{};
     bool libre_ = false, configured_ = false, initialized_ = false, ua_initialized_ = false, events_ = false;
     bool registered_ = false, established_ = false, waiting_ = false, closing_ = false, draining_ = false;
-    bool pipeline_playing_ = false, pipeline_interim_ = false;
+    bool pipeline_playing_ = false, pipeline_interim_ = false, pipeline_streaming_ = false;
     bool wait_for_media_ = false, waiting_for_media_ = false, media_ready_ = false, announcement_playing_ = false;
     bool greeting_prefix_ = false;
     std::string test_keys_;
@@ -829,6 +867,15 @@ void self_test() {
     AudioBridge test(nullptr); test.play(wav); test.activate(true);
     int16_t samples[320]{}; test.transmit(samples, 320, 1, 16000);
     if (samples[0] != 32767 || !test.finished()) throw std::runtime_error("PCM playback self-test failed");
+    {
+        AudioBridge streamed(nullptr, ""); streamed.activate(true); streamed.begin_stream(); streamed.append_stream(wav);
+        streamed.transmit(samples, 320, 1, 16000);
+        if (streamed.finished()) throw std::runtime_error("stream completed before synthesis ended");
+        streamed.transmit(samples, 320, 1, 16000);
+        if (streamed.finished() || std::any_of(samples, samples + 320, [](int16_t v) { return v != 0; })) throw std::runtime_error("stream underrun did not wait silently");
+        streamed.append_stream(wav); streamed.finish_stream(); streamed.transmit(samples, 320, 1, 16000);
+        if (!streamed.finished()) throw std::runtime_error("stream completion did not release playback");
+    }
     {
         AudioBridge echo(nullptr, ""); echo.enable_echo(true); echo.activate(true); echo.play(wav);
         std::vector<int16_t> voice(160, 2000), output(160);

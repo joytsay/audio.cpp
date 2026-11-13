@@ -631,8 +631,9 @@ Compose includes `ivr-n8n` and a document extraction/local work-order service. A
 setup imports **GeoVision · Workflow**, grouping **IVR Input → AI Agent → IVR Output**,
 **KnowledgeMCP**, and **RAG** on one canvas. The agent uses the MCP RAG tool and
 session-scoped Simple Memory. Existing workflows are backed up before merging;
-custom credentials and retrieval settings are preserved. Publish the merged
-workflow and select **Dialogue source → n8n**. Both browser and SIP turns enter
+custom credentials and retrieval settings are preserved. Startup automatically publishes
+the current workflow after owner setup; set `N8N_AUTO_PUBLISH_WORKFLOW=false` to keep
+publishing manual. Select **Dialogue source → n8n**. Both browser and SIP turns enter
 the n8n AI Agent webhook; fresh MCP retrieval runs before every answer. The two
 tools retrieve knowledge and save work orders in a native n8n Data Table. New
 reports get one follow-up question, then the next reply is saved even with missing fields. Replies stay on one conversational line. ASR/TTS stay in audio.cpp;

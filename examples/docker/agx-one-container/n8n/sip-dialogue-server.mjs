@@ -49,7 +49,7 @@ export function createDialogueServer({ dialogue, normalizeTranscript = text => t
   return createServer(async (req, res) => {
     res.setHeader('Cache-Control', 'no-store');
     if (req.method === 'GET' && req.url === '/health') { res.setHeader('Content-Type', 'application/json'); res.end('{"status":"ok"}'); return; }
-    if (req.method !== 'POST' || !['/dialogue', '/normalize'].includes(req.url)) { res.writeHead(404); res.end(); return; }
+    if (req.method !== 'POST' || !['/dialogue', '/normalize', '/settings', '/tts-config'].includes(req.url)) { res.writeHead(404); res.end(); return; }
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(new Error('SIP dialogue timed out')), 300_000);
     res.on('close', () => { if (!res.writableEnded) controller.abort(); });
@@ -63,6 +63,21 @@ export function createDialogueServer({ dialogue, normalizeTranscript = text => t
         res.setHeader('Content-Type', 'application/json');
         res.end(JSON.stringify({text: normalizeTranscript(body.text, typeof body.context === 'string' ? body.context : '')}));
         return;
+      }
+      if (req.url === '/settings' || req.url === '/tts-config') {
+        const signal=controller.signal;
+        const response=await fetchImpl(`${audioUrl}/v1/ui/demo-settings`,{signal,cache:'no-store'});
+        if(!response.ok)throw new Error(`Could not read saved demo settings (${response.status})`);
+        const saved=(await response.json()).settings||{};
+        let model=body.model,streaming=saved.tts_streaming===true;
+        if(req.url==='/tts-config'&&streaming){
+          if(!saved.tts_model_id||!saved.tts_model_family||!saved.tts_model_path)throw new Error('Save a streaming-capable TTS model in the demo settings first');
+          model=`demo-${saved.tts_model_id}-streaming`;
+          const loaded=await fetchImpl(`${audioUrl}/v1/models/load`,{method:'POST',headers:{'Content-Type':'application/json'},signal,body:JSON.stringify({id:model,family:saved.tts_model_family,path:saved.tts_model_path,task:saved.tts_model_task||'tts',mode:'streaming',load_options:saved.tts_load_options||{},session_options:saved.tts_session_options||{}})});
+          if(!loaded.ok)throw new Error(`Could not load streaming TTS (${loaded.status}): ${(await loaded.text()).slice(0,500)}`);
+        }
+        res.setHeader('Content-Type','application/json');
+        res.end(JSON.stringify({model,streaming,vad_end_silence_ms:saved.vad_end_silence_ms??2000}));return;
       }
       if (typeof body.text !== 'string' || !body.text.trim() || typeof body.model !== 'string' || typeof body.prompt !== 'string' || !Array.isArray(body.messages) || body.messages.length > 12 || body.messages.some(m => !['user', 'assistant'].includes(m.role) || typeof m.content !== 'string')) throw new Error('Invalid SIP dialogue request');
       const signal = controller.signal;
@@ -78,16 +93,18 @@ export function createDialogueServer({ dialogue, normalizeTranscript = text => t
       let reply;
       if (saved.llm_enabled === false) reply = body.text;
       else {
-        const ready = await ensureModel(llmUrl, model, signal, fetchImpl);
         if (source === 'n8n') {
           if (!dialogue) throw new Error('n8n dialogue handler is unavailable');
-          reply = await dialogue({ sessionId: body.sessionId, text: body.text, model: ready, messages }, signal, {
+          reply = await dialogue({ sessionId: body.sessionId, text: body.text, model, messages }, signal, {
             workflowUrl,
+            noticeDelaySeconds: saved.lookup_notice_delay_seconds,
+            prepareModel: () => ensureModel(llmUrl, model, signal, fetchImpl),
             onProgress: text => send({type: 'progress', text}),
             onWorkflow: state => send({ type: 'event', event: `N8N_WORKFLOW_${state.toUpperCase()}`, summary: 'GeoVision · Workflow' }),
             onTool: (name, state) => send({ type: 'event', event: `MCP_TOOL_${state.toUpperCase()}`, summary: name }),
           });
         } else {
+          const ready = await ensureModel(llmUrl, model, signal, fetchImpl);
           const completion = await fetchImpl(`${llmUrl}/chat/completions?autoload=true`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: ready, messages: [{ role: 'system', content: body.prompt }, ...messages], max_tokens: 256, temperature: 0.2, stream: false }), signal });
           if (!completion.ok) throw new Error(`LLM request failed (${completion.status})`);
           reply = (await completion.json()).choices?.[0]?.message?.content;

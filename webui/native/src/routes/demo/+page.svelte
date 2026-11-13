@@ -206,6 +206,7 @@
     if (typeof saved.vad_threshold === "number")
       threshold = saved.vad_threshold;
     if (typeof saved.vad_window_ms === "number") windowMs = saved.vad_window_ms;
+    if (typeof saved.vad_end_silence_ms === "number") endSilenceMs = savedEndSilenceMs = saved.vad_end_silence_ms;
     if (saved.dialogue_source === "n8n" || saved.dialogue_source === "prompt.csv")
       dialogueSource = saved.dialogue_source;
     if (saved.llm_model !== undefined) {
@@ -219,6 +220,8 @@
     }
     if (typeof saved.tts_streaming === "boolean")
       ttsStreaming = saved.tts_streaming;
+    if (typeof saved.lookup_notice_delay_seconds === "number")
+      lookupNoticeDelaySeconds = savedLookupNoticeDelaySeconds = saved.lookup_notice_delay_seconds;
     if (typeof saved.tts_playback_rate === "number")
       ttsPlaybackRate = saved.tts_playback_rate;
     if (saved.tts_voice_id !== undefined) {
@@ -309,9 +312,11 @@
         ...audioModelSettings("tts", selectedTts),
         vad_threshold: threshold,
         vad_window_ms: windowMs,
+        vad_end_silence_ms: endSilenceMs,
         llm_model: llm,
         dialogue_source: dialogueSource,
-        tts_streaming: ttsStreaming,
+        lookup_notice_delay_seconds: lookupNoticeDelaySeconds,
+        tts_streaming: streamingTts,
         tts_playback_rate: ttsPlaybackRate,
         tts_voice_id: savedVoiceId,
         tts_reference_text: voiceFile ? referenceText : "",
@@ -814,12 +819,33 @@
     "你好我是語音助手 請問您需要什麼服務 如果需要轉接請按分機號碼";
   let threshold = 0.5,
     windowMs = 650,
+    endSilenceMs = 2000,
+    savedEndSilenceMs = 2000,
     voiceFile: File | null = null,
     referenceText = defaultReferenceText,
     referencePath = "";
   let hotwords = "",
     savingHotwords = false,
     hotwordsStatus = "";
+  let lookupNoticeDelaySeconds = 3, savedLookupNoticeDelaySeconds = 3;
+  async function saveLookupNoticeDelay() {
+    const value = lookupNoticeDelaySeconds;
+    if (!Number.isInteger(value) || value < 1 || value > 60) {
+      lookupNoticeDelaySeconds = savedLookupNoticeDelaySeconds;
+      settingsStatus = "Wait notice delay must be a whole number from 1 to 60 seconds.";
+      return;
+    }
+    savingSettings = true;
+    try {
+      const current = await endpointJson<{settings: DemoSettings | null}>("", "ui/demo-settings", {cache: "no-store"});
+      await endpointJson("", "ui/demo-settings", {method: "POST", body: JSON.stringify({settings: {...(current.settings || {schema_version: 1}), lookup_notice_delay_seconds: value}})});
+      savedLookupNoticeDelaySeconds = value;
+      settingsStatus = "Wait notice delay saved · applies to the next turn";
+    } catch (cause) {
+      lookupNoticeDelaySeconds = savedLookupNoticeDelaySeconds;
+      settingsStatus = `Could not save wait notice delay: ${cause instanceof Error ? cause.message : cause}`;
+    } finally { savingSettings = false; }
+  }
   let ttsStreaming = false,
     ttsPlaybackRate = 0.9;
   $: ttsRunMode = streamingTts ? "streaming" : "offline";
@@ -843,11 +869,26 @@
         }
       : body;
   }
-  function setTtsStreaming(enabled: boolean) {
+  async function setTtsStreaming(enabled: boolean) {
     ttsStreaming = enabled;
     try {
       localStorage.setItem("geovision.demo.tts-streaming", String(enabled));
     } catch {}
+    if (useSip && !(await saveCallOption({tts_streaming: enabled,...audioModelSettings("tts", selectedTts)}))) ttsStreaming = !enabled;
+  }
+  async function saveCallOption(changes: Partial<DemoSettings>) {
+    if ("vad_end_silence_ms" in changes && (!Number.isInteger(changes.vad_end_silence_ms) || endSilenceMs < 500 || endSilenceMs > 5000)) {
+      endSilenceMs = savedEndSilenceMs; settingsStatus = "End-of-speech silence must be 500–5000 ms."; return false;
+    }
+    savingSettings = true;
+    try {
+      const current = await endpointJson<{settings: DemoSettings | null}>("", "ui/demo-settings", {cache:"no-store"});
+      await endpointJson("", "ui/demo-settings", {method:"POST",body:JSON.stringify({settings:{...(current.settings||{schema_version:1}),...changes}})});
+      if (changes.vad_end_silence_ms !== undefined) savedEndSilenceMs = changes.vad_end_silence_ms;
+      settingsStatus = "Call setting saved · applies to the next turn";
+      return true;
+    } catch (cause) { if (changes.vad_end_silence_ms !== undefined) endSilenceMs = savedEndSilenceMs; settingsStatus = `Could not save call setting: ${String(cause)}`; return false; }
+    finally { savingSettings = false; }
   }
   let greeting = "您好，這裡是 GeoVision IVR，請問需要什麼協助？";
   let filesReady = false,
@@ -1073,6 +1114,7 @@
     animation = 0,
     epoch = 0,
     detecting = false;
+  let silenceSamples = 0;
   let windows: Float32Array[] = [],
     frames = 0,
     utterance: Float32Array[] = [],
@@ -1110,6 +1152,7 @@
     windows = [];
     frames = 0;
     utterance = [];
+    silenceSamples = 0;
     preRoll = null;
   }
   function bars(samples: Float32Array) {
@@ -1217,17 +1260,18 @@
           reportedRtf(result),
         );
       if (speech) {
+        silenceSamples = 0;
         if (!utterance.length) {
           record("USER_STATE_CHANGED", "listening → speaking");
           if (preRoll) utterance.push(preRoll);
         }
         utterance.push(samples);
-      } else if (utterance.length) utterance.push(samples);
+      } else if (utterance.length) { utterance.push(samples); silenceSamples += samples.length; }
       else preRoll = samples;
       if (
         utterance.length &&
-        (!speech ||
-          utterance.reduce((n, p) => n + p.length, 0) >= ctx.sampleRate * 15)
+        (silenceSamples >= ctx.sampleRate * endSilenceMs / 1000 ||
+          utterance.reduce((n, p) => n + p.length, 0) >= ctx.sampleRate * 60)
       ) {
         const clip = wav(utterance, ctx);
         reset();
@@ -1402,17 +1446,16 @@
         status = "Thinking · n8n";
         record("AGENT_STATE_CHANGED", "listening → thinking");
         operationStarted = performance.now();
-        llm = await ensureDemoLlmReady(llmBase(), llm, signal, (message) => {
-          status = message;
-        });
-        if (generation !== epoch || signal.aborted) return;
         reply = await n8nDialogue({
           sessionId: run,
           text,
           model: llm,
           messages: messages.filter(message => !message.progressNotice && message.content.trim())
             .map(({ role, content }) => ({ role, content })),
-        }, signal, { onProgress: async (notice, noticeSignal) => {
+        }, signal, { noticeDelaySeconds: lookupNoticeDelaySeconds, prepareModel: async () => {
+          llm = await ensureDemoLlmReady(llmBase(), llm, signal, (message) => { status = message; });
+          return llm;
+        }, onProgress: async (notice, noticeSignal) => {
           if (generation !== epoch || noticeSignal.aborted) return;
           messages = [...messages, {role: "assistant", content: notice, progressNotice: true}];
           status = notice;
@@ -2374,7 +2417,7 @@
               if (
                 context &&
                 manualParts.reduce((n, p) => n + p.length, 0) >=
-                  context.sampleRate * 15
+                  context.sampleRate * 60
               )
                 toggleManualTurn();
             }
@@ -2683,6 +2726,13 @@
           >{savingGreeting ? "Saving…" : "Update greetings.csv"}</button
         >
         <small>{greetingStatus}</small>
+        <label>Wait notice delay (seconds)<input
+          aria-label="Wait notice delay (seconds)"
+          type="number" min="1" max="60" step="1" required
+          bind:value={lookupNoticeDelaySeconds}
+          on:change={saveLookupNoticeDelay}
+        /></label>
+        <small>Say “查詢中，請稍後。” if a lookup is still pending. Changes save automatically.</small>
       </fieldset>
     </section>
     <div class="section-label">MODEL SETTINGS</div>
@@ -2776,6 +2826,12 @@
             bind:value={windowMs}
           /></label
         >
+        <label>End-of-speech silence (ms)<input
+          aria-label="End-of-speech silence (ms)" type="number" min="500" max="5000" step="100"
+          bind:value={endSilenceMs}
+          on:change={() => saveCallOption({vad_end_silence_ms:endSilenceMs})}
+        /></label>
+        <small>Wait through pauses before starting ASR. Default: 2 seconds.</small>
       </fieldset>
       {#if !useVad}<small
           >VAD skipped. Record and send voice turns manually.</small
@@ -2947,7 +3003,7 @@
           ></label
         >
         <div class="tts-playback-options">
-          <label class="tts-streaming-switch"
+          <label class="stage-switch tts-streaming-switch"
             ><span>Streaming</span><input
               type="checkbox"
               role="switch"
@@ -3852,10 +3908,6 @@
     display: flex;
     align-items: center;
     gap: 8px;
-  }
-  .demo .tts-streaming-switch input {
-    width: 16px;
-    margin: 0;
   }
   .model-settings-actions {
     display: flex;

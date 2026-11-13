@@ -136,8 +136,8 @@ assert.equal(isN8nLookup('二零二六年十一月的。',[{role:'user',content:
 assert.equal(isN8nLookup('我增加工单。'),false);
 assert.equal(isN8nLookup('二零二六年十一月的。',[{role:'user',content:'我增加工单。'}]),false);
 const realSetTimeout=globalThis.setTimeout,realClearTimeout=globalThis.clearTimeout;
-let fireNotice=null;const timerToken={};
-globalThis.setTimeout=(fn,delay,...args)=>{if(delay===5000){fireNotice=fn;return timerToken;}return realSetTimeout(fn,delay,...args);};
+let fireNotice=null,scheduledDelay=null;const timerToken={};
+globalThis.setTimeout=(fn,delay,...args)=>{if(delay>=1000&&delay<=60000){scheduledDelay=delay;fireNotice=fn;return timerToken;}return realSetTimeout(fn,delay,...args);};
 globalThis.clearTimeout=token=>{if(token===timerToken)fireNotice=null;else realClearTimeout(token);};
 const flush=()=>new Promise(resolve=>realSetTimeout(resolve,0));
 try{
@@ -147,8 +147,8 @@ try{
   assert.equal(text,'查詢中，請稍後。');assert.ok(requestStarted);noticeSignal=activeSignal;
   return new Promise(resolve=>{finishNotice=resolve;});
  }}).then(value=>{completed=true;return value;});
- await flush();assert.equal(finishNotice,undefined,'no notice before the five-second timer');
- assert.ok(fireNotice,'five-second timer scheduled');fireNotice();await flush();
+ await flush();assert.equal(finishNotice,undefined,'no notice before the three-second timer');
+ assert.ok(fireNotice,'three-second timer scheduled');fireNotice();await flush();
  assert.ok(finishNotice&&!completed,'notice starts while retrieval is pending');
  finishRequest(Response.json({reply:'Final answer'}));await flush();
  assert.equal(completed,false,'final playback waits for notice audio');
@@ -163,6 +163,18 @@ try{
  globalThis.fetch=async()=>Response.json({reply:'Quick answer'});
  await n8nDialogue(input,signal,{onProgress:()=>assert.fail('fast lookups must be silent')});
  assert.equal(fireNotice,null,'completed retrieval cancels the pending timer');
+ let finishPreparation,preparationNotice=false,preparedRequest=false;
+ globalThis.fetch=async(_url,options)=>{preparedRequest=true;assert.equal(JSON.parse(options.body).model,'prepared-model');return Response.json({reply:'Ready'});};
+ const preparing=n8nDialogue(input,signal,{prepareModel:()=>new Promise(resolve=>{finishPreparation=resolve;}),onProgress:()=>{preparationNotice=true;}});
+ fireNotice();await flush();assert.equal(preparationNotice,true);assert.equal(preparedRequest,false,'announcement covers model loading before the webhook starts');
+ finishPreparation('prepared-model');assert.equal(await preparing,'Ready');
+ globalThis.fetch=async()=>Response.json({reply:'Configured'});
+ await n8nDialogue(input,signal,{noticeDelaySeconds:7,onProgress:()=>{}});
+ assert.equal(scheduledDelay,7000,'custom notice delay is expressed in seconds');
+ await n8nDialogue(input,signal,{noticeDelaySeconds:0,onProgress:()=>{}});
+ assert.equal(scheduledDelay,3000,'invalid saved delays use the default');
+ globalThis.fetch=async()=>Response.json({reply:'Added'});
+
  await n8nDialogue({...input,text:'我增加工单。'},signal,{onProgress:()=>assert.fail('report creation must not announce lookup')});
 }finally{globalThis.fetch=originalFetch;globalThis.setTimeout=realSetTimeout;globalThis.clearTimeout=realClearTimeout;}
-console.log('PASS lookup wait notice after five seconds only, fast lookup silence, ordered audio and error cancellation');
+console.log('PASS lookup wait notice after three seconds only, fast lookup silence, ordered audio and error cancellation');

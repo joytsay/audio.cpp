@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import {bootstrap,importMissing,exists,mergedWorkflowMigration,repairLocalCredentialUrls,workflowIdMigration} from '../../../examples/docker/agx-one-container/n8n/bootstrap-local.mjs';
+import {bootstrap,importMissing,exists,mergedWorkflowMigration,repairLocalCredentialUrls,workflowIdMigration,prepareStartupWorkflow} from '../../../examples/docker/agx-one-container/n8n/bootstrap-local.mjs';
 const templates=new URL('../../../examples/docker/agx-one-container/n8n',import.meta.url).pathname;
 const realImportMissing=importMissing;
 const retired=[];
@@ -151,3 +151,29 @@ const repaired=repairTableRow({order_id:'GV-F0FF402E0DED',reference_number:'',di
 assert.equal(repaired.reference_number,'A12345');
 assert.equal(JSON.parse(repaired.results).fields.派工單號,'A12345');
 console.log('PASS existing CSV row repair recovers spaced work-order number without changing internal ID');
+
+const {ensureWorkflowPublished}=await import('../../../examples/docker/agx-one-container/n8n/publish-workflow.mjs');
+let publishedWorkflow={active:false,activeVersionId:null,versionId:'draft-1',name:'Preserve local edits'};
+let publishCalls=0;
+const publicationApi=async(route,body)=>{
+ assert.ok(route.startsWith('/workflows/ivrWorkflow'));
+ if(body!==undefined){assert.equal(route,'/workflows/ivrWorkflow/publish');publishCalls++;publishedWorkflow.active=true;publishedWorkflow.activeVersionId=publishedWorkflow.versionId;}
+ return structuredClone(publishedWorkflow);
+};
+assert.equal(await ensureWorkflowPublished(publicationApi),true);
+assert.equal(publishCalls,1);assert.equal(publishedWorkflow.name,'Preserve local edits');
+assert.equal(await ensureWorkflowPublished(publicationApi),false);assert.equal(publishCalls,1);
+publishedWorkflow.versionId='draft-2';
+assert.equal(await ensureWorkflowPublished(publicationApi),true);assert.equal(publishCalls,2);
+await assert.rejects(ensureWorkflowPublished(async()=>({active:false,versionId:'draft-1'})),/did not publish/);
+const startupSteps=[];
+const startupOptions={install:async()=>startupSteps.push('import'),upgradeTables:async()=>startupSteps.push('tables'),publish:async id=>{assert.equal(id,'ivrWorkflow');startupSteps.push('publish');return true;},log:()=>{}};
+await prepareStartupWorkflow({...startupOptions,autoPublish:true});assert.deepEqual(startupSteps,['import','tables','publish']);
+startupSteps.length=0;await prepareStartupWorkflow({...startupOptions,autoPublish:false});assert.deepEqual(startupSteps,['import','tables']);
+const publishRetryDir=await fs.mkdtemp(path.join(os.tmpdir(),'ivr-auto-publish-'));
+try{
+ const marker=path.join(publishRetryDir,'ready');let attempts=0,waits=0;
+ await bootstrap({marker,log:()=>{},fetchImpl:async()=>({ok:true,json:async()=>({data:{userManagement:{showSetupOnFirstLoad:false}}})}),wait:async()=>{waits++;await assert.rejects(fs.access(marker));},install:()=>prepareStartupWorkflow({...startupOptions,autoPublish:true,publish:async()=>{if(++attempts===1)throw Error('temporary publication failure');return true;}})});
+ assert.equal(attempts,2);assert.equal(waits,1);await fs.access(marker);
+}finally{await fs.rm(publishRetryDir,{recursive:true,force:true});}
+console.log('PASS default startup publication after imports/table upgrade, disabled mode, draft republishing, unchanged-version skip, preservation and retry before readiness');

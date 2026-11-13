@@ -2,8 +2,8 @@ import {reportDraft} from '../knowledge/conversation.mjs';
 import {promises as fs} from 'node:fs';
 import {createRequire} from 'node:module';
 
-// Run only during an ID migration. Use n8n's API so its running webhook
-// registry is updated too; CLI-only unpublishing leaves cached routes alive.
+// Use n8n's API for startup maintenance so its running webhook registry
+// stays synchronized. Temporary scoped keys are removed after each operation.
 export async function withN8nApi(scopes,run,{apiUrl='http://127.0.0.1:5678'}={}){
   const require=createRequire('/usr/local/lib/node_modules/n8n/package.json');
   require('reflect-metadata');
@@ -17,7 +17,7 @@ export async function withN8nApi(scopes,run,{apiUrl='http://127.0.0.1:5678'}={})
     await db.init();
     repository=Container.get(ApiKeyRepository);
     const user=await Container.get(UserRepository).findOne({where:{role:{slug:'global:owner'}},relations:{role:true}});
-    if(!user)throw new Error('Cannot retire the legacy workflow without an n8n owner');
+    if(!user)throw new Error('Cannot manage the IVR workflow without an n8n owner');
     const service=new PublicApiKeyService(repository,Container.get(JwtService),null,console);
     key=await service.createPublicApiKeyForUser(user,{
       label:`Temporary workflow ID migration ${Date.now()}`,

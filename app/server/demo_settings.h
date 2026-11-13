@@ -33,9 +33,19 @@ inline json::Value validate(const json::Value & input) {
             if (!value.is_string() || value.as_string().size() > 65536) throw std::invalid_argument(key + " must be a string of at most 64 KiB");
             if (key == "dialogue_source" && value.as_string() != "prompt.csv" && value.as_string() != "n8n")
                 throw std::invalid_argument("dialogue_source must be prompt.csv or n8n");
-        } else if (key == "vad_threshold" || key == "vad_window_ms" || key == "tts_playback_rate") {
+        } else if (key == "vad_threshold" || key == "vad_window_ms" || key == "tts_playback_rate" || key == "lookup_notice_delay_seconds" || key == "vad_end_silence_ms") {
             if (!value.is_number()) throw std::invalid_argument(key + " must be a number");
             const double number = value.as_number();
+            if (key == "vad_end_silence_ms") {
+                if (!std::isfinite(number) || number < 500 || number > 5000 || std::floor(number) != number)
+                    throw std::invalid_argument("vad_end_silence_ms must be between 500 and 5000");
+                continue;
+            }
+            if (key == "lookup_notice_delay_seconds") {
+                if (!std::isfinite(number) || number < 1 || number > 60 || std::floor(number) != number)
+                    throw std::invalid_argument("lookup_notice_delay_seconds must be a whole number between 1 and 60");
+                continue;
+            }
             if (key == "tts_playback_rate") {
                 if (!std::isfinite(number) || number < 0.7 || number > 1.25)
                     throw std::invalid_argument("tts_playback_rate must be between 0.7 and 1.25");
@@ -86,7 +96,7 @@ inline json::Value decode(const std::string & text) {
         if (key == "schema_version") continue;
         if (std::find(booleans.begin(), booleans.end(), key) != booleans.end())
             object[key] = json::Value::make_bool(engine::io::yaml::parse_bool_scalar(value, key));
-        else if (key == "vad_threshold" || key == "vad_window_ms" || key == "tts_playback_rate") {
+        else if (key == "vad_threshold" || key == "vad_window_ms" || key == "tts_playback_rate" || key == "lookup_notice_delay_seconds" || key == "vad_end_silence_ms") {
             size_t consumed = 0;
             const double number = std::stod(value, &consumed);
             if (consumed != value.size()) throw std::invalid_argument("Invalid numeric model setting: " + key);

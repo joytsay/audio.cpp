@@ -48,7 +48,42 @@ struct Receiver {
     std::exception_ptr failure;
     bool received = false;
     const ivrTTS::CancelCheck& cancel;
+    std::string pending;
+    bool completed = false;
 };
+void receive_event(Receiver& state, const std::string& payload) {
+    if (payload == "[DONE]") return;
+    std::unique_ptr<json_object, decltype(&json_object_put)> item(json_tokener_parse(payload.c_str()), json_object_put);
+    if (!item) throw std::runtime_error("invalid speech SSE JSON");
+    auto field = [&](const char* key) { json_object* p = nullptr; json_object_object_get_ex(item.get(), key, &p); return p; };
+    auto* type_field = field("type");
+    const std::string type = type_field ? json_object_get_string(type_field) : "";
+    if (type == "error" || field("error")) throw std::runtime_error("streaming TTS returned an error: " + payload.substr(0, 500));
+    if (type == "speech.audio.done") { state.completed = true; return; }
+    if (type != "speech.audio.delta") return;
+    if (state.completed) throw std::runtime_error("speech audio arrived after completion");
+    const int rate = json_object_get_int(field("sample_rate")), channels = json_object_get_int(field("channels"));
+    auto* format = field("format"); auto* audio = field("audio");
+    if (rate < 8000 || rate > 192000 || channels < 1 || channels > 8 || !format || std::string(json_object_get_string(format)) != "pcm_s16le" || !audio)
+        throw std::runtime_error("speech chunk has invalid PCM metadata");
+    const std::string encoded = json_object_get_string(audio);
+    const std::string alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::vector<unsigned char> pcm; unsigned value = 0; int bits = 0;
+    for (const unsigned char c : encoded) {
+        if (c == '=') break;
+        const auto digit = alphabet.find(c); if (digit == std::string::npos) throw std::runtime_error("invalid speech base64");
+        value = (value << 6) | unsigned(digit); bits += 6;
+        if (bits >= 8) { bits -= 8; pcm.push_back((value >> bits) & 255); }
+    }
+    if (pcm.empty() || pcm.size() % (2 * channels)) throw std::runtime_error("invalid speech PCM length");
+    std::vector<unsigned char> wav;
+    auto le = [&](unsigned n, int bytes) { while (bytes--) { wav.push_back(n & 255); n >>= 8; } };
+    auto literal = [&](const char* v) { wav.insert(wav.end(), v, v + 4); };
+    literal("RIFF"); le(36 + pcm.size(), 4); literal("WAVE"); literal("fmt "); le(16, 4);
+    le(1, 2); le(channels, 2); le(rate, 4); le(rate * channels * 2, 4); le(channels * 2, 2); le(16, 2);
+    literal("data"); le(pcm.size(), 4); wav.insert(wav.end(), pcm.begin(), pcm.end());
+    state.sink(wav.data(), wav.size()); state.received = true;
+}
 size_t receive(char* data, size_t size, size_t count, void* context) noexcept {
     auto& state = *static_cast<Receiver*>(context);
     const size_t length = size * count;
@@ -64,6 +99,18 @@ size_t receive(char* data, size_t size, size_t count, void* context) noexcept {
         char* type = nullptr;
         curl_easy_getinfo(state.curl, CURLINFO_CONTENT_TYPE, &type);
         const std::string content_type = type ? type : "";
+        if (state.mode == ivrTTS::AudioMode::StreamingWavChunks) {
+            if (content_type.find("text/event-stream") == std::string::npos) throw std::runtime_error("expected speech event stream");
+            state.pending.append(data, length);
+            if (state.pending.size() > 8 * 1024 * 1024) throw std::runtime_error("speech SSE event too large");
+            size_t end;
+            while ((end = state.pending.find('\n')) != std::string::npos) {
+                auto line = state.pending.substr(0, end); state.pending.erase(0, end + 1);
+                if (!line.empty() && line.back() == '\r') line.pop_back();
+                if (line.rfind("data:", 0) == 0) receive_event(state, line.substr(line.size() > 5 && line[5] == ' ' ? 6 : 5));
+            }
+            return length;
+        }
         if (content_type.find("json") != std::string::npos ||
             content_type.find("text/") != std::string::npos)
             throw std::runtime_error("server returned non-audio content: " + content_type);
@@ -232,6 +279,7 @@ void ivrTTS::speech_stream(const std::string& text, const std::string& reference
     if (!headers) throw std::runtime_error("cannot allocate HTTP headers");
     std::string body = "{\"model\":" + quote(model_) + ",\"input\":" + quote(text) +
         (mode == AudioMode::Wav ? ",\"response_format\":\"wav\"" :
+         mode == AudioMode::StreamingWavChunks ? ",\"response_format\":\"pcm\",\"stream_format\":\"sse\"" :
          ",\"response_format\":\"pcm\",\"stream_format\":\"audio\"");
     if (reference.empty() && !voice_.empty() && voice_ != "lingCL" && voice_ != "WangSG")
         body += ",\"voice\":" + quote(voice_);
@@ -275,5 +323,6 @@ void ivrTTS::speech_stream(const std::string& text, const std::string& reference
     curl_easy_getinfo(curl.get(), CURLINFO_RESPONSE_CODE, &code);
     if (code < 200 || code >= 300) throw std::runtime_error("HTTP " + std::to_string(code) +
         ": " + receiver.error_body);
+    if (mode == AudioMode::StreamingWavChunks && !receiver.completed) throw std::runtime_error("speech stream closed before completion");
     if (!receiver.received) throw std::runtime_error("server returned no complete audio buffer");
 }
