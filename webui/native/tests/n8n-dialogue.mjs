@@ -5,7 +5,7 @@ import {createRequire} from 'node:module';
 const require=createRequire(new URL('../package.json',import.meta.url));
 const {buildSync}=require('esbuild');
 const compiled=buildSync({entryPoints:[new URL('../src/lib/n8n-dialogue.ts',import.meta.url).pathname],bundle:true,platform:'node',format:'esm',write:false});
-const {n8nDialogue,isN8nLookup,N8N_LOOKUP_NOTICE}=await import('data:text/javascript;base64,'+Buffer.from(compiled.outputFiles[0].text).toString('base64'));
+const {n8nDialogue,isN8nIntake,isN8nLookup,N8N_LOOKUP_NOTICE}=await import('data:text/javascript;base64,'+Buffer.from(compiled.outputFiles[0].text).toString('base64'));
 const root=new URL('../../../examples/docker/agx-one-container/n8n/',import.meta.url);
 const workflow=JSON.parse(fs.readFileSync(new URL('workflow.json',root)));
 const rag=workflow;
@@ -47,12 +47,17 @@ assert.deepEqual(nodes.get('KnowledgeMCP').parameters.includeTools,['retrieve_kn
 assert.equal(nodes.get('Simple Memory').parameters.sessionKey,'={{ $json.sessionId }}');
 assert.equal(nodes.get('Local Chat Model').parameters.options.maxTokens,160);
 assert.equal(nodes.get('AI Agent').parameters.options.forceToolCallOnFirstIteration,false);
+assert.ok(nodes.get('AI Agent').parameters.options.systemMessage.includes('JSON.stringify($json.user_transcripts)'),'caller history includes intake turns that bypassed inference');
 for(const [from,outputs] of Object.entries(workflow.connections)){
  assert.ok(nodes.has(from));
  for(const groups of Object.values(outputs))for(const edges of groups)for(const edge of edges)assert.ok(nodes.has(edge.node));
 }
-const main=['IVR Input','Prepare IVR input','Register caller turn','Retrieve current turn','Prepare agent context','AI Agent','Prepare IVR output','IVR Output'];
-for(let i=0;i<main.length-1;i++)assert.equal(workflow.connections[main[i]].main[0][0].node,main[i+1]);
+const main=['IVR Input','Prepare IVR input','Register caller turn','Fixed reply?','Retrieve current turn','Prepare agent context','AI Agent','Prepare IVR output','IVR Output'];
+for(let i=0;i<main.length-1;i++)assert.equal(workflow.connections[main[i]].main[main[i]==='Fixed reply?'?1:0][0].node,main[i+1]);
+assert.equal(workflow.connections['Fixed reply?'].main[0][0].node,'Return fixed reply');
+assert.equal(workflow.connections['Return fixed reply'].main[0][0].node,'IVR Output');
+const fixed=vm.runInNewContext(`(function(){${nodes.get('Return fixed reply').parameters.jsCode}})()`,{$input:{first:()=>({json:{report_reply:'工單日期、工單或設備編號、維修項目與數量是什麼？'}})}})[0].json;
+assert.equal(fixed.reply,'工單日期、工單或設備編號、維修項目與數量是什麼？');assert.equal(fixed.tools.length,0);
 assert.ok(nodes.get('Retrieve current turn').parameters.tool.value.includes('$json.tool'));
 assert.ok(nodes.get('Retrieve current turn').parameters.jsonInput.includes('add_work_order'));
 assert.deepEqual(['retrieve_knowledge','add_work_order'].sort(),Object.entries(workflow.connections).filter(([,outputs])=>outputs.ai_tool?.[0]?.some(e=>e.node==='Knowledge MCP Server')).map(([name])=>name).sort());
@@ -178,3 +183,20 @@ try{
  await n8nDialogue({...input,text:'我增加工单。'},signal,{onProgress:()=>assert.fail('report creation must not announce lookup')});
 }finally{globalThis.fetch=originalFetch;globalThis.setTimeout=realSetTimeout;globalThis.clearTimeout=realClearTimeout;}
 console.log('PASS lookup wait notice after three seconds only, fast lookup silence, ordered audio and error cancellation');
+
+try {
+ for (const text of ['我要新增工單。','我增加工单。','我要回報工單。']) {
+  const intake={...input,text,messages:[{role:'user',content:text}]};
+  globalThis.fetch=async(_url,options)=>{assert.equal(JSON.parse(options.body).model,input.model);return Response.json({reply:fixed.reply,tools:[]});};
+  assert.equal(await n8nDialogue(intake,signal,{prepareModel:()=>assert.fail('fixed intake must not wait for LLM loading')}),fixed.reply);
+  assert.equal(isN8nIntake(text,intake.messages),true);
+ }
+ assert.equal(isN8nIntake('新增工單的流程是什麼？'),false);
+ assert.equal(isN8nIntake('我要新增工單，2026年11月12日 A123'),false);
+ assert.equal(isN8nIntake('我要新增工單。',[{role:'user',content:'我要回報工單。'}]),false);
+ let prepared=false;
+ globalThis.fetch=async()=>Response.json({reply:'已處理。'});
+ await n8nDialogue({...input,text:'A123，FAN2個'},signal,{prepareModel:async()=>{prepared=true;return input.model;}});
+ assert.equal(prepared,true,'detail turns still prepare the model');
+} finally {globalThis.fetch=originalFetch;}
+console.log('PASS first intake skips model warm-up, retrieval and agent; details and queries retain their normal path');

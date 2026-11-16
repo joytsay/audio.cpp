@@ -31,8 +31,11 @@ export function siblingWorkerEndpoint(port: number, path = 'v1'): string {
   // Preserve the address used to open the WebUI. This automatically supports
   // an AGX IP address, mDNS/DNS hostname, or localhost without container-side
   // knowledge of the host network interface.
-  url.port = String(port);
-  url.pathname = `/${path.replace(/^\/+|\/+$/g, '')}/`;
+  const llmProxy = port === 8082 && (url.protocol === 'https:' || ['8081', '8083'].includes(url.port));
+  // HTTP demo calls the full interface gateway; HTTPS stays on its own origin.
+  if (llmProxy && url.protocol === 'http:' && url.port === '8081') url.port = '8083';
+  else if (!llmProxy) url.port = String(port);
+  url.pathname = `${llmProxy ? '/llm' : ''}/${path.replace(/^\/+|\/+$/g, '')}/`;
   url.search = '';
   url.hash = '';
   return url.toString().replace(/\/$/, '');

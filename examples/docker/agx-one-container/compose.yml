@@ -25,10 +25,6 @@ services:
       stack: 67108864
     restart: unless-stopped
     stop_grace_period: 45s
-    ports:
-      - "8081:8081"
-      - "8082:8082"
-      - "8084:8084"
     environment:
       SIP_SETTINGS_DIR: /app/sip-data
       NVIDIA_VISIBLE_DEVICES: all
@@ -97,7 +93,10 @@ services:
     depends_on:
       - voice-ai
     ports:
-      - "${AUDIOCPP_HTTPS_PORT:-8083}:443"
+      - "8081:8081"
+      - "8082:443"
+      - "8083:8083"
+      - "${AUDIOCPP_HTTPS_PORT:-8084}:444"
     environment:
       AUDIOCPP_HTTPS_HOST: ${AUDIOCPP_HTTPS_HOST:-192.168.5.151}
     volumes:
@@ -136,7 +135,7 @@ services:
       N8N_PROXY_HOPS: 1
       N8N_RESTRICT_FILE_ACCESS_TO: /files
       N8N_EDITOR_BASE_URL: http://${AUDIOCPP_HTTPS_HOST:-192.168.5.151}:${N8N_PORT:-5678}/
-      N8N_WEBHOOK_URL: https://${AUDIOCPP_HTTPS_HOST:-192.168.5.151}:${AUDIOCPP_HTTPS_PORT:-8083}/n8n/
+      N8N_WEBHOOK_URL: https://${AUDIOCPP_HTTPS_HOST:-192.168.5.151}:${AUDIOCPP_HTTPS_PORT:-8084}/n8n/
     volumes:
       - audiocpp-n8n-data:/home/node/.n8n
       - ./n8n:/templates:ro

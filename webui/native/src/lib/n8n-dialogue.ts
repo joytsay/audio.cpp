@@ -17,6 +17,18 @@ export function isN8nLookup(text: string, messages: ReadonlyArray<{role: string;
   return !history.some(m => /回報工單|回报工单|新增工單|新增工单|增加工單|增加工单|建立工單/.test(m.content));
 }
 
+// Only a fresh, explicit intake can bypass LLM warm-up. The workflow still
+// registers the turn and decides the reply; report details and queries keep
+// their normal preparation and persistence path.
+export function isN8nIntake(text: string, messages: ReadonlyArray<{role: string; content: string}> = []): boolean {
+  const normalize = (value: string) => value.replace(/工单/g, "工單").replace(/回报/g, "回報");
+  const start = /^(?:我(?:想要|想|要)?|請|幫我)?(?:回報工單|增加工單|新增工單|建立工單|工單回報)[。！!，,\s]*$/u;
+  if (!start.test(normalize(text).trim())) return false;
+  const history = messages.filter(message => message.role === "user");
+  if (history.at(-1)?.content === text) history.pop();
+  return !history.some(message => /回報工單|增加工單|新增工單|建立工單|工單回報/.test(normalize(message.content)));
+}
+
 // The agent, MCP client and session memory run inside GeoVision · Workflow.
 // Browser and SIP callers share this transport and never run a second LLM loop.
 export async function n8nDialogue(
@@ -49,7 +61,8 @@ export async function n8nDialogue(
       noticeTimer = setTimeout(() => {
         if (!noticeSignal.aborted) notice = Promise.resolve().then(()=>options.onProgress!(N8N_LOOKUP_NOTICE, noticeSignal)).catch(()=>undefined);
       }, delaySeconds * 1000);
-    const model = options.prepareModel ? await options.prepareModel() : input.model;
+    const model = options.prepareModel && !isN8nIntake(input.text, input.messages)
+      ? await options.prepareModel() : input.model;
     signal.throwIfAborted();
     const request = fetch(options.workflowUrl || "/n8n/webhook/ivr-agent", {
       method: "POST",

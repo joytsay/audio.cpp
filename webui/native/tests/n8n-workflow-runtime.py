@@ -140,7 +140,8 @@ if __name__=='__main__':
    history.extend([{'role':'user','content':text},{'role':'assistant','content':result['reply']}])
    print('Reply:',json.dumps(result,ensure_ascii=False))
    assert '\n' not in result['reply'] and len(result['reply'])<=200
-   assert expected_tool in result['tools']
+   if expected_tool is None:assert result['tools']==[]
+   else:assert expected_tool in result['tools']
    return result
   # Reproduce an existing table from revision 5, preserving its schema/rows.
   inverse={'派工單號':'reference_number','派工日期':'dispatch_date','工單名稱':'title','設備編號':'equipment_number','維修內容':'maintenance_items','FAN數量':'quantity','備註':'notes','起機測試':'test_result'}
@@ -157,7 +158,10 @@ if __name__=='__main__':
   renamed=api('/api/v1/data-tables/'+oldTable['id']+'/columns')
   assert 'reference_number' in [c['name'] for c in renamed]
   utterances=['我增加工单。','二零二六年十一月十二号，名称是台积电，工单名称，呃设备编号是一二三四，维修项目五六七八，数量八个。','测试正常。']
-  initial=turn('report-call',utterances[0])
+  before_intake=(len(calls),len(embedding));intake_started=time.monotonic()
+  initial=turn('report-call',utterances[0],None)
+  assert (len(calls),len(embedding))==before_intake,'fixed intake must bypass embeddings and LLM inference'
+  print('Fixed intake webhook time:',round(time.monotonic()-intake_started,3),'seconds')
   assert initial['reply'].count('？')==1 and '日期' in initial['reply'] and '編號' in initial['reply']
   tables=api('/api/v1/data-tables')['data']
   table=next(t for t in tables if t['name']=='work_orders')
@@ -177,7 +181,7 @@ if __name__=='__main__':
   before=len(calls)
   oldest=turn('report-call','可以列出最旧的工单吗？')
   assert 'YCS-16860' in oldest['reply']
-  assert any(m.get('content')==utterances[0] for m in calls[before]['messages']),'Same call lost conversational context'
+  assert any(m.get('role')=='system' and utterances[0] in m.get('content','') for m in calls[before]['messages']),'Same call lost conversational context'
   month_oldest=turn('report-call','直接幫我找出這個月最舊的工單。是。')
   assert '2026年11月' in month_oldest['reply'] and '2026-10-30' not in month_oldest['reply']
   latest=turn('report-call','最新的工单，帮我列出来。')
@@ -192,8 +196,8 @@ if __name__=='__main__':
   assert empty['reply']=='2025年1月沒有工單記錄。'
   before=len(calls)
   turn('another-caller','查詢最新工單。')
-  assert not any(m.get('content')==utterances[0] for m in calls[before]['messages']),'Memory leaked between callers'
-  prompt=turn('incomplete-report','我增加工单。')
+  assert not any(m.get('role')=='system' and utterances[0] in m.get('content','') for m in calls[before]['messages']),'Memory leaked between callers'
+  prompt=turn('incomplete-report','我增加工单。',None)
   assert prompt['reply'].count('？')==1 and len(rows())==1
   incomplete=turn('incomplete-report','不知道。','add_work_order')
   records=rows();assert len(records)==2
@@ -204,14 +208,14 @@ if __name__=='__main__':
   assert len(rows())==2,'retry must upsert the same Data Table row'
   inserts=[batch for batch in embedding if any('Q:' in str(item) for item in batch['input'])]
   assert inserts and all('Q:' in str(item) and 'A:' in str(item) for batch in inserts for item in batch['input']),'Q/A pairs must stay together'
-  turn('example-call','我要新增工單。')
+  turn('example-call','我要新增工單。',None)
   example='十一月十二号A一二三五年一维，Fan两个。'
   exampleReply=turn('example-call',example,'add_work_order')
   assert exampleReply['reply']=='工單 A1235 已新增。'
   exampleRow=next(r for r in rows() if r['reference_number']=='A1235')
   assert json.loads(exampleRow['results'])=={'transcripts':['我要新增工單。',example],'fields':{'派工單號':'A1235','派工日期':'2026/11/12','維修內容':'五年一維','FAN數量':2,'備註':'','起機測試':''}}
   fullReport='我要回報工單，2026年6月2日下午14:00臺積電F15P1/2_ME VFD備品與維修。\nF15P1H4K-GEX-EF-03 五年一維，更換強排FAN 2個、間面FAN 6個。\nF15P1H4K-GEX-EF-04 五年一維，更換強排FAN 2個、間面FAN 4個。'
-  turn('equipment-call',fullReport)
+  turn('equipment-call',fullReport,None)
   equipmentSave=turn('equipment-call','2026年6月2日下午14:00。\nF15P1H4K-GEX-EF-03 五年一維，更換強排FAN 2個、間面FAN 6個。','add_work_order')
   assert equipmentSave['reply']=='工單 F15P1/2_ME 已新增。'
   equipmentRow=next(r for r in rows() if r['session_id']=='equipment-call')

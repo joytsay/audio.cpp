@@ -5,9 +5,8 @@
 	default_sni {$AUDIOCPP_HTTPS_HOST:192.168.5.151}
 }
 
-https://{$AUDIOCPP_HTTPS_HOST:192.168.5.151}:443, https://localhost:443, https://127.0.0.1:443 {
-	tls internal
-
+# Shared UI, audio, LLM, workflow, and SIP routes for both interfaces.
+(geovision) {
 	# Browser SIP signaling to the local, host-networked Asterisk test PBX.
 	handle /sip-ws {
 		rewrite * /ws
@@ -36,4 +35,15 @@ https://{$AUDIOCPP_HTTPS_HOST:192.168.5.151}:443, https://localhost:443, https:/
 	handle {
 		reverse_proxy voice-ai:8081
 	}
+}
+
+# Host 8082 maps to TLS 443 (demo); host 8084 maps to TLS 444 (full UI).
+https://{$AUDIOCPP_HTTPS_HOST:192.168.5.151}:443, https://localhost:443, https://127.0.0.1:443, https://{$AUDIOCPP_HTTPS_HOST:192.168.5.151}:444, https://localhost:444, https://127.0.0.1:444 {
+	tls internal
+	import geovision
+}
+
+# HTTP demo and full interface share the same API/webhook gateway.
+http://:8081, http://:8083 {
+	import geovision
 }

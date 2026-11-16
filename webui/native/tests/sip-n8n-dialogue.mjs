@@ -12,7 +12,7 @@ let noticeDelaySeconds=3,ttsStreaming=false,endSilenceMs=2000;
 const ttsLoads=[];
 let ttsFamily='zipvoice',voiceId;
 let failTtsLoad=false;
-let source = 'n8n', failTool = false, modelReady = true, modelLoads = 0;
+let source = 'n8n', failTool = false, modelReady = true, modelLoads = 0, modelDiscovery = 0;
 const requests = [], toolCalls = [];
 const originalFetch = globalThis.fetch;
 const query = '如何確認維修起機測試流程？';
@@ -21,10 +21,12 @@ const mockFetch = async (url, options = {}) => {
   if (url === 'http://audio.test/v1/ui/demo-settings') return Response.json({ settings: { dialogue_source: source, llm_model: 'selected-demo-llm', lookup_notice_delay_seconds: noticeDelaySeconds,tts_streaming:ttsStreaming,vad_end_silence_ms:endSilenceMs,tts_model_id:'zipvoice-test',tts_model_family:ttsFamily,tts_model_path:`/models/${ttsFamily}.gguf`,tts_model_task:ttsFamily==='bluemagpie'?'tts':'clon',tts_voice_id:voiceId } });
   if (url === 'http://audio.test/v1/models/load') { ttsLoads.push(JSON.parse(options.body)); return failTtsLoad ? new Response('backend unavailable',{status:503}) : Response.json({loaded:true}); }
   if (url === 'http://audio.test/v1/ui/voices') return Response.json({voices:[{id:'my-clone',audio:'UklGRg==',transcript:''}]});
-  if (url === 'http://llm.test/models') return Response.json({ data: [{ id: 'selected-demo-llm', loaded: modelReady, status: { value: modelReady ? 'loaded' : 'unloaded' } }] });
+  if (url === 'http://llm.test/models') { modelDiscovery++; return Response.json({ data: [{ id: 'selected-demo-llm', loaded: modelReady, status: { value: modelReady ? 'loaded' : 'unloaded' } }] }); }
   if (url === 'http://llm.test/models/load') { modelLoads++; modelReady = true; return Response.json({}); }
   if (url === 'http://n8n.test/webhook/ivr-agent') {
-    const body = JSON.parse(options.body); toolCalls.push(body);
+    const body = JSON.parse(options.body);
+    if(body.text==='我要新增工單。')return Response.json({reply:'工單日期、工單或設備編號、維修項目與數量是什麼？',tools:[]});
+    toolCalls.push(body);
     assert.equal(body.text, query);
     assert.equal(body.model, 'selected-demo-llm');
     assert.equal(body.sessionId, 'same-sip-call');
@@ -79,6 +81,14 @@ try {
   const failedTts=await originalFetch(base+'/tts-config',{method:'POST',body:JSON.stringify({model:'zipvoice'})});
   assert.equal(failedTts.status,500,'never silently fall back to ZipVoice');
   failTtsLoad=false;ttsStreaming=false;
+  const discoveries=modelDiscovery;
+  modelReady=false;
+  const intakeResponse=await originalFetch(`${base}/dialogue`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...input,sessionId:'fresh-intake',text:'我要新增工單。',messages:[]})});
+  const intake=(await intakeResponse.text()).trim().split('\n').map(JSON.parse);
+  assert.equal(intakeResponse.status,200);assert.match(intake.at(-1).reply,/工單日期/);
+  assert.equal(modelDiscovery,discoveries,'SIP intake must bypass LLM discovery and loading');
+  assert.equal(modelLoads,0);assert.equal(toolCalls.length,0);
+  modelReady=true;
   const events = await turn();
   assert.deepEqual(events[0], { type: 'configuration', source: 'n8n', model: 'selected-demo-llm' });
   assert.ok(events.some(e => e.event === 'N8N_WORKFLOW_STARTED'));

@@ -113,11 +113,11 @@ try{
 }finally{await fs.rm(renameDir,{recursive:true,force:true});}
 console.log('PASS workflow ID migration: preserved edits, rebound self-reference, released legacy routes, retry and idempotence');
 const revisionTwo=structuredClone(template);revisionTwo.meta.ivrWorkflowRevision=2;
-assert.equal(mergedWorkflowMigration(revisionTwo,null,template).meta.ivrWorkflowRevision,10,'existing revision 2 must receive the routing/save fixes');
+assert.equal(mergedWorkflowMigration(revisionTwo,null,template).meta.ivrWorkflowRevision,template.meta.ivrWorkflowRevision,'existing revision 2 must receive the routing/save fixes');
 const revisionThree=structuredClone(template);revisionThree.meta.ivrWorkflowRevision=3;
-assert.equal(mergedWorkflowMigration(revisionThree,null,template).meta.ivrWorkflowRevision,10,'revision 3 upgrades to native Data Table intake');
+assert.equal(mergedWorkflowMigration(revisionThree,null,template).meta.ivrWorkflowRevision,template.meta.ivrWorkflowRevision,'revision 3 upgrades to native Data Table intake');
 const revisionFour=structuredClone(template);revisionFour.meta.ivrWorkflowRevision=4;
-assert.equal(mergedWorkflowMigration(revisionFour,null,template).meta.ivrWorkflowRevision,10,'revision 4 upgrades to one-question Data Table saving');
+assert.equal(mergedWorkflowMigration(revisionFour,null,template).meta.ivrWorkflowRevision,template.meta.ivrWorkflowRevision,'revision 4 upgrades to one-question Data Table saving');
 console.log('PASS unified bootstrap: one workflow, backups of both legacy flows, two tools, preserved credentials/top-K, same-workflow RAG, retry and idempotence');
 
 const credentialDir=await fs.mkdtemp(path.join(os.tmpdir(),'ivr-local-credential-test-'));
@@ -181,11 +181,18 @@ console.log('PASS default startup publication after imports/table upgrade, disab
 const revisionEight=structuredClone(template);revisionEight.meta.ivrWorkflowRevision=8;
 revisionEight.nodes=revisionEight.nodes.filter(n=>!['Add scenario upload','Create scenario Q/A','Index scenario Q/A'].includes(n.name));
 const uploadUpgrade=mergedWorkflowMigration(revisionEight,null,template);
-assert.equal(uploadUpgrade.meta.ivrWorkflowRevision,10);
+assert.equal(uploadUpgrade.meta.ivrWorkflowRevision,template.meta.ivrWorkflowRevision);
 assert.ok(uploadUpgrade.nodes.some(n=>n.name==='Create scenario Q/A'));
 
 const revisionNine=structuredClone(template);revisionNine.meta.ivrWorkflowRevision=9;
 revisionNine.nodes.find(n=>n.name==='Validate scenario files').parameters.jsCode='old validator';
 const csvUpgrade=mergedWorkflowMigration(revisionNine,null,template);
-assert.equal(csvUpgrade.meta.ivrWorkflowRevision,10);
+assert.equal(csvUpgrade.meta.ivrWorkflowRevision,template.meta.ivrWorkflowRevision);
 assert.match(csvUpgrade.nodes.find(n=>n.name==='Validate scenario files').parameters.jsCode,/xlsx\|csv\|txt/);
+
+const revisionTen=structuredClone(template);revisionTen.meta.ivrWorkflowRevision=10;
+revisionTen.nodes=revisionTen.nodes.filter(n=>!['Fixed reply?','Return fixed reply'].includes(n.name));
+const intakeUpgrade=mergedWorkflowMigration(revisionTen,null,template);
+assert.ok(intakeUpgrade.nodes.some(n=>n.name==='Return fixed reply'));
+assert.equal(intakeUpgrade.connections['Register caller turn'].main[0][0].node,'Fixed reply?');
+assert.equal(mergedWorkflowMigration(intakeUpgrade,null,template),null);

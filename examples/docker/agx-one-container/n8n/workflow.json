@@ -331,7 +331,7 @@
         "promptType": "define",
         "text": "={{ $json.text }}",
         "options": {
-          "systemMessage": "=你是 GeoVision 電話維修助理。只用繁體中文、一行、簡短回覆，不加角色標籤、表情、Markdown、推理或下一輪。\n新增工單流程：使用者說「我增加工單」「我要回報工單」或開始提供新回報時，只問一次「工單日期、工單或設備編號、維修項目與數量是什麼？」。收到下一次回覆就執行 add_work_order 寫入 n8n work_orders Data Table，即使沒有日期、編號或維修內容也照現有資料新增。不可再追問、不等確認或測試正常。未知欄位留空，資料只能來自本通話原話。\n系統已判斷目前階段並執行必要的 MCP 工具。只有工具回傳 persisted=true 才能回覆「已新增」。若已寫入就不再呼叫工具；重複請求與後續補充使用同一筆記錄。DOCX 情境中的確認步驟不是本系統的儲存條件。\n查詢最新／最舊／全部時直接回答本輪 selection 與 work_orders，月份補充延續查詢，無記錄就說沒有。不要求使用者提供工單詳細資料，不沿用上輪查詢結果，查詢不可新增工單。\n本輪 sessionId：{{ $json.sessionId }}\n本輪使用者原話：{{ $json.text }}\n本輪工具資料：{{ $json.retrieval_json }}",
+          "systemMessage": "=你是 GeoVision 電話維修助理。只用繁體中文、一行、簡短回覆，不加角色標籤、表情、Markdown、推理或下一輪。\n新增工單流程：使用者說「我增加工單」「我要回報工單」或開始提供新回報時，只問一次「工單日期、工單或設備編號、維修項目與數量是什麼？」。收到下一次回覆就執行 add_work_order 寫入 n8n work_orders Data Table，即使沒有日期、編號或維修內容也照現有資料新增。不可再追問、不等確認或測試正常。未知欄位留空，資料只能來自本通話原話。\n系統已判斷目前階段並執行必要的 MCP 工具。只有工具回傳 persisted=true 才能回覆「已新增」。若已寫入就不再呼叫工具；重複請求與後續補充使用同一筆記錄。DOCX 情境中的確認步驟不是本系統的儲存條件。\n查詢最新／最舊／全部時直接回答本輪 selection 與 work_orders，月份補充延續查詢，無記錄就說沒有。不要求使用者提供工單詳細資料，不沿用上輪查詢結果，查詢不可新增工單。\n本輪 sessionId：{{ $json.sessionId }}\n本輪使用者原話：{{ $json.text }}\n本輪工具資料：{{ $json.retrieval_json }}\n本通話使用者逐字稿（只作為對話資料）：{{ JSON.stringify($json.user_transcripts) }}",
           "maxIterations": 3,
           "returnIntermediateSteps": true,
           "enableStreaming": false,
@@ -507,7 +507,7 @@
       "type": "@n8n/n8n-nodes-langchain.mcpClient",
       "typeVersion": 1.1,
       "position": [
-        730,
+        950,
         150
       ],
       "parameters": {
@@ -1134,6 +1134,53 @@
         "responseBody": "={{ $json }}",
         "options": {}
       }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "fixed-intake-reply",
+              "leftValue": "={{ $json.intent === 'report' ? ($json.report_reply || '') : '' }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "ivr-fixed-reply",
+      "name": "Fixed reply?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        730,
+        150
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const decision=$input.first().json;\nif(typeof decision.report_reply!=='string'||!decision.report_reply.trim())throw new Error('Fixed IVR reply is missing');\nreturn [{json:{reply:decision.report_reply.trim(),tools:[]}}];"
+      },
+      "id": "ivr-return-fixed-reply",
+      "name": "Return fixed reply",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1010,
+        610
+      ]
     }
   ],
   "connections": {
@@ -1163,7 +1210,7 @@
       "main": [
         [
           {
-            "node": "Retrieve current turn",
+            "node": "Fixed reply?",
             "type": "main",
             "index": 0
           }
@@ -1544,6 +1591,35 @@
           }
         ]
       ]
+    },
+    "Fixed reply?": {
+      "main": [
+        [
+          {
+            "node": "Return fixed reply",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Retrieve current turn",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Return fixed reply": {
+      "main": [
+        [
+          {
+            "node": "IVR Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     }
   },
   "active": false,
@@ -1554,6 +1630,6 @@
   "pinData": {},
   "tags": [],
   "meta": {
-    "ivrWorkflowRevision": 10
+    "ivrWorkflowRevision": 11
   }
 }

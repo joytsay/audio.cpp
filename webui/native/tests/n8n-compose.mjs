@@ -21,3 +21,7 @@ assert.equal(new Set(documents.map(v=>v.target)).size,4);
 for(const mount of documents){assert.equal(mount.read_only,true);assert.equal(mount.bind.create_host_path,false);assert.ok(mount.target.startsWith('/files/'));}
 assert.ok(!('DATABASE_FILE' in config.services.knowledge.environment));
 console.log('PASS Compose: separate persistent work-order volume, all original knowledge files read-only');
+
+assert.ok(!config.services['voice-ai'].ports?.length,'the native worker must not bypass the gateway');
+for(const [published,target] of [[8081,8081],[8082,443],[8083,8083],[8084,444]])
+ assert.ok(config.services.https.ports.some(p=>String(p.published)===String(published)&&p.target===target),'all four UI ports must reach the gateway');

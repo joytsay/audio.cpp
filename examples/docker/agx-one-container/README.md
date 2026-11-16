@@ -13,7 +13,7 @@ uses the shared Saved voices menu.
 This Compose project builds one container containing the embedded Svelte WebUI,
 the native audio.cpp worker (diarization, STT, and TTS), llama.cpp, and a
 rag-cpp GraphRAG worker over the repository's `knowledge/` corpus. There is no
-nginx or other reverse proxy.
+nginx; Caddy provides the HTTP and HTTPS interface gateways.
 
 The commands below assume Jetson AGX Orin (CUDA architecture 8.7), Docker, Compose
 v2, and the NVIDIA Container Runtime are already installed.
@@ -86,8 +86,10 @@ toolkit and SM87 target; a newer prebuilt llama.cpp CUDA image is not mixed into
 the JetPack runtime. NCCL is disabled because AGX Orin uses one CUDA device;
 this also keeps the Jetson runtime independent of the build image's NCCL ABI.
 
-Open `https://192.168.5.151:8083/` for the dedicated voice chatbot, or
-`http://AGX-IP-ADDRESS:8081` for Studio. The WebUI becomes available while the native
+Open `http://AGX-IP-ADDRESS:8081/` for the demo or
+`https://AGX-IP-ADDRESS:8082/` for the demo over HTTPS. The full GeoVision
+interface is at `http://AGX-IP-ADDRESS:8083/` or
+`https://AGX-IP-ADDRESS:8084/`. The WebUI becomes available while the native
 model manager downloads the default ASR and ZipVoice packages and
 llama.cpp downloads the instruct model. Downloads persist in the host model directories,
 so later starts reuse them.
@@ -110,28 +112,23 @@ all downloaded audio and LLM weights.
 
 ## Runtime ports
 
-- `:8081` is served directly by `audiocpp_server`. It contains the embedded
-  Svelte WebUI and the audio.cpp REST API used for diarization, STT, and TTS.
-- `:8082` is served directly by `llama-server` for model management and LLM
-  inference.
-- A second llama.cpp worker uses Qwen3-Embedding-0.6B internally on `:8084`.
-  It is not published to the host; rag-cpp calls it while indexing and querying.
-- rag-cpp listens only inside the container on `127.0.0.1:8083`; the native
-  server exposes regular RAG at `/v1/rag/retrieve` and GraphRAG at
-  `/v1/rag/graph`. Its Qwen embedding vectors are stored in the existing `.ragdb`.
-- Caddy publishes HTTPS on host port `8083`, using the same internal-CA and IP/SNI setup
-  as Realtime-Venus. This host port is separate from rag-cpp's container-local port 8083.
-  `/llm/*` proxies to llama.cpp, `/sip-ws` proxies to the local Asterisk test PBX,
-  and all other requests proxy to audio.cpp, including RAG.
-  Open `https://192.168.5.151:8083/#/pipeline` directly, or use the root address, which
-  opens the chatbot automatically on port 8083. Studio remains available from its navigation link.
-- Set `AUDIOCPP_HTTPS_HOST` and `AUDIOCPP_HTTPS_PORT` to change the published address.
-  With a custom port, open `/#/pipeline` directly. Caddy stores its CA and certificates in
+- `http://HOST:8081/` opens the demo through Caddy, including scenario upload and n8n webhooks.
+- `https://HOST:8082/` opens the demo through Caddy with HTTPS.
+- `http://HOST:8083/` opens the full GeoVision interface with all tabs.
+- `https://HOST:8084/` opens the full interface with HTTPS.
+- All four host ports use Caddy; the native audio server stays inside the container.
+- The gateways forward `/llm/*` to the internal llama.cpp worker on port 8082,
+  `/n8n/webhook/*` and `/n8n/mcp/*` to n8n, `/sip-ws` to Asterisk, and the
+  remaining UI/audio/RAG requests to audio.cpp. The HTTP demo uses port 8083's
+  `/llm/*` gateway for LLM requests; HTTPS requests stay on the same origin.
+- The embedding worker on port 8084 and rag-cpp on port 8083 remain internal
+  to the voice-ai container. Their ports are separate from the host UI ports.
+- Set `AUDIOCPP_HTTPS_HOST` and `AUDIOCPP_HTTPS_PORT` to change the full HTTPS
+  interface address (default port 8084). Caddy stores its CA and certificates in
   persistent `audiocpp-https-data` and `audiocpp-https-config` volumes.
-  Trust Caddy's `/data/caddy/pki/authorities/local/root.crt` on each client, as in the
-  existing Realtime-Venus deployment. This stack creates its own CA.
-- Direct HTTP ports 8081 and 8082 remain published. HTTPS chatbot API requests stay on
-  the same origin through Caddy, supporting microphone access without mixed-content requests.
+  Trust Caddy's `/data/caddy/pki/authorities/local/root.crt` on each client.
+- `/#/demo` remains a direct demo link on any UI gateway; `/#/?studio` opens
+  the full interface explicitly on the demo ports.
 
 The continuous microphone uses bundled Silero VAD for speech detection and automatic turns.
 Uploaded files and examples bypass VAD. Text messages bypass ASR and share the same conversation
@@ -157,7 +154,7 @@ Override `AUDIOCPP_BOOTSTRAP_PACKAGES`, `LLAMA_BOOTSTRAP_MODEL`, or
 
 ### HTTPS voice demo
 
-Open `https://192.168.5.151:8083/#/demo` (or your configured HTTPS host and
+Open `https://192.168.5.151:8084/#/demo` (or your configured HTTPS host and
 port). Trust the HTTPS certificate and allow microphone access. The Svelte
 console uses the same dark-blue palette as Pipeline and Models, with an
 unlinked **GeoVision IVR** brand. It includes model settings, separate measured microphone and playback
@@ -189,9 +186,9 @@ Before each LLM turn, the demo explicitly loads the selected worker and waits
 for its ready state. Inference also enables router autoload for that request.
 
 When opening the demo directly at `http://127.0.0.1:8081/#/demo`, LLM requests
-use the same hostname on port `8082` (llama.cpp). HTTPS access uses the gateway's
+use the same hostname on port `8083` through `/llm/`. HTTPS access uses the gateway's
 same-origin `/llm/` proxy. On the local device, open
-`https://localhost:8083/#/demo` or `https://127.0.0.1:8083/#/demo`; the gateway
+`https://localhost:8082/#/demo` or `https://127.0.0.1:8082/#/demo`; the gateway
 also accepts the configured `AUDIOCPP_HTTPS_HOST`. Local HTTPS uses Caddy's
 internal certificate authority. The native HTTP server on port `8081` does not
 provide the `/llm/` proxy route.
@@ -298,7 +295,7 @@ enabled; listening pauses during processing/playback and resumes afterward.
 Hangup cancels requests and stops microphone capture and playback.
 
 After updating the sources, run `docker compose up --build -d voice-ai`.
-The existing `https` service already routes this page on port 8083.
+The existing `https` service already routes this page on port 8084.
 
 ### Audio8 ASR local conversion
 
@@ -370,7 +367,7 @@ Restart Asterisk separately after edits to its mounted configuration files.
 ## SIP telephone pipeline and coturn
 
 For browser calls, use the [local Asterisk test PBX](../asterisk/README.md#test-from-the-ivr-webui)
-and open `https://192.168.5.151:8083/#/sip`. Trust the Caddy CA and allow
+and open `https://192.168.5.151:8084/#/sip`. Trust the Caddy CA and allow
 microphone access first.
 In **Use IVR**, calls start automatically: the opening greeting plays, then
 caller RTP audio runs through VAD → ASR → LLM → TTS and replies play back into

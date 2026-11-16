@@ -11,6 +11,8 @@
 
 There is exactly one follow-up question per new report. No second required-field question, confirmation phrase or normal-startup result is required. Unknown fields stay blank. Spoken dates/numbers and simplified/traditional Chinese are normalized for structured fields; raw transcripts are preserved. Later details and retries upsert the same row rather than creating duplicates. Explicit cancellation stops the report; lookup questions remain lookups.
 
+The first question uses **Register caller turn → Fixed reply? → Return fixed reply → IVR Output**. It skips knowledge retrieval, embeddings and AI Agent inference; fresh explicit intake requests also skip LLM warm-up in the shared browser/SIP transport. The next caller response keeps the normal tool and Data Table save path. Original caller transcripts also ground the agent context, including intake turns that skipped inference.
+
 The phase is determined from registered caller turns before the model runs. The flow works even when a local model refuses tool calling or asks unnecessary questions. The acknowledgment is produced only after the storage node successfully returns a saved row.
 
 ## Native n8n Data Table

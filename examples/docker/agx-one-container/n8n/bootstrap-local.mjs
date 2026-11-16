@@ -142,7 +142,7 @@ export function resultWorkflowMigration(existing,template){
 // Versioned upgrade: save the old flow first, preserve inference credentials and
 // retrieval tuning, and replace the bundled behavior/layout/tool set together.
 export function mergedWorkflowMigration(existing, rag, template) {
-  if (!existing || existing.meta?.ivrWorkflowRevision>=(template.meta?.ivrWorkflowRevision??10)) return null;
+  if (!existing || existing.meta?.ivrWorkflowRevision>=(template.meta?.ivrWorkflowRevision??11)) return null;
   const next={...structuredClone(existing),...structuredClone(template),id:existing.id,active:existing.active};
   next.meta={...existing.meta,...template.meta};
   next.settings={...existing.settings,...template.settings};
