@@ -51,6 +51,7 @@ For adapter loading and merged GGUF export, see the [LoRA guide](lora.md).
 | Supertonic | `supertonic` | `tts` | [Supertonic](#supertonic) |
 | VibeVoice | `vibevoice` | `tts` | [VibeVoice](#vibevoice) |
 | VieNeu-TTS v3 Turbo | `vieneu_v3_turbo` (alias `vietneu_tts`) | `tts`, `clon` | [VieNeu-TTS v3 Turbo](models/vieneu_v3_turbo.md) |
+| BlueMagpie-TTS | `bluemagpie` | `tts`, `clon` | [BlueMagpie](models/bluemagpie.md) |
 | VoxCPM1 | `voxcpm1` | `tts`, `clon` | [VoxCPM1](#voxcpm1) |
 | VoxCPM2 | `voxcpm2` | `tts`, `clon`, `vdes` | [VoxCPM2](#voxcpm2) |
 | Voxtral 4B TTS | `voxtral_tts` | `tts` | [Voxtral TTS](models/voxtral_tts.md) |

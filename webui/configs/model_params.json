@@ -1,4 +1,56 @@
 {
+  "bluemagpie": [
+  {
+    "name": "seed",
+    "type": "number",
+    "label": "seed",
+    "default": 1234,
+    "minimum": 0,
+    "maximum": 2147483647,
+    "step": 1,
+    "info": "Flow noise seed."
+  },
+  {
+    "name": "num_inference_steps",
+    "type": "number",
+    "label": "num inference steps",
+    "default": 10,
+    "minimum": 1,
+    "maximum": 100,
+    "step": 1,
+    "info": "CFM sampling steps."
+  },
+  {
+    "name": "guidance_scale",
+    "type": "slider",
+    "label": "guidance scale",
+    "default": 2,
+    "minimum": 0,
+    "maximum": 20,
+    "step": 0.1,
+    "info": "CFM classifier-free guidance."
+  },
+  {
+    "name": "stream_chunk_ms",
+    "type": "number",
+    "label": "stream chunk ms",
+    "default": 320,
+    "minimum": 40,
+    "maximum": 5000,
+    "step": 1,
+    "info": "Audio chunk duration while generation continues."
+  },
+  {
+    "name": "segment_bytes",
+    "type": "number",
+    "label": "segment bytes",
+    "default": 240,
+    "minimum": 0,
+    "maximum": 4096,
+    "step": 1,
+    "info": "Sentence-aware UTF-8 segment budget; 0 disables segmentation."
+  }
+],
   "ming3_tts": [
     {"name":"template_name","type":"text","label":"Prompt template","placeholder":"Automatic"},
     {"name":"voice_id","type":"text","label":"IP voice name","placeholder":"US_James (IP template only)"},

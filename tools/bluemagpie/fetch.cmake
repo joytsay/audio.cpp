@@ -1,0 +1,17 @@
+# Fetch exact commits without cloning the full (large) llama.cpp history.
+find_package(Git REQUIRED)
+file(MAKE_DIRECTORY "${SOURCE_DIR}")
+function(run_git)
+    execute_process(COMMAND "${GIT_EXECUTABLE}" ${ARGV}
+        WORKING_DIRECTORY "${SOURCE_DIR}" RESULT_VARIABLE status)
+    if(NOT status EQUAL 0)
+        message(FATAL_ERROR "BlueMagpie dependency fetch failed: git ${ARGV}")
+    endif()
+endfunction()
+if(NOT EXISTS "${SOURCE_DIR}/.git")
+    run_git(init)
+    run_git(remote add origin https://github.com/mybigday/codec.cpp.git)
+endif()
+run_git(fetch --depth 1 origin "${REVISION}")
+run_git(checkout --detach FETCH_HEAD)
+run_git(submodule update --init --recursive --depth 1 --jobs 2)

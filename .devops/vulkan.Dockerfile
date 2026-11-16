@@ -18,7 +18,7 @@ ARG AUDIOCPP_VERSION=dev
 # Install build toolchain and Vulkan shader/compiler headers.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        gcc-${GCC_VERSION} g++-${GCC_VERSION} make cmake libgomp1 ca-certificates \
+        gcc-${GCC_VERSION} g++-${GCC_VERSION} make cmake git libgomp1 ca-certificates \
         glslc libvulkan-dev spirv-headers \
         libxcb-xinput0 libxcb-xinerama0 libxcb-cursor-dev && \
     apt-get clean && \
@@ -59,12 +59,13 @@ RUN cmake -S . -B build \
 
 # Collect shared libraries
 RUN mkdir -p /app/lib && \
-    find build -name "*.so*" -exec cp -P {} /app/lib \;
+    find build -name "*.so*" ! -path "build/bluemagpie-*/*" ! -path "build/bin/bluemagpie/*" -exec cp -P {} /app/lib \;
 
 # Collect binaries + multiplexer into /app/full
 RUN mkdir -p /app/full && \
     cp build/bin/audiocpp_cli build/bin/audiocpp_server build/bin/audiocpp_model_manager \
        build/bin/model_perf /app/full/ && \
+    if [ ! -d build/bin/bluemagpie ]; then :; else cp -a build/bin/bluemagpie /app/full/; fi && \
     cp .devops/entrypoint.sh /app/full/entrypoint.sh && \
     chmod +x /app/full/entrypoint.sh
 

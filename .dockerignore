@@ -5,6 +5,8 @@ examples/
 scripts/
 docs/
 tools/*
+!tools/bluemagpie/
+!tools/bluemagpie/**
 !tools/gguf_convert.cpp
 !tools/model_manager_v2.py
 !tools/community_models/

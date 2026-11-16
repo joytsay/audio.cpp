@@ -223,12 +223,13 @@ void ivrTTS::create(const std::string& url, const std::string& model,
                     const std::string& voice, long timeout) {
     if ((url.rfind("http://", 0) != 0 && url.rfind("https://", 0) != 0) || model.empty() || timeout <= 0)
         throw std::invalid_argument("create requires an HTTP(S) URL, model ID and positive timeout");
+    server_reference_.clear();
     url_ = url;
     while (!url_.empty() && url_.back() == '/') url_.pop_back();
     model_ = model; voice_ = voice; timeout_ = timeout;
 }
 void ivrTTS::set_preset_directory(const std::string& directory) { preset_directory_ = directory; }
-void ivrTTS::del() noexcept { url_.clear(); model_.clear(); voice_.clear(); }
+void ivrTTS::del() noexcept { url_.clear(); model_.clear(); voice_.clear(); server_reference_.clear(); }
 std::vector<unsigned char> ivrTTS::run(const std::string& text) const {
     return speech(text, "");
 }
@@ -266,6 +267,13 @@ std::vector<unsigned char> ivrTTS::speech(const std::string& text,
     }, AudioMode::Wav);
     return result;
 }
+void ivrTTS::set_reference_base64(const std::string& audio, const std::string& transcript) {
+    if (audio.empty() || audio.size() > 24 * 1024 * 1024)
+        throw std::runtime_error("invalid saved reference audio size");
+    server_reference_ = ",\"voice_ref\":{\"type\":\"base64\",\"data\":" + quote(audio) +
+        "},\"reference_text\":" + quote(transcript);
+}
+
 void ivrTTS::speech_stream(const std::string& text, const std::string& reference,
     const AudioSink& sink, AudioMode mode, const CancelCheck& cancel) const {
     if (!sink) throw std::invalid_argument("audio callback is required");
@@ -281,10 +289,11 @@ void ivrTTS::speech_stream(const std::string& text, const std::string& reference
         (mode == AudioMode::Wav ? ",\"response_format\":\"wav\"" :
          mode == AudioMode::StreamingWavChunks ? ",\"response_format\":\"pcm\",\"stream_format\":\"sse\"" :
          ",\"response_format\":\"pcm\",\"stream_format\":\"audio\"");
-    if (reference.empty() && !voice_.empty() && voice_ != "lingCL" && voice_ != "WangSG")
+    const auto& selected_reference = reference.empty() ? server_reference_ : reference;
+    if (selected_reference.empty() && !voice_.empty() && voice_ != "lingCL" && voice_ != "WangSG")
         body += ",\"voice\":" + quote(voice_);
-    std::string resolved = reference;
-    if (reference.empty() && (voice_ == "lingCL" || voice_ == "WangSG")) {
+    std::string resolved = selected_reference;
+    if (selected_reference.empty() && (voice_ == "lingCL" || voice_ == "WangSG")) {
         std::filesystem::path directory = preset_directory_;
         if (directory.empty()) {
             const char* env = std::getenv("IVRTTS_VOICE_DIR");

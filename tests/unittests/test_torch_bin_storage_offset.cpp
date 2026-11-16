@@ -212,6 +212,24 @@ std::string format(const std::vector<float> & values) {
     return out + "]";
 }
 
+void test_long_storage_batch_counters() {
+    std::vector<uint8_t> pickle={0x80,0x02,'}','('};
+    put_tensor_entry(pickle,"large",0,{},{},2);
+    put_tensor_entry(pickle,"num_batches_tracked",1,{},{},2);
+    pickle.insert(pickle.end(),{'u','.'});
+    std::string text(pickle.begin(),pickle.end());
+    for(size_t at=0;(at=text.find("FloatStorage",at))!=std::string::npos;)text.replace(at,12,"LongStorage");
+    pickle.assign(text.begin(),text.end());
+    const int64_t values[]={9007199254740993LL,37};std::vector<uint8_t> storage(sizeof(values));std::memcpy(storage.data(),values,sizeof(values));
+    auto archive=stored_zip({{"archive/data.pkl",pickle},{"archive/data/0",storage}});
+    auto path=std::filesystem::temp_directory_path()/"torch_batch_counter.bin";
+    {std::ofstream file(path,std::ios::binary);file.write(reinterpret_cast<const char*>(archive.data()),archive.size());}
+    auto source=engine::assets::open_torch_bin_tensor_source(path);std::filesystem::remove(path);
+    require(source->require_i64_scalar("large")==values[0],"I64 scalars must retain integer precision");
+    require(source->require_i64_scalar("num_batches_tracked")==37,"BatchNorm counter must honor storage offset");
+    require(source->require_f32("num_batches_tracked")==std::vector<float>{37},"explicit I64 to float conversion");
+}
+
 void test_views_honour_storage_offset() {
     // x = torch.arange(8.); torch.save({"head": x[:4], "tail": x[4:]}, path)
     const auto path = write_checkpoint({{"head", 0, {4}, {1}}, {"tail", 4, {4}, {1}}}, 8);
@@ -306,6 +324,7 @@ void test_unsupported_views_are_rejected() {
 
 int main() {
     try {
+        test_long_storage_batch_counters();
         test_views_honour_storage_offset();
         test_root_tensor_honours_storage_offset();
         test_container_extensions_do_not_select_adapter_layout();

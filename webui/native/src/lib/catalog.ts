@@ -119,6 +119,7 @@ function preferredPackage(entries: PackageEntry[]): PackageEntry | undefined {
 function relatedPackages(entry: CatalogEntry): PackageEntry[] {
   const family = packages.filter((candidate) => candidate.family === entry.family);
   if (!family.length) return [];
+  if (entry.family === 'bluemagpie') return family;
   if (entry.family === 'ace_step' || entry.family === 'minimax_music3') return family;
   if (!entry.download_id) return family;
   const exact = family.find((candidate) => candidate.id === entry.download_id);
@@ -308,7 +309,7 @@ function installChoices(entry: CatalogEntry): InstallPackageChoice[] {
   }
   const related = exposesAllGguf ? relatedExposeAllGgufPackages(entry) : relatedPackages(entry);
   if (entry.family === 'ace_step' || entry.family === 'minimax_music3' ||
-      exposesAllGguf) {
+      entry.family === 'bluemagpie' || exposesAllGguf) {
     return related
       .filter((candidate) => candidate.format === 'gguf')
       .sort((left, right) => exposesAllGguf

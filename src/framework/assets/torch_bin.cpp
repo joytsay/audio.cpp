@@ -117,7 +117,7 @@ std::map<std::string, ZipEntry> read_zip_entries(const std::vector<uint8_t> & by
 
 // ---- Restricted pickle interpreter --------------------------------------------------
 
-enum class GlobalKind { None, OrderedDict, RebuildTensor, StorageF32, StorageF16, StorageBF16 };
+enum class GlobalKind { None, OrderedDict, RebuildTensor, StorageF32, StorageF16, StorageBF16, StorageI64 };
 
 struct PickleValue {
     enum class Kind { None, Int, Bool, Str, Tuple, Global, Storage, Tensor, Dict } kind = Kind::None;
@@ -138,6 +138,9 @@ GlobalKind classify_global(const std::string & module, const std::string & name)
     }
     if (module == "torch._utils" && name == "_rebuild_tensor_v2") {
         return GlobalKind::RebuildTensor;
+    }
+    if (module == "torch" && name == "LongStorage") {
+        return GlobalKind::StorageI64;
     }
     if (module == "torch" && name == "FloatStorage") {
         return GlobalKind::StorageF32;
@@ -436,7 +439,7 @@ private:
 // ---- Tensor source ------------------------------------------------------------------
 
 struct TensorRecord {
-    std::string dtype;  // "F32", "F16", or "BF16"
+    std::string dtype;  // "F32", "F16", "BF16", or "I64"
     std::vector<int64_t> shape;
     size_t byte_offset = 0;
     size_t byte_size = 0;
@@ -447,12 +450,16 @@ const char * storage_dtype_name(GlobalKind kind) {
         case GlobalKind::StorageF32: return "F32";
         case GlobalKind::StorageF16: return "F16";
         case GlobalKind::StorageBF16: return "BF16";
+        case GlobalKind::StorageI64: return "I64";
         default:
             throw std::runtime_error("torch .bin tensor has an unsupported storage dtype");
     }
 }
 
 size_t dtype_byte_size(const std::string & dtype) {
+    if (dtype == "I64") {
+        return 8;
+    }
     if (dtype == "F32") {
         return 4;
     }
@@ -466,6 +473,12 @@ std::vector<float> decode_f32(const std::string & dtype, const uint8_t * data, s
     } else if (dtype == "F16") {
         ggml_fp16_to_fp32_row(
             reinterpret_cast<const ggml_fp16_t *>(data), values.data(), static_cast<int64_t>(elements));
+    } else if (dtype == "I64") {
+        for (size_t i = 0; i < elements; ++i) {
+            int64_t value;
+            std::memcpy(&value, data + i * sizeof(value), sizeof(value));
+            values[i] = static_cast<float>(value);
+        }
     } else {
         ggml_bf16_to_fp32_row(
             reinterpret_cast<const ggml_bf16_t *>(data), values.data(), static_cast<int64_t>(elements));
@@ -606,7 +619,13 @@ public:
     }
 
     int64_t require_i64_scalar(std::string_view name) const override {
-        throw std::runtime_error("torch .bin does not support i64 scalars: " + std::string(name));
+        const auto & record = require_record(name);
+        if (record.dtype != "I64" || shape_elements(record.shape) != 1) {
+            throw std::runtime_error("torch .bin tensor is not an i64 scalar: " + std::string(name));
+        }
+        int64_t value;
+        std::memcpy(&value, bytes_.data() + record.byte_offset, sizeof(value));
+        return value;
     }
 
 private:

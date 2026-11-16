@@ -203,6 +203,23 @@ loaded. Community and supported families must publish at least one package.
 }
 ```
 
+Hugging Face packages may include an auxiliary file from another repository through
+`download.file_sources`. Keys are entries in `files` (and keep their local install
+paths); each value provides `repo`, `path`, and optional `revision` (default `main`).
+The primary package source still supplies all other files. This applies to size
+queries, downloads, version checks and per-file manifest provenance. For example,
+BlueMagpie includes `embedding_model.ckpt` in `files` and sets:
+
+```json
+"file_sources": {
+  "embedding_model.ckpt": {
+    "repo": "speechbrain/spkrec-ecapa-voxceleb",
+    "path": "embedding_model.ckpt",
+    "revision": "main"
+  }
+}
+```
+
 `kind: "modelscope_snapshot"` downloads the same way from a ModelScope
 (modelscope.cn) repo. It takes the same fields (`repo` required, `revision`
 optional); the only differences are that the default revision is `master`

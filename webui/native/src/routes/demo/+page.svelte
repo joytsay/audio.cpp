@@ -5,7 +5,7 @@
   import SipSidebar from "$lib/SipSidebar.svelte";
   import type { SipSettings, SipLive } from "$lib/sip";
   import PanelDivider from "$lib/PanelDivider.svelte";
-  import { catalog, modelModes } from "$lib/catalog";
+  import { catalog, modelModes, modelCapabilities } from "$lib/catalog";
   import {
     playSpeechStream,
     type SpeechStreamSummary,
@@ -1044,7 +1044,7 @@
   async function testCloneVoice() {
     if (
       (!voiceFile && !protectedVoice) ||
-      (voiceFile && !referenceText.trim()) ||
+      (voiceFile && requiresReferenceText && !referenceText.trim()) ||
       !cloneTestText.trim() ||
       cloneBusy
     )
@@ -1128,7 +1128,9 @@
     voice = selectedTts?.default_voice || voiceChoices[0];
   $: supportsReference =
     selectedTts?.task === "clon" ||
+    (modelCapabilities[selectedTts?.family || ""] || []).includes("speaker_reference") ||
     ["audio8_tts", "voxcpm1", "qwen3_tts"].includes(selectedTts?.family || "");
+  $: requiresReferenceText = supportsReference && selectedTts?.family !== "bluemagpie";
   $: scheduleGreeting(
     mounted && filesReady && !settingsLoading && !savingSettings && useTts,
     connected || starting,
@@ -1978,7 +1980,7 @@
     if (
       !ttsKey ||
       !greeting.trim() ||
-      (voiceFile && supportsReference && !referenceText.trim())
+      (voiceFile && requiresReferenceText && !referenceText.trim())
     )
       return;
     const key = greetingFingerprint();
@@ -2029,7 +2031,7 @@
           response_format: "wav",
         };
         if (useTts && voiceFile && supportsReference) {
-          if (!referenceText.trim())
+          if (requiresReferenceText && !referenceText.trim())
             throw new Error("Enter the reference transcript first.");
           body.voice_ref = await uploadWav(
             await browserDecodeToWav(voiceFile, 24000, 1),
@@ -2137,7 +2139,8 @@
     referencePath = "";
     referenceText = file ? "" : defaultReferenceText;
     cloneStatus = "";
-    if (file && useAsr && asrKey) void transcribeReference(file);
+    if (file && !requiresReferenceText) cloneStatus = "Reference ready · no transcript needed";
+    else if (file && useAsr && asrKey) void transcribeReference(file);
     else if (file)
       cloneStatus = "ASR is off · enter the reference transcript manually";
   }
@@ -2406,7 +2409,7 @@
           "Choose an installed model for each stage before calling.",
         );
       if (useTts && voiceFile && supportsReference) {
-        if (!referenceText.trim())
+        if (requiresReferenceText && !referenceText.trim())
           throw new Error("Enter the matching reference voice transcript.");
         referencePath = await uploadWav(
           await browserDecodeToWav(voiceFile, 24000, 1),
@@ -3037,6 +3040,10 @@
       >
         <label
           >TTS<select aria-label="TTS" bind:value={ttsKey}
+            on:change={(e) => {
+              const model = audioModels.find((m) => m.key === e.currentTarget.value);
+              if (useSip) void saveCallOption({...audioModelSettings("tts", model), tts_streaming: ttsStreaming && (modelModes[model?.family || ""] || []).includes("streaming")});
+            }}
             ><option value="" disabled>No installed TTS models</option
             >{#each ttsModels as model}<option value={model.key}
                 >{model.label}</option
@@ -3109,7 +3116,7 @@
                 starting ||
                 cloneBusy ||
                 !useTts ||
-                (useAsr && !asrKey)}><Mic size={16} /></button
+                (requiresReferenceText && useAsr && !asrKey)}><Mic size={16} /></button
             >
             <input
               aria-label="Custom reference voice"
@@ -3132,7 +3139,7 @@
               on:play={() => cloneTestPlayer?.pause()}
             ></audio>
           </div>
-          <label
+          {#if requiresReferenceText}<label
             >Reference transcript<textarea
               rows="2"
               value={voiceFile
@@ -3144,6 +3151,8 @@
                 ? "Exact words in reference audio"
                 : "Bundled voice transcript unavailable"}></textarea></label
           >
+          {/if}
+          {#if !requiresReferenceText}<small>Use 3–30 seconds of reference speech. No transcript needed.</small>{/if}
           <div class="voice-name-actions">
             <label
               >Clone Custom Voice<input
@@ -3171,7 +3180,7 @@
             >
             <button
               disabled={(!voiceFile && !protectedVoice) ||
-                (voiceFile && !referenceText.trim()) ||
+                (voiceFile && requiresReferenceText && !referenceText.trim()) ||
                 !cloneTestText.trim() ||
                 !ttsKey}
               on:click={testCloneVoice}>Send</button
@@ -3398,7 +3407,7 @@
           <dd>{useSip ? (sipSettings?.mode === "tts" ? "Skipped · echo test" : `${(sipLive.status?.dialogue_source || dialogueSource) === "n8n" ? "n8n · " : ""}${(sipLive.status?.dialogue_source ? sipLive.status?.models?.llm : llm) || "Server LLM"}`) : useLlm ? (dialogueSource === "n8n" ? `n8n · ${llm || "—"}` : llm || "—") : "Skipped · passthrough"}</dd>
           <dt>TTS</dt>
           <dd>
-            {useSip ? sipSettings?.tts_model || "Server TTS" : useTts ? selectedTts?.label || "—" : "Skipped · text output"}
+            {useSip ? sipLive.status?.models?.tts || selectedTts?.label || sipSettings?.tts_model || "Server TTS" : useTts ? selectedTts?.label || "—" : "Skipped · text output"}
           </dd>
           <dt>Session</dt>
           <dd>{useSip ? sipLive.status?.call_id || "—" : run || "—"}</dd>

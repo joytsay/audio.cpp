@@ -351,7 +351,6 @@ void SipPipeline::respond_text(std::string caller) {
     SipMonitor::get().stage("Synthesizing");
     std::cout << "Assistant: " << answer << "\nPipeline: TTS\n";
     synthesize_speech(answer, false);
-    SipMonitor::get().event("TTS_COMPLETED", config_.tts_model);
     SipMonitor::get().stage("Speaking");
     history_.emplace_back("user", caller); history_.emplace_back("assistant", answer);
     if (history_.size() > 12) history_.erase(history_.begin(), history_.begin() + 2);
@@ -367,15 +366,20 @@ void SipPipeline::synthesize_speech(const std::string& answer, bool interim) {
         else spoken += static_cast<char>(c);
     }
     std::cout << "TTS text: " << spoken << "\n";
-    std::string model = config_.tts_model; bool streaming = false;
+    std::string model = config_.tts_model, voice = config_.voice, reference_audio, reference_text; bool streaming = false;
     if (!config_.dialogue_url.empty()) {
         auto body = object(); add(body.get(), "model", model);
         const auto endpoint = config_.dialogue_url.substr(0, config_.dialogue_url.rfind("/dialogue"));
         auto settings = post(endpoint + "/tts-config", body.get(), stopping_);
         streaming = json_object_get_boolean(member(settings.get(), "streaming"));
+        if (!text(settings.get(), "voice").empty()) voice = text(settings.get(), "voice");
+        reference_audio = text(member(settings.get(), "reference"), "audio");
+        reference_text = text(member(settings.get(), "reference"), "text");
         if (!text(settings.get(), "model").empty()) model = text(settings.get(), "model");
     }
-    ivrTTS tts; tts.create(config_.audio_url, model, config_.voice);
+    SipMonitor::get().tts_model(model);
+    ivrTTS tts; tts.create(config_.audio_url, model, voice);
+    if (!reference_audio.empty()) tts.set_reference_base64(reference_audio, reference_text);
     std::vector<unsigned char> output; bool first = true;
     try { tts.run_stream(spoken, [&](const unsigned char* bytes, size_t size) {
         if (streaming) {
@@ -387,6 +391,7 @@ void SipPipeline::synthesize_speech(const std::string& answer, bool interim) {
         if (streaming && !first) { std::lock_guard<std::mutex> lock(mutex_); replies_.push_back({{}, interim, true, true}); }
         throw;
     }
+    if (!interim) SipMonitor::get().event("TTS_COMPLETED", model);
     std::lock_guard<std::mutex> lock(mutex_);
     if (streaming) replies_.push_back({{}, interim, true, true});
     else replies_.push_back({std::move(output), interim});

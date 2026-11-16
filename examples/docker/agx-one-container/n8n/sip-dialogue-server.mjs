@@ -69,15 +69,28 @@ export function createDialogueServer({ dialogue, normalizeTranscript = text => t
         const response=await fetchImpl(`${audioUrl}/v1/ui/demo-settings`,{signal,cache:'no-store'});
         if(!response.ok)throw new Error(`Could not read saved demo settings (${response.status})`);
         const saved=(await response.json()).settings||{};
-        let model=body.model,streaming=saved.tts_streaming===true;
-        if(req.url==='/tts-config'&&streaming){
-          if(!saved.tts_model_id||!saved.tts_model_family||!saved.tts_model_path)throw new Error('Save a streaming-capable TTS model in the demo settings first');
-          model=`demo-${saved.tts_model_id}-streaming`;
-          const loaded=await fetchImpl(`${audioUrl}/v1/models/load`,{method:'POST',headers:{'Content-Type':'application/json'},signal,body:JSON.stringify({id:model,family:saved.tts_model_family,path:saved.tts_model_path,task:saved.tts_model_task||'tts',mode:'streaming',load_options:saved.tts_load_options||{},session_options:saved.tts_session_options||{}})});
-          if(!loaded.ok)throw new Error(`Could not load streaming TTS (${loaded.status}): ${(await loaded.text()).slice(0,500)}`);
+        let model = body.model;
+        const streaming = saved.tts_streaming === true;
+        let reference;
+        if (req.url === '/tts-config') {
+          const selected = saved.tts_model_id && saved.tts_model_family && saved.tts_model_path;
+          if (streaming && !selected) throw new Error('Save a streaming-capable TTS model in the demo settings first');
+          if (selected) {
+            const mode = streaming ? 'streaming' : 'offline';
+            model = `demo-${saved.tts_model_id}${streaming ? "-streaming" : ""}`;
+            const loaded = await fetchImpl(`${audioUrl}/v1/models/load`, {method:'POST', headers:{'Content-Type':'application/json'}, signal, body:JSON.stringify({id:model, family:saved.tts_model_family, path:saved.tts_model_path, task:saved.tts_model_task||'tts', mode, load_options:saved.tts_load_options||{}, session_options:saved.tts_session_options||{}})});
+            if (!loaded.ok) throw new Error(`Could not load selected TTS (${loaded.status}): ${(await loaded.text()).slice(0,500)}`);
+          }
+          if (saved.tts_voice_id && !saved.tts_voice_id.startsWith('preset-')) {
+            const voices = await fetchImpl(`${audioUrl}/v1/ui/voices`, {signal, cache:'no-store'});
+            if (!voices.ok) throw new Error(`Could not read saved voices (${voices.status})`);
+            const voice = (await voices.json()).voices?.find(voice => voice.id === saved.tts_voice_id);
+            if (!voice?.audio) throw new Error('Selected reference voice is unavailable');
+            reference = {audio: voice.audio, text: saved.tts_reference_text || voice.transcript || ''};
+          }
         }
         res.setHeader('Content-Type','application/json');
-        res.end(JSON.stringify({model,streaming,vad_end_silence_ms:saved.vad_end_silence_ms??2000}));return;
+        res.end(JSON.stringify({model, streaming, reference, voice: saved.tts_voice_id?.startsWith('preset-') ? (saved.tts_voice_id === 'preset-wangSG9s' ? 'WangSG' : 'lingCL') : undefined, vad_end_silence_ms:saved.vad_end_silence_ms??2000}));return;
       }
       if (typeof body.text !== 'string' || !body.text.trim() || typeof body.model !== 'string' || typeof body.prompt !== 'string' || !Array.isArray(body.messages) || body.messages.length > 12 || body.messages.some(m => !['user', 'assistant'].includes(m.role) || typeof m.content !== 'string')) throw new Error('Invalid SIP dialogue request');
       const signal = controller.signal;

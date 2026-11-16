@@ -72,7 +72,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
     apt-get update && \
     apt-get install -y --no-install-recommends \
-        gcc-${GCC_VERSION} g++-${GCC_VERSION} cmake ca-certificates ccache
+        gcc-${GCC_VERSION} g++-${GCC_VERSION} cmake git ca-certificates ccache
 
 ENV CC=gcc-${GCC_VERSION} CXX=g++-${GCC_VERSION} CUDAHOSTCXX=g++-${GCC_VERSION}
 ENV CCACHE_DIR=/root/.cache/ccache CCACHE_MAXSIZE=10G CCACHE_COMPILERCHECK=content
@@ -109,6 +109,7 @@ RUN --mount=type=cache,target=/app/build,sharing=locked \
     if [ "${CUDA_DOCKER_ARCH}" != "default" ]; then \
         ADDITIONAL_CMAKE_ARGS="-DCMAKE_CUDA_ARCHITECTURES=${CUDA_DOCKER_ARCH}"; \
     fi && \
+    if [ "${BUILD_JOBS}" = "0" ]; then BUILD_JOBS="$(nproc)"; fi && \
     mkdir -p build/webui/native/dist && \
     cp ./webui/native/dist/index.html build/webui/native/dist/index.html && \
     cmake -S . -B build \
@@ -118,6 +119,7 @@ RUN --mount=type=cache,target=/app/build,sharing=locked \
         -DCMAKE_CUDA_COMPILER_LAUNCHER=ccache \
         -DAUDIOCPP_MODEL_SET="${AUDIOCPP_MODEL_SET}" \
         -DAUDIOCPP_MODELS="${AUDIOCPP_MODELS}" \
+        -DAUDIOCPP_BLUEMAGPIE_BUILD_JOBS="${BUILD_JOBS}" \
         -DENGINE_ENABLE_CPU_ALL_VARIANTS="${AUDIOCPP_CPU_ALL_VARIANTS}" \
         -DENGINE_ENABLE_CUDA=ON \
         -DENGINE_ENABLE_CUDA_GRAPHS=ON \
@@ -131,7 +133,6 @@ RUN --mount=type=cache,target=/app/build,sharing=locked \
         -DENGINE_BUILD_WARMBENCH=OFF \
         ${ADDITIONAL_CMAKE_ARGS} \
         -DCMAKE_EXE_LINKER_FLAGS=-Wl,--allow-shlib-undefined && \
-    if [ "${BUILD_JOBS}" = "0" ]; then BUILD_JOBS="$(nproc)"; fi && \
     cmake --build build --parallel "${BUILD_JOBS}" \
         --target audiocpp_cli \
         --target audiocpp_server \
@@ -139,9 +140,10 @@ RUN --mount=type=cache,target=/app/build,sharing=locked \
         --target audiocpp_gguf \
         --target model_perf && \
     mkdir -p /app/lib /app/full && \
-    find build -name "*.so*" -exec cp -P {} /app/lib \; && \
+    find build -name "*.so*" ! -path "build/bluemagpie-*/*" ! -path "build/bin/bluemagpie/*" -exec cp -P {} /app/lib \; && \
     cp build/bin/audiocpp_cli build/bin/audiocpp_server build/bin/audiocpp_model_manager build/bin/audiocpp_gguf \
        build/bin/model_perf /app/full/ && \
+    if [ ! -d build/bin/bluemagpie ]; then :; else cp -a build/bin/bluemagpie /app/full/; fi && \
     cp .devops/entrypoint.sh /app/full/entrypoint.sh && \
     chmod +x /app/full/entrypoint.sh
 

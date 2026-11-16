@@ -446,6 +446,19 @@ void validate_snapshot_download(const json::Value & value, std::string_view path
     if (const auto * gated = value.find("gated")) {
         (void) require_spec_bool(*gated, std::string(path) + ".gated");
     }
+    if (const auto * sources = value.find("file_sources")) {
+        require_spec_object(*sources, std::string(path) + ".file_sources");
+        for (const auto & [name, source] : sources->as_object()) {
+            const auto file_path = std::string(path) + ".file_sources." + name;
+            require_spec_object(source, file_path);
+            (void) require_spec_string(require_spec_field(source, "repo", file_path), file_path + ".repo");
+            (void) require_spec_string(require_spec_field(source, "path", file_path), file_path + ".path");
+            if (const auto * revision = source.find("revision")) {
+                (void) require_spec_string(*revision, file_path + ".revision");
+            }
+        }
+    }
+
 }
 
 void validate_download(const json::Value & value, std::string_view path) {

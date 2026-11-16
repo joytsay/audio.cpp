@@ -42,6 +42,8 @@ int main() {
           "packages":[{"id":"demo","display_name":"Demo","format":"gguf",
             "precision":"f32","target_directory":"Demo",
             "files":["a.gguf","b.gguf","fallback.gguf","interrupted.gguf"]},
+            {"id":"demo_aux","display_name":"Paired encoder","format":"gguf","precision":"f32","target_directory":"Paired",
+             "files":["a.gguf","encoder.ckpt"],"download":{"kind":"huggingface_snapshot","repo":"org/repo","file_sources":{"encoder.ckpt":{"repo":"other/encoder","path":"weights.ckpt","revision":"pinned"}}}},
             {"id":"demo_denied","display_name":"Denied","format":"gguf","precision":"f32","target_directory":"Denied","files":["denied.gguf"]},
             {"id":"demo_failed","display_name":"Failed","format":"gguf","precision":"f32","target_directory":"Failed","files":["failed.gguf"]}]
         })";
@@ -60,6 +62,9 @@ int main() {
                     response.set_header("X-Xet-Hash", "same-etag");
                 }
             }
+        });
+        server.Get("/other/encoder/resolve/pinned/weights.ckpt",[&](const auto&,auto& response){
+            response.set_header("X-Linked-Size","7");response.set_header("X-Linked-ETag","encoder-etag");response.set_header("X-Repo-Commit","encoder-revision");response.set_content("encoder","application/octet-stream");
         });
         server.Get(R"(/cdn/(.*))", [&](const auto &request, auto &response) {
             std::lock_guard<std::mutex> lock(mutex);
@@ -148,6 +153,15 @@ int main() {
         }
         require(retry_limit && failed_gets == 5, "persistent read errors must stop after five attempts");
         require(!fs::exists(root / "models" / "Failed" / "failed.gguf"), "partial model must not be installed");
+        const auto auxiliary=json::parse(manager.inventory(true,"demo_aux"));
+        require(auxiliary.as_array().at(0).require("size_bytes").as_f32()==14,"auxiliary repository size is included");
+        manager.install("demo_aux",false,nullptr,nullptr);
+        std::ifstream encoder(root/"models"/"Paired"/"encoder.ckpt",std::ios::binary);
+        std::string encoder_bytes((std::istreambuf_iterator<char>(encoder)),{});
+        require(encoder_bytes=="encoder","file_sources must download from the auxiliary repository and rename locally");
+        const auto paired_manifest=json::parse_file(root/"models"/"Paired"/".audiocpp-package-demo_aux.json");
+        require(paired_manifest.require("files").require("encoder.ckpt").require("repo").as_string()=="other/encoder","auxiliary file provenance is preserved");
+        require(paired_manifest.require("resolved_revision").as_string()=="revision","auxiliary repo revision must not replace the backbone revision");
         const auto installed = json::parse(manager.inventory(true, "demo"));
         require(json::require_string(installed.as_array().at(0), "version_state") == "up_to_date",
             "metadata/manifest comparison changed");

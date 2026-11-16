@@ -24,6 +24,7 @@
 #include <string_view>
 #include <thread>
 #include <unordered_map>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -51,6 +52,12 @@ struct Package {
     std::string repo;
     std::string revision;
     bool gated = false;
+    struct FileSource {
+        std::string repo;
+        std::string path;
+        std::string revision;
+    };
+    std::unordered_map<std::string, FileSource> file_sources;
 };
 
 struct Cancelled : std::runtime_error {
@@ -125,8 +132,11 @@ std::string hf_url(const Package & package, const std::string & remote_path) {
     auto base = getenv_text("AUDIOCPP_HF_BASE_URL");
     if (base.empty()) base = "https://huggingface.co";
     while (!base.empty() && base.back() == '/') base.pop_back();
-    return base + "/" + package.repo + "/resolve/" +
-        url_encode(package.revision, false) + "/" + url_encode(remote_path, true);
+    const auto source = package.file_sources.find(remote_path);
+    const auto repo = source == package.file_sources.end() ? package.repo : source->second.repo;
+    const auto revision = source == package.file_sources.end() ? package.revision : source->second.revision;
+    const auto path = source == package.file_sources.end() ? remote_path : source->second.path;
+    return base + "/" + repo + "/resolve/" + url_encode(revision, false) + "/" + url_encode(path, true);
 }
 
 std::string modelscope_base_url() {
@@ -250,8 +260,29 @@ std::vector<Package> parse_specs(const std::vector<std::pair<std::string, std::s
                 package.revision = json::optional_string(*download, "revision", package.revision);
                 package.gated = json::optional_bool(*download, "gated", package.gated);
             }
+            const auto add_sources = [&](const json::Value * download) {
+                if (!download) return;
+                if (const auto * sources = download->find("file_sources")) {
+                    for (const auto & [name, file_source] : sources->as_object()) {
+                        (void) validate_relative_path(name, "file_sources key");
+                        if (std::find(package.files.begin(), package.files.end(), name) == package.files.end()) {
+                            throw std::runtime_error("file_sources entry is not in package files: " + name);
+                        }
+                        (void) validate_relative_path(json::require_string(file_source, "path"), "file_sources path");
+                        package.file_sources[name] = {
+                            json::require_string(file_source, "repo"),
+                            json::require_string(file_source, "path"),
+                            json::optional_string(file_source, "revision", "main")};
+                    }
+                }
+            };
+            if (const auto * defaults = root.find("package_defaults")) add_sources(defaults->find("download"));
+            add_sources(item.find("download"));
             if (package.download_kind != "huggingface_snapshot" &&
                 package.download_kind != "modelscope_snapshot") continue;
+            if (!package.file_sources.empty() && package.download_kind != "huggingface_snapshot") {
+                throw std::runtime_error("file_sources requires huggingface_snapshot");
+            }
             if (package.revision.empty()) {
                 // ModelScope's default branch is master; Hugging Face uses main.
                 package.revision = package.download_kind == "modelscope_snapshot" ? "master" : "main";
@@ -743,7 +774,7 @@ struct PackageManager::Impl {
             for (const auto & remote : package.files) {
                 const auto output = root / stripped_path(package, remote);
                 for (const auto & other_remote : other.files) {
-                    if (remote == other_remote && output == other_root / stripped_path(other, other_remote)) {
+                    if (remote == other_remote && (package.download_kind!="huggingface_snapshot"||hf_url(package,remote)==hf_url(other,other_remote)) && output == other_root / stripped_path(other, other_remote)) {
                         shared.insert(output);
                     }
                 }
@@ -876,8 +907,7 @@ std::string PackageManager::install(
         manifest["requested_revision"] = string_value(package.revision);
         std::string resolved = package.revision;
         for (const auto & [remote, info] : remote_files) {
-            (void) remote;
-            if (!info.revision.empty()) { resolved = info.revision; break; }
+            if (package.file_sources.count(remote)==0 && !info.revision.empty()) { resolved = info.revision; break; }
         }
         manifest["resolved_revision"] = string_value(resolved);
         manifest["installed_at_unix"] = number_value(static_cast<uint64_t>(std::time(nullptr)));
@@ -886,6 +916,10 @@ std::string PackageManager::install(
             json::Value::Object file;
             file["size"] = info.size ? number_value(*info.size) : json::Value::make_null();
             file["etag"] = string_value(info.etag);
+            if(auto source=package.file_sources.find(remote);source!=package.file_sources.end()){
+                file["repo"]=string_value(source->second.repo);file["path"]=string_value(source->second.path);
+                file["requested_revision"]=string_value(source->second.revision);file["resolved_revision"]=string_value(info.revision);
+            }
             files[remote] = json::Value::make_object(std::move(file));
         }
         manifest["files"] = json::Value::make_object(std::move(files));
@@ -1013,7 +1047,7 @@ std::string PackageManager::inventory(bool query_remote, const std::string & pac
                 for (const auto & file : package.files) {
                     auto info = remote_info(package, file, &ms_cache);
                     if (!info.size) size_known = false; else total += *info.size;
-                    if (revision.empty()) revision = info.revision;
+                    if (revision.empty() && package.file_sources.count(file) == 0) revision = info.revision;
                     remote.emplace(file, std::move(info));
                 }
                 if (size_known) row["size_bytes"] = number_value(total);

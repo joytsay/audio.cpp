@@ -4,6 +4,7 @@
 #include "sipTurn.h"
 #ifdef IVRTTS_TEST_PIPELINE
 #include "sipPipeline.h"
+#include "sipMonitor.h"
 #endif
 #include <json-c/json.h>
 #include <arpa/inet.h>
@@ -154,6 +155,7 @@ public:
     std::string url, wav, pcm;
     std::filesystem::path player_audio;
     std::atomic<bool> early{false}, bad_catalog{false};
+    std::atomic<bool> custom_reference{false};
     std::atomic<bool> streaming_tts{false}, stream_hold{false}, stream_first{false};
     std::atomic<bool> pipeline_mode{false}, rag_fails{false}, stt_waits{false}, dialogue_fails{false}, dialogue_progress{false};
     Server() {
@@ -239,7 +241,7 @@ private:
                     "\r\nConnection: close\r\nContent-Type: application/json\r\n\r\n" + json);
             };
             if (route == "/settings") { respond(R"({"vad_end_silence_ms":2000})"); return; }
-            if (route == "/tts-config") { respond(streaming_tts ? R"({"model":"streaming-test","streaming":true})" : R"({"model":"test-tts","streaming":false})"); return; }
+            if (route == "/tts-config") { if (custom_reference) { respond(R"({"model":"bluemagpie-test","streaming":false,"reference":{"audio":"UklGRg==","text":""}})"); return; } respond(streaming_tts ? R"({"model":"streaming-test","streaming":true})" : R"({"model":"test-tts","streaming":false})"); return; }
             if (route == "/normalize") { respond(body); return; }
             if (route == "/dialogue") {
                 auto input = parse(body);
@@ -907,6 +909,7 @@ void test_env(const std::filesystem::path& root) {
 }
 #ifdef IVRTTS_TEST_PIPELINE
 void test_pipeline() {
+    Temp monitor; setenv("SIP_MONITOR_DIR", monitor.path.c_str(), 1);
     Server server; server.pipeline_mode = true;
     SipPipelineConfig config;
     config.audio_url = server.url; config.llm_url = server.url + "/v1"; config.llm_model = "test-llm";
@@ -1003,6 +1006,33 @@ void test_pipeline() {
             if(pipeline.take_reply(chunk,nullptr,&chunked,&done))completed=chunked&&done;else std::this_thread::sleep_for(10ms);
         }
         check(completed,"SIP speech stream missing its completion marker");server.streaming_tts=false;
+        server.custom_reference = true;
+        pipeline.resume(); check(pipeline.submit_text("Where is the office?"), "cloned text turn rejected");
+        reply(pipeline);
+        bool cloned = false;
+        for (const auto& request : server.pipeline_requests()) {
+            if (request.first != "/v1/audio/speech") continue;
+            auto body = parse(request.second);
+            if (field(body.get(), "model") != "bluemagpie-test") continue;
+            json_object* ref = nullptr;
+            check(json_object_object_get_ex(body.get(), "voice_ref", &ref), "SIP lost saved clone reference");
+            check(field(ref, "data") == "UklGRg==", "SIP changed saved clone audio");
+            check(field(body.get(), "reference_text").empty(), "SIP requires an unnecessary clone transcript");
+            cloned = true;
+        }
+        check(cloned, "SIP did not synthesize with the selected BlueMagpie model");
+        SipMonitor::get().publish();
+        auto snapshot = parse(read_file(monitor.path / "live.json"));
+        json_object *models = nullptr, *events = nullptr;
+        check(json_object_object_get_ex(snapshot.get(), "models", &models) && field(models, "tts") == "bluemagpie-test", "SIP status still reports the default TTS");
+        check(json_object_object_get_ex(snapshot.get(), "events", &events), "SIP events missing");
+        bool correct_event = false;
+        for (size_t i = 0; i < json_object_array_length(events); ++i) {
+            auto event = json_object_array_get_idx(events, i);
+            if (field(event, "type") == "TTS_COMPLETED" && field(event, "summary") == "bluemagpie-test") correct_event = true;
+        }
+        check(correct_event, "TTS_COMPLETED still reports the default model");
+        server.custom_reference = false;
         server.dialogue_fails = true;
         pipeline.resume(); send_turn(pipeline);
         const auto deadline = Clock::now() + 6s;

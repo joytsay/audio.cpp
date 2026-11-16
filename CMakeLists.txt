@@ -1542,6 +1542,16 @@ audiocpp_add_model(voxcpm2
         engine::models::voxcpm2::make_voxcpm2_loader
 )
 
+if (UNIX)
+    audiocpp_add_model(bluemagpie
+        SOURCES
+            src/models/bluemagpie/session.cpp
+            src/models/bluemagpie/speaker.cpp
+        INCLUDES engine/models/bluemagpie/loader.h
+        LOADERS engine::models::bluemagpie::make_bluemagpie_loader
+    )
+endif()
+
 audiocpp_add_model(voxcpm1
     SOURCES
         src/community_models/voxcpm1/assets.cpp
@@ -2809,6 +2819,10 @@ elseif (AUDIOCPP_MODEL_SET STREQUAL "custom")
     list(REMOVE_DUPLICATES AUDIOCPP_ENABLED_MODELS)
 else()
     message(FATAL_ERROR "AUDIOCPP_MODEL_SET must be full, core, or custom")
+endif()
+
+if ("bluemagpie" IN_LIST AUDIOCPP_ENABLED_MODELS AND UNIX)
+    include("${CMAKE_CURRENT_SOURCE_DIR}/tools/bluemagpie/backend.cmake")
 endif()
 
 set(AUDIOCPP_REGISTRY_INCLUDE_CONTENT "")
@@ -5416,4 +5430,10 @@ if (ENGINE_BUILD_EXAMPLES)
     if (ENGINE_ENABLE_OPENMP)
         target_link_libraries(model_spec_download_demo PRIVATE OpenMP::OpenMP_CXX)
     endif()
+endif()
+
+if ("bluemagpie" IN_LIST AUDIOCPP_ENABLED_MODELS AND UNIX AND
+   EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/bluemagpie/smoke.cpp")
+    add_executable(bluemagpie_smoke EXCLUDE_FROM_ALL tests/bluemagpie/smoke.cpp)
+    target_link_libraries(bluemagpie_smoke PRIVATE engine_runtime ggml)
 endif()

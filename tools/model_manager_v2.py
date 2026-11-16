@@ -252,7 +252,9 @@ def download_url(package: PackageRecord, remote_path: str) -> str:
     revision = package_revision(package)
     if package_kind(package) == "modelscope_snapshot":
         return ms_url(repo, revision, remote_path)
-    return hf_url(repo, revision, remote_path)
+    source = package.download.get("file_sources", {}).get(remote_path, {})
+    return hf_url(source.get("repo", repo), source.get("revision", "main") if source else revision,
+                  source.get("path", remote_path))
 
 
 # ModelScope resolve HEAD responses carry no Content-Length or ETag, so
@@ -332,7 +334,7 @@ def check_remote_file(package: PackageRecord, remote_path: str) -> RemoteFileInf
         return check_ms_remote_file(package, remote_path)
     repo = package.download["repo"]
     revision = package_revision(package)
-    request = Request(hf_url(repo, revision, remote_path), headers=http_headers(), method="HEAD")
+    request = Request(download_url(package, remote_path), headers=http_headers(), method="HEAD")
     try:
         with urlopen(request, timeout=60) as response:
             size = response.headers.get("Content-Length")
@@ -441,7 +443,9 @@ def write_package_manifest(
         "resolved_revision": resolved_revision,
         "installed_at_unix": int(time.time()),
         "files": {
-            name: {"size": info.size, "etag": info.etag}
+            name: {"size": info.size, "etag": info.etag,
+                   **({**package.download["file_sources"][name], "resolved_revision": info.revision}
+                      if name in package.download.get("file_sources", {}) else {})}
             for name, info in remote_files.items()
         },
     }

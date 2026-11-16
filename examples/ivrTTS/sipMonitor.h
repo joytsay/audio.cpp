@@ -49,6 +49,9 @@ public:
     void stage(const std::string& value) {
         std::lock_guard<std::mutex> lock(mutex_); stage_ = value;
     }
+    void tts_model(const std::string& model) {
+        std::lock_guard<std::mutex> lock(mutex_); tts_model_ = model;
+    }
     void dialogue(const std::string& source, const std::string& model) {
         std::lock_guard<std::mutex> lock(mutex_); dialogue_source_ = source; dialogue_model_ = model;
     }
@@ -97,7 +100,8 @@ public:
             auto* models = json_object_new_object();
             for (const auto& field : {std::pair{"vad", "VAD_MODEL"}, std::pair{"asr", "STT_MODEL"}, std::pair{"llm", "LLM_MODEL"}, std::pair{"tts", "TTS_MODEL"}}) {
                 const char* value = std::getenv(field.second);
-                str(models, field.first, std::string(field.first) == "llm" && !dialogue_model_.empty() ? dialogue_model_ : value ? value : "");
+                str(models, field.first, std::string(field.first) == "tts" && !tts_model_.empty() ? tts_model_ :
+                    std::string(field.first) == "llm" && !dialogue_model_.empty() ? dialogue_model_ : value ? value : "");
             }
             json_object_object_add(root, "models", models);
             auto bars = [&](const char* key, const std::deque<double>& values) {
@@ -145,7 +149,7 @@ private:
     bool enabled_ = false, active_ = false, registered_ = false;
     std::filesystem::path directory_;
     std::string instance_, call_id_, peer_, stage_ = "Waiting for registration";
-    std::string dialogue_source_, dialogue_model_;
+    std::string dialogue_source_, dialogue_model_, tts_model_;
     int64_t published_ = 0, sequence_ = 0, calls_ = 0;
     std::atomic<unsigned> input_peak_{0}, output_peak_{0};
     std::mutex mutex_;

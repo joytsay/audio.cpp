@@ -10,6 +10,8 @@ class ivrTTS {
 public:
     void create(const std::string& server_url, const std::string& model,
                 const std::string& voice = "lingCL", long timeout_seconds = 300);
+    // Reference already stored on the audio server; avoids SIP filesystem dependencies.
+    void set_reference_base64(const std::string& audio, const std::string& transcript);
     // Directory containing lingCLvocals.wav, wangSG9s.wav and prompt_text.
     void set_preset_directory(const std::string& directory);
     std::vector<unsigned char> run(const std::string& text) const;
@@ -39,7 +41,7 @@ private:
                                       const std::string& reference_fields) const;
     void speech_stream(const std::string& text, const std::string& reference_fields,
                        const AudioSink& sink, AudioMode mode, const CancelCheck& cancel = {}) const;
-    std::string url_, model_, voice_;
+    std::string url_, model_, voice_, server_reference_;
     std::string preset_directory_;
     long timeout_ = 300;
 };
