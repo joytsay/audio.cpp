@@ -224,8 +224,8 @@ if __name__=='__main__':
    if question=='FAN幾個':assert '14' in answer['reply'] and '強排 4 個' in answer['reply'] and '間面 10 個' in answer['reply']
   import base64
   assert api('/webhook/ivr-scenarios')['scenarios']==[]
-  content='Q: LAB-ZETA 包材何時回收？\nA: LAB-ZETA 每週三回收，聯絡分機 7654。'
-  scenarioUpload={'name':'LAB-ZETA 上傳測試','files':[{'name':'服務.txt','data':base64.b64encode(content.encode()).decode()}]}
+  content='\ufeffQuestion,Answer\r\nLAB-ZETA 包材何時回收？,"LAB-ZETA 每週三回收，聯絡分機 7654。"\r\n'
+  scenarioUpload={'name':'LAB-ZETA 上傳測試','files':[{'name':'服務.csv','data':base64.b64encode(content.encode()).decode()}]}
   embedding_fail=True
   savedOnly=api('/webhook/ivr-add-scenario',scenarioUpload)
   assert savedOnly['indexed'] is False and savedOnly['scenario']['qaCount']>=1,savedOnly

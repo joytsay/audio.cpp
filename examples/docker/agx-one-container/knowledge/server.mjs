@@ -2,6 +2,7 @@ import {createScenarioStore} from './scenarios.mjs';
 import {createServer} from 'node:http';
 import {promises as fs,constants} from 'node:fs';
 import path from 'node:path';
+import {Readable} from 'node:stream';
 import os from 'node:os';
 import {execFile as execFileCallback} from 'node:child_process';
 import {promisify} from 'node:util';
@@ -15,12 +16,30 @@ import {createWorkOrderStore} from './work-orders.mjs';
 const execFile=promisify(execFileCallback);
 export const filenames={prompt:'prompt.csv',word:'情境模擬_20261105.docx',excel:'CSD資料庫.xlsx',pdf:'(備品維修)PY252-0059-工單-20260602-2工-CL、JC.pdf'};
 function cellText(cell){const v=cell.result??cell.value;if(v instanceof Date)return v.toISOString().slice(0,10);if(typeof v==='number'&&/^0+$/.test(cell.numFmt||''))return String(v).padStart(cell.numFmt.length,'0');return cell.text?.trim()||'';}
-export async function readWorkbook(file){
-  const workbook=new ExcelJS.Workbook();await workbook.xlsx.readFile(file);const sheets=[];
-  for(const sheet of workbook.worksheets){let headers;const rows=[];sheet.eachRow((row,rowNumber)=>{
+function worksheetRows(sheet){
+  let headers;const rows=[];sheet.eachRow((row,rowNumber)=>{
     if(!headers){headers=Array.from({length:sheet.columnCount},(_,i)=>cellText(row.getCell(i+1))||`欄位${i+1}`);return;}
     const fields={};headers.forEach((name,i)=>fields[name]=cellText(row.getCell(i+1)));if(Object.values(fields).some(Boolean))rows.push({row:rowNumber,fields});
-  });sheets.push({name:sheet.name,rows});}return sheets;
+  });return {name:sheet.name,rows};
+}
+export async function readWorkbook(file){
+  const workbook=new ExcelJS.Workbook();await workbook.xlsx.readFile(file);return workbook.worksheets.map(worksheetRows);
+}
+export async function readCsv(file){
+  const text=new TextDecoder('utf-8',{fatal:true}).decode(await fs.readFile(file));
+  const workbook=new ExcelJS.Workbook();
+  const sheet=await workbook.csv.read(Readable.from([text]),{map:value=>value,parserOptions:{ignoreEmpty:true}});
+  return worksheetRows(sheet);
+}
+function referenceRow(row){
+  const entries=Object.entries(row.fields).filter(([,value])=>value);
+  const question=entries.find(([key])=>/^(q|question|問題)$/i.test(key));
+  const answer=entries.find(([key])=>/^(a|answer|答案|回答)$/i.test(key));
+  if(question&&answer){
+    const extra=entries.filter(entry=>entry!==question&&entry!==answer).map(([key,value])=>`${key}：${value}`).join('；');
+    return `Q: ${question[1]}\nA: ${answer[1]}${extra?'\n'+extra:''}`;
+  }
+  return entries.map(([key,value])=>`${key}：${value}`).join('；');
 }
 export async function extractPdf(file,{languages=process.env.OCR_LANGUAGES||'chi_tra+eng',run=execFile}={}){
   const dir=await fs.mkdtemp(path.join(os.tmpdir(),'ivr-knowledge-pdf-'));
@@ -67,6 +86,7 @@ export function createKnowledgeStore({root=process.env.KNOWLEDGE_ROOT||'/files',
   const scenarios=createScenarioStore({root:scenarioRoot,extract:async(file,upload)=>{
     if(upload.extension==='.pdf')return [{...await pdf(file)}];
     if(upload.extension==='.docx'){const result=await mammoth.extractRawText({path:file});return [{text:result.value,extraction:'docx',kind:/情境\s*\d/.test(result.value)?'scenario_examples':'uploaded_reference'}];}
+    if(upload.extension==='.csv'){const sheet=await readCsv(file);return sheet.rows.map(row=>({text:referenceRow(row),row:row.row,topic:`第 ${row.row} 列`,extraction:'csv'}));}
     if(upload.extension==='.xlsx')return (await readWorkbook(file)).flatMap(sheet=>sheet.rows.map(row=>({text:Object.entries(row.fields).filter(([,value])=>value).map(([key,value])=>`${key}：${value}`).join('；'),sheet:sheet.name,row:row.row,topic:`${sheet.name} 第 ${row.row} 列`,extraction:'xlsx'})));
     const bytes=await fs.readFile(file);const text=new TextDecoder('utf-8',{fatal:true}).decode(bytes);return [{text,extraction:'text'}];
   }});

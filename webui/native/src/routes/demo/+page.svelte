@@ -3549,10 +3549,10 @@
           {#if scenarioMode === "add-scenario"}
             <label>Scenario name<input aria-label="New scenario name" bind:value={newScenarioName} maxlength="120" disabled={knowledgeUploading} /></label>
             <label class="audio-choice">Choose documents<input
-              class="audio-file-input" aria-label="Scenario documents" type="file" multiple accept=".pdf,.docx,.xlsx,.txt,.md"
+              class="audio-file-input" aria-label="Scenario documents" type="file" multiple accept=".pdf,.docx,.xlsx,.csv,.txt,.md"
               disabled={knowledgeUploading} on:change={(event) => chooseKnowledgeFiles(event.currentTarget.files)}
             /></label>
-            <small>PDF, DOCX, XLSX, TXT, Markdown · up to 8 files, 10 MiB total</small>
+            <small>PDF, DOCX, XLSX, CSV, TXT, Markdown · up to 8 files, 10 MiB total</small>
             {#each newScenarioFiles as file}<p>{file.name} · {Math.ceil(file.size / 1024)} KB</p>{/each}
             <button disabled={knowledgeUploading || !newScenarioName.trim() || !newScenarioFiles.length} on:click={uploadKnowledgeScenario}>
               {knowledgeUploading ? "Adding scenario…" : "Add scenario"}

@@ -986,7 +986,7 @@
         1840
       ],
       "parameters": {
-        "jsCode": "const body=$input.first().json.body;\nif(!body||typeof body.name!=='string'||!body.name.trim()||body.name.length>120||!Array.isArray(body.files)||!body.files.length||body.files.length>8)throw new Error('Scenario name and 1–8 files are required');\nif(body.files.some(f=>!f||typeof f.name!=='string'||typeof f.data!=='string'||!f.data.length||!/^.+\\.(pdf|docx|xlsx|txt|md)$/i.test(f.name)))throw new Error('Choose PDF, DOCX, XLSX, TXT or Markdown files');\nif(body.files.reduce((n,f)=>n+f.data.length,0)>14*1024*1024)throw new Error('Scenario upload is too large');\nreturn [{json:{name:body.name.trim(),files:body.files}}];"
+        "jsCode": "const body=$input.first().json.body;\nif(!body||typeof body.name!=='string'||!body.name.trim()||body.name.length>120||!Array.isArray(body.files)||!body.files.length||body.files.length>8)throw new Error('Scenario name and 1–8 files are required');\nif(body.files.some(f=>!f||typeof f.name!=='string'||typeof f.data!=='string'||!f.data.length||!/^.+\\.(pdf|docx|xlsx|csv|txt|md)$/i.test(f.name)))throw new Error('Choose PDF, DOCX, XLSX, CSV, TXT or Markdown files');\nif(body.files.reduce((n,f)=>n+f.data.length,0)>14*1024*1024)throw new Error('Scenario upload is too large');\nreturn [{json:{name:body.name.trim(),files:body.files}}];"
       }
     },
     {
@@ -1554,6 +1554,6 @@
   "pinData": {},
   "tags": [],
   "meta": {
-    "ivrWorkflowRevision": 9
+    "ivrWorkflowRevision": 10
   }
 }

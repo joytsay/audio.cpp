@@ -25,7 +25,7 @@ export async function listKnowledgeScenarios(): Promise<KnowledgeScenario[]> {
 export async function addKnowledgeScenario(name: string, files: File[], signal: AbortSignal): Promise<ScenarioUploadResult> {
   if(!name.trim()||name.trim().length>120)throw new Error('Enter a scenario name of 1–120 characters.');
   if(!files.length||files.length>8)throw new Error('Choose 1–8 files.');
-  if(files.some(file=>!file.size||!/\.(pdf|docx|xlsx|txt|md)$/i.test(file.name)))throw new Error('Choose PDF, DOCX, XLSX, TXT or Markdown files.');
+  if(files.some(file=>!file.size||!/\.(pdf|docx|xlsx|csv|txt|md)$/i.test(file.name)))throw new Error('Choose PDF, DOCX, XLSX, CSV, TXT or Markdown files.');
   if(files.reduce((sum,file)=>sum+file.size,0)>10*1024*1024)throw new Error('Files must total 10 MiB or less.');
   const encoded=[];
   for(const file of files){

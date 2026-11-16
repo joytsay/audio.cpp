@@ -14,6 +14,9 @@ try{
  };
  const result=await addKnowledgeScenario('新情境',[new File([content],'政策.txt')],new AbortController().signal);
  assert.equal(result.scenario.qaCount,3);assert.equal(Buffer.from(body.files[0].data,'base64').toString(),content);
+ const csv='Question,Answer\n保固多久？,十二個月\n';
+ await addKnowledgeScenario('CSV 情境',[new File([csv],'政策.CSV')],new AbortController().signal);
+ assert.equal(body.files[0].name,'政策.CSV');assert.equal(Buffer.from(body.files[0].data,'base64').toString(),csv);
  await assert.rejects(addKnowledgeScenario('',[],new AbortController().signal),/name/);
  await assert.rejects(addKnowledgeScenario('new',[new File(['data'],'bad.exe')],new AbortController().signal),/Choose PDF/);
  await assert.rejects(addKnowledgeScenario('new',[new File([new Uint8Array(10*1024*1024+1)],'big.txt')],new AbortController().signal),/10 MiB/);

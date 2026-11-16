@@ -55,6 +55,19 @@ try{
  const corruptedOffice=Buffer.from(await fs.readFile(path.join(dir,filenames.word)));
  for(let at=0;at+46<corruptedOffice.length;at++)if(corruptedOffice.readUInt32LE(at)===0x02014b50&&corruptedOffice.readUInt32LE(at+24)>0){corruptedOffice.writeUInt32LE(0,at+24);break;}
  await assert.rejects(scenarioStore.addScenario({name:'Unsafe archive',files:[{name:'bad.docx',data:corruptedOffice.toString('base64')}]}),/Office archive/);
+ const csv='\ufeffQuestion,Answer,Code\r\n"CSV 保固多久？","維修保固十二個月，含零件。\n請保留收據與 ""FAN"" 標籤。",00123\r\n';
+ await scenarioStore.addScenario({name:'CSV Q/A',files:[encoded('保固.CSV',csv)]});
+ await scenarioStore.addScenario({name:'CSV records',files:[encoded('設備.csv','設備編號,數量\n000456,02\n')]});
+ await scenarioStore.addScenario({name:'CSV 中文 Q/A',files:[encoded('問題.csv','問題,答案\n服務時間？,星期三下午\n')]});
+ const csvDocuments=(await loadedAfterRestart.documents('CSV 保固多久')).documents;
+ const csvQa=csvDocuments.find(d=>d.source==='保固.CSV'&&d.question==='CSV 保固多久？');
+ assert.ok(csvQa);assert.ok(csvQa.answer.includes('十二個月，含零件。\n請保留收據與 "FAN" 標籤。'));
+ assert.ok(csvQa.answer.includes('Code：00123'),'CSV preserves leading zeros and extra columns');
+ assert.ok(csvDocuments.some(d=>d.source==='設備.csv'&&d.answer.includes('設備編號：000456；數量：02')));
+ assert.ok(csvDocuments.some(d=>d.source==='問題.csv'&&d.question==='服務時間？'&&d.answer.includes('星期三下午')));
+ await assert.rejects(scenarioStore.addScenario({name:'Malformed CSV',files:[encoded('broken.csv','Q,A\n"unclosed,answer')]}),/parse|quote/i);
+ await assert.rejects(scenarioStore.addScenario({name:'Invalid encoding',files:[{name:'bad.csv',data:Buffer.from([0xff,0xfe,0x41]).toString('base64')}]}),/encod|UTF/i);
+ console.log('PASS CSV Q/A and reference rows, UTF-8 BOM, quoted commas/quotes, multiline answers, leading zeros, persistence and malformed-input rejection');
  const pdfScenario=await scenarioStore.addScenario({name:'PDF 文件',files:[{name:'維修.pdf',data:(await fs.readFile(path.join(dir,filenames.pdf))).toString('base64')}]});
  assert.ok(pdfScenario.scenario.qaCount>0);
  const sessionId='single-followup';
