@@ -84,3 +84,12 @@ The production webhook `/webhook/ivr-add-scenario` runs **Validate scenario file
 Original uploads and Q/A manifests persist at `/data/scenarios/<id>/` in `audiocpp-knowledge-data`. Normal knowledge retrieval includes these documents after restarts. Uploads add reference knowledge; they do not insert work orders into the Data Table. Selecting an uploaded scenario enables the n8n dialogue source. The original three source documents remain unchanged.
 
 Local upload/client checks: `node webui/native/tests/knowledge-scenarios.mjs`; the isolated n8n workflow runtime check also verifies upload, indexing retry, listing and a later caller question grounded in the uploaded file.
+
+## Remove an uploaded scenario
+
+On the demo page, select an uploaded scenario in **Scenario**, then click
+**Remove scenario**. This calls `/webhook/ivr-delete-scenario` in the same
+workflow and deletes that scenario's uploaded files and saved Q/A. Fresh RAG
+executions rebuild their vector store from the remaining documents, so deleted
+Q/A is excluded from future retrievals. Existing conversation text is retained.
+The three bundled demo scenarios and the original knowledge documents are preserved.

@@ -105,6 +105,7 @@ export function createKnowledgeStore({root=process.env.KNOWLEDGE_ROOT||'/files',
   return {
     addScenario:input=>scenarios.add(input),
     listScenarios:()=>scenarios.list(),
+    removeScenario:id=>scenarios.remove(id),
     registerTurn:input=>orders.register(input),
     prepareWorkOrder:sessionId=>orders.prepare(sessionId),
     listWorkOrders:()=>orders.list(),
@@ -142,6 +143,7 @@ export function createKnowledgeServer(store=createKnowledgeStore()){
         let body;try{body=JSON.parse(raw);}catch{throw Object.assign(Error('Invalid JSON'),{status:400});}
         data=url.pathname==='/scenarios'?await store.addScenario(body):url.pathname==='/call-turn'?await store.registerTurn(body):url.pathname==='/work-order-draft'?await store.prepareWorkOrder(body.sessionId):await store.documents(body.query||'',body.records??[]);
       }
+      else if(req.method==='DELETE'&&url.pathname.startsWith('/scenarios/'))data=await store.removeScenario(url.pathname.slice('/scenarios/'.length));
       else if(req.method!=='GET'){res.writeHead(405);res.end(JSON.stringify({error:'Method not allowed'}));return;}
       else if(url.pathname==='/health')data=await store.health();
       else if(url.pathname==='/documents')data=await store.documents(url.searchParams.get('query')||'');

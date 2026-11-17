@@ -1,6 +1,6 @@
 import {promises as fs} from 'node:fs';
 import path from 'node:path';
-import {createHash} from 'node:crypto';
+import {createHash,randomUUID} from 'node:crypto';
 import {inflateRawSync} from 'node:zlib';
 import {qaDocument} from './qa.mjs';
 
@@ -94,6 +94,19 @@ export function createScenarioStore({root=path.join(process.env.KNOWLEDGE_DATA_R
  return {
   async list(){return (await manifests()).map(metadata);},
   async documents(){return (await manifests()).flatMap(record=>record.documents);},
+  async remove(id){
+   if(typeof id!=='string'||!/^[a-f0-9]{24}$/.test(id))throw fail('Invalid uploaded scenario ID');
+   const operation=async()=>{
+    // Rename out of the manifest set before removing files, so fresh retrievals
+    // cannot read a partially deleted scenario. Add/remove share one queue.
+    const tombstone=path.join(root,`.delete-${id}-${randomUUID()}`);
+    try{await fs.rename(path.join(root,id),tombstone);}
+    catch(error){if(error.code==='ENOENT')return {id,removed:true,alreadyRemoved:true};throw error;}
+    await fs.rm(tombstone,{recursive:true,force:true});
+    return {id,removed:true};
+   };
+   const result=pending.then(operation);pending=result.catch(()=>{});return result;
+  },
   async add(input){
    const upload=validateScenarioUpload(input);
    const operation=async()=>{

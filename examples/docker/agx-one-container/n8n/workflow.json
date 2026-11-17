@@ -478,7 +478,7 @@
       ],
       "parameters": {
         "width": 2050,
-        "height": 1500,
+        "height": 1560,
         "content": "## 3. RAG · Q/A + Work Orders\nNative Data Table nodes create/reuse work_orders, upsert caller reports and read saved rows for retrieval. Original source documents and the legacy JSON backup remain unchanged.",
         "color": 6
       }
@@ -1181,6 +1181,68 @@
         1010,
         610
       ]
+    },
+    {
+      "id": "delete-scenario-webhook",
+      "name": "Remove uploaded scenario",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        70,
+        2290
+      ],
+      "webhookId": "ivr-delete-scenario",
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ivr-delete-scenario",
+        "responseMode": "responseNode",
+        "options": {}
+      }
+    },
+    {
+      "id": "validate-scenario-removal",
+      "name": "Validate scenario removal",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        400,
+        2290
+      ],
+      "parameters": {
+        "jsCode": "const id=$input.first().json.body?.id;\nif(typeof id!=='string'||!/^[a-f0-9]{24}$/.test(id))throw new Error('Invalid uploaded scenario ID');\nreturn [{json:{id}}];"
+      }
+    },
+    {
+      "id": "delete-scenario-files",
+      "name": "Delete scenario files and Q/A",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        730,
+        2290
+      ],
+      "parameters": {
+        "method": "DELETE",
+        "url": "={{ 'http://knowledge:8085/scenarios/' + $json.id }}",
+        "options": {
+          "timeout": 30000
+        }
+      }
+    },
+    {
+      "id": "scenario-removal-result",
+      "name": "Scenario removal result",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        1060,
+        2290
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {}
+      }
     }
   ],
   "connections": {
@@ -1620,6 +1682,39 @@
           }
         ]
       ]
+    },
+    "Remove uploaded scenario": {
+      "main": [
+        [
+          {
+            "node": "Validate scenario removal",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate scenario removal": {
+      "main": [
+        [
+          {
+            "node": "Delete scenario files and Q/A",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Delete scenario files and Q/A": {
+      "main": [
+        [
+          {
+            "node": "Scenario removal result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     }
   },
   "active": false,
@@ -1630,6 +1725,6 @@
   "pinData": {},
   "tags": [],
   "meta": {
-    "ivrWorkflowRevision": 11
+    "ivrWorkflowRevision": 12
   }
 }

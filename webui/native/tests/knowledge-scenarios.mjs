@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import {buildSync} from 'esbuild';
 import {readFileSync} from 'node:fs';
 const built=buildSync({entryPoints:[new URL('../src/lib/knowledge-scenarios.ts',import.meta.url).pathname],bundle:true,platform:'node',format:'esm',write:false});
-const {addKnowledgeScenario,listKnowledgeScenarios}=await import('data:text/javascript;base64,'+Buffer.from(built.outputFiles[0].text).toString('base64'));
+const {addKnowledgeScenario,listKnowledgeScenarios,removeKnowledgeScenario}=await import('data:text/javascript;base64,'+Buffer.from(built.outputFiles[0].text).toString('base64'));
 const originalFetch=globalThis.fetch;
 const scenario={id:'a'.repeat(24),name:'新情境',qaCount:3,files:[{name:'政策.txt',size:12,sha256:'hash'}],createdAt:new Date().toISOString()};
 try{
@@ -23,6 +23,15 @@ try{
  globalThis.fetch=async()=>Response.json({scenario,duplicate:true,indexed:false,index_error:'Embedding unavailable'});
  assert.equal((await addKnowledgeScenario('新情境',[new File(['text'],'政策.txt')],new AbortController().signal)).indexed,false,'saved Q/A can be retried after an indexing failure');
  globalThis.fetch=async()=>Response.json({scenarios:[scenario]});assert.equal((await listKnowledgeScenarios())[0].id,scenario.id);
+ globalThis.fetch=async(url,options)=>{
+  assert.equal(url,'/n8n/webhook/ivr-delete-scenario');assert.equal(options.method,'POST');
+  assert.deepEqual(JSON.parse(options.body),{id:scenario.id});
+  return Response.json({id:scenario.id,removed:true});
+ };
+ await removeKnowledgeScenario(scenario.id);
+ await assert.rejects(removeKnowledgeScenario('maintenance'),/uploaded scenario/);
+ globalThis.fetch=async()=>Response.json({id:scenario.id,removed:false});
+ await assert.rejects(removeKnowledgeScenario(scenario.id),/confirm removal/);
  globalThis.fetch=async()=>new Response('Not found',{status:404});await assert.rejects(listKnowledgeScenarios(),/publish GeoVision/);
 }finally{globalThis.fetch=originalFetch;}
 const workflow=JSON.parse(readFileSync(new URL('../../../examples/docker/agx-one-container/n8n/workflow.json',import.meta.url)));
@@ -33,4 +42,6 @@ assert.equal(nodes.get('Index scenario Q/A').parameters.workflowId.value,'ivrWor
 assert.equal(nodes.get('Index scenario Q/A').parameters.workflowInputs.value.operation,'retrieve');
 assert.equal(nodes.get('Index scenario Q/A').onError,'continueRegularOutput');
 assert.equal(nodes.get('List uploaded scenarios').parameters.httpMethod,'GET');
+assert.equal(nodes.get('Remove uploaded scenario').parameters.path,'ivr-delete-scenario');
+assert.equal(nodes.get('Delete scenario files and Q/A').parameters.method,'DELETE');
 console.log('PASS scenario upload encoding, file limits, workflow errors, persisted listing and same-workflow Q/A indexing branch');

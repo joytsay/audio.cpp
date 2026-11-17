@@ -70,6 +70,19 @@ try{
  console.log('PASS CSV Q/A and reference rows, UTF-8 BOM, quoted commas/quotes, multiline answers, leading zeros, persistence and malformed-input rejection');
  const pdfScenario=await scenarioStore.addScenario({name:'PDF 文件',files:[{name:'維修.pdf',data:(await fs.readFile(path.join(dir,filenames.pdf))).toString('base64')}]});
  assert.ok(pdfScenario.scenario.qaCount>0);
+ // Removing an upload deletes its directory and excludes its Q/A after restart.
+ const scenarioIds=(await scenarioStore.listScenarios()).map(item=>item.id);
+ await assert.rejects(scenarioStore.removeScenario('../outside'),/Invalid uploaded/);
+ await assert.rejects(scenarioStore.removeScenario('maintenance'),/Invalid uploaded/);
+ assert.equal((await scenarioStore.removeScenario(scenario.scenario.id)).removed,true);
+ await assert.rejects(fs.access(path.join(scenarioRoot,scenario.scenario.id)),{code:'ENOENT'});
+ assert.deepEqual((await loadedAfterRestart.listScenarios()).map(item=>item.id),scenarioIds.filter(id=>id!==scenario.scenario.id));
+ assert.ok(!(await loadedAfterRestart.documents('LAB-ZETA')).documents.some(document=>document.scenario_id===scenario.scenario.id));
+ assert.equal((await scenarioStore.removeScenario(scenario.scenario.id)).alreadyRemoved,true,'removal retries are safe');
+ const readd=scenarioStore.addScenario(upload),removeAgain=scenarioStore.removeScenario(scenario.scenario.id);
+ assert.equal((await readd).duplicate,false);await removeAgain;
+ assert.ok(!(await scenarioStore.listScenarios()).some(item=>item.id===scenario.scenario.id),'add/remove share a queue');
+ console.log('PASS uploaded scenario deletion, files/Q/A removal, restart persistence, retry, concurrent add/remove and protection of other sources');
  const sessionId='single-followup';
  const opener=orders.register({sessionId,text:'我增加工单。'});
  assert.equal(opener.tool,'retrieve_knowledge');assert.equal(opener.report_reply.match(/？/g).length,1);
@@ -152,6 +165,12 @@ try{
    assert.equal((await post('/documents',{query:'最新工單',records:[{}]})).status,400);
    for(const method of ['PATCH','PUT','DELETE'])assert.equal((await fetch(base+'/work-orders',{method})).status,405);
    assert.equal((await fetch(base+'/etc/passwd')).status,404);
+   const httpScenario=await store.addScenario({name:'HTTP removal',files:[encoded('http.txt','Q: HTTP topic?\nA: HTTP answer.')]});
+   const removed=await fetch(base+'/scenarios/'+httpScenario.scenario.id,{method:'DELETE'});
+   assert.equal(removed.status,200);assert.equal((await removed.json()).removed,true);
+   assert.ok(!(await store.documents('HTTP topic')).documents.some(document=>document.scenario_id===httpScenario.scenario.id));
+   assert.equal((await fetch(base+'/scenarios/not-an-id',{method:'DELETE'})).status,400);
+
   }finally{await new Promise(resolve=>server.close(resolve));}
  }
  // Old JSON remains a read-only source; native Data Table rows override matching IDs.

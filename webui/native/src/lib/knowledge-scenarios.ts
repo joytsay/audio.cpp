@@ -12,7 +12,7 @@ async function request<T>(url: string, init: RequestInit = {}): Promise<T> {
   const raw=await response.text();let body: any;
   try { body=JSON.parse(raw); } catch { /* Report the HTTP status below. */ }
   if(!response.ok||!body){
-    const hint=response.status===404?' Update and publish GeoVision · Workflow to enable document uploads.':'';
+    const hint=response.status===404?' Update and publish GeoVision · Workflow to manage uploaded scenarios.':'';
     throw new Error(`Scenario workflow failed (${response.status}): ${body?.message||body?.error?.message||body?.error||'No JSON response'}${hint}`);
   }
   return body as T;
@@ -38,4 +38,12 @@ export async function addKnowledgeScenario(name: string, files: File[], signal: 
   const result=await request<ScenarioUploadResult>('/n8n/webhook/ivr-add-scenario',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name.trim(),files:encoded}),signal});
   if(!result.scenario?.id||!Number.isInteger(result.scenario.qaCount)||typeof result.indexed!=='boolean')throw new Error('Scenario workflow returned an invalid result.');
   return result;
+}
+
+export async function removeKnowledgeScenario(id: string): Promise<void> {
+  if(!/^[a-f0-9]{24}$/.test(id))throw new Error('Choose an uploaded scenario to remove.');
+  const result=await request<{id: string; removed: boolean}>('/n8n/webhook/ivr-delete-scenario',{
+    method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id}),
+  });
+  if(result.id!==id||result.removed!==true)throw new Error('Scenario workflow did not confirm removal.');
 }

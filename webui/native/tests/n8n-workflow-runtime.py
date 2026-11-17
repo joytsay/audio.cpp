@@ -33,7 +33,7 @@ def knowledge_api(path,body=None):
  request=urllib.request.Request(knowledge_url+path,data=json.dumps(body,ensure_ascii=False).encode() if body is not None else None,headers={'Content-Type':'application/json'})
  with urllib.request.urlopen(request,timeout=30) as response:return json.load(response)
 
-calls=[];embedding=[];embedding_fail=False
+calls=[];embedding=[];embedding_fail=False;scenario_removed=False
 class Mock(http.server.BaseHTTPRequestHandler):
  def log_message(self,*a):pass
  def send(self,data,status=200):
@@ -55,8 +55,12 @@ class Mock(http.server.BaseHTTPRequestHandler):
    # the reported model failure. Routing, saving and factual replies must still work.
    msg={'role':'assistant','content':'請提供最新工單的詳細信息，我會查詢並列出最新的工單。'}
    if 'LAB-ZETA' in current_text:
-    assert '7654' in current,'uploaded Q/A was not retrieved into agent context'
-    msg={'role':'assistant','content':'LAB-ZETA 每週三回收，聯絡分機 7654。'}
+    if scenario_removed:
+     assert '每週三回收' not in current,'removed scenario leaked into fresh retrieval'
+     msg={'role':'assistant','content':'沒有查到 LAB-ZETA 的服務資料。'}
+    else:
+     assert '7654' in current,'uploaded Q/A was not retrieved into agent context'
+     msg={'role':'assistant','content':'LAB-ZETA 每週三回收，聯絡分機 7654。'}
    return self.send({'id':'chat-check','object':'chat.completion','created':int(time.time()),'model':'fixture-model','choices':[{'index':0,'message':msg,'finish_reason':'tool_calls' if msg.get('tool_calls') else 'stop'}],'usage':{'prompt_tokens':10,'completion_tokens':10,'total_tokens':20}})
   raise Exception(self.path)
 server=http.server.ThreadingHTTPServer(('127.0.0.1',0),Mock);threading.Thread(target=server.serve_forever,daemon=True).start()
@@ -90,6 +94,7 @@ if __name__=='__main__':
    if n['name'] in ['KnowledgeMCP','Retrieve current turn']:n['parameters']['endpointUrl']=base+'/mcp/ivr-maintenance'
    if n['name'] in ['Create scenario Q/A','Read saved scenarios']:n['parameters']['url']=knowledge_url+'/scenarios'
    if n['name']=='Load knowledge files':n['parameters']['url']=knowledge_url+'/documents'
+   if n['name']=='Delete scenario files and Q/A':n['parameters']['url']="={{ '"+knowledge_url+"/scenarios/' + $json.id }}"
    if n['name']=='Register caller turn':n['parameters']['url']=knowledge_url+'/call-turn'
    if n['name']=='Prepare work-order row':n['parameters']['url']=knowledge_url+'/work-order-draft'
   def import_fixture(data):
@@ -242,6 +247,14 @@ if __name__=='__main__':
   knowledgeAnswer=turn('uploaded-scenario-call','LAB-ZETA 包材何時回收？')
   assert '7654' in knowledgeAnswer['reply'] and '每週三' in knowledgeAnswer['reply']
   assert any('LAB-ZETA' in str(batch['input']) for batch in embedding),'upload did not trigger embedding'
+  removed=api('/webhook/ivr-delete-scenario',{'id':added['scenario']['id']})
+  assert removed['removed'] is True and api('/webhook/ivr-scenarios')['scenarios']==[]
+  assert api('/webhook/ivr-delete-scenario',{'id':added['scenario']['id']})['alreadyRemoved'] is True
+  assert not any(document.get('scenario_id')==added['scenario']['id'] for document in knowledge_api('/documents',{'query':'LAB-ZETA'})['documents'])
+  scenario_removed=True
+  removedAnswer=turn('deleted-scenario-call','LAB-ZETA 包材何時回收？')
+  assert '7654' not in removedAnswer['reply'] and '沒有查到' in removedAnswer['reply']
+  print('PASS native n8n removal webhook: persisted list, source documents and fresh RAG retrieval exclude deleted scenario; retries are safe')
   print('PASS workflow ID migration and isolated n8n with real knowledge service: split spoken-number report, one follow-up question then native Data Table upsert even with missing fields, table-backed retrieval and enrichment despite model refusing tools, persisted record/retry, simplified Chinese lookups, month filtering/date follow-ups, direct one-line answers and isolated call memory (synthetic LLM/embeddings/PDF OCR).')
 
  except Exception:

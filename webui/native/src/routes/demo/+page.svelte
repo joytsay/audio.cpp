@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy, tick } from "svelte";
   import { n8nDialogue, type DialogueSource } from "$lib/n8n-dialogue";
-  import {addKnowledgeScenario,listKnowledgeScenarios,type KnowledgeScenario} from "$lib/knowledge-scenarios";
+  import {addKnowledgeScenario,listKnowledgeScenarios,removeKnowledgeScenario,type KnowledgeScenario} from "$lib/knowledge-scenarios";
   import SipSidebar from "$lib/SipSidebar.svelte";
   import type { SipSettings, SipLive } from "$lib/sip";
   import PanelDivider from "$lib/PanelDivider.svelte";
@@ -503,12 +503,27 @@
   }
   let scenarioMode: "audio" | "maintenance" | "maintenance-audio" | "add-scenario" | `scenario:${string}` = "audio";
   let knowledgeScenarios: KnowledgeScenario[] = [];
-  let newScenarioName = "", newScenarioFiles: File[] = [], knowledgeUploading = false, knowledgeStatus = "";
+  let newScenarioName = "", newScenarioFiles: File[] = [], knowledgeUploading = false, knowledgeDeleting = false, knowledgeStatus = "";
   let knowledgeAborter: AbortController | null = null;
   $: selectedKnowledgeScenario = knowledgeScenarios.find(scenario => scenarioMode === `scenario:${scenario.id}`);
   async function refreshKnowledgeScenarios() {
     try { knowledgeScenarios = await listKnowledgeScenarios(); }
     catch (cause) { if (scenarioMode === "add-scenario") knowledgeStatus = String(cause); }
+  }
+  async function removeSelectedKnowledgeScenario() {
+    const scenario=selectedKnowledgeScenario;
+    if(!scenario||knowledgeUploading||knowledgeDeleting)return;
+    knowledgeDeleting=true;
+    knowledgeStatus=`Removing ${scenario.name}…`;
+    try{
+      await removeKnowledgeScenario(scenario.id);
+      knowledgeScenarios=knowledgeScenarios.filter(saved=>saved.id!==scenario.id);
+      scenarioMode="audio";
+      changeScenario();
+      scenarioStatus=`${scenario.name} removed · uploaded files and Q/A deleted`;
+      record("SCENARIO_REMOVED",scenarioStatus);
+    }catch(cause){knowledgeStatus=cause instanceof Error?cause.message:String(cause);}
+    finally{knowledgeDeleting=false;}
   }
   function chooseKnowledgeFiles(files: FileList | null) {
     newScenarioFiles = Array.from(files || []);
@@ -3543,7 +3558,7 @@
             ><select
               aria-label="Scenario"
               bind:value={scenarioMode}
-              disabled={scenarioRunning || exampleLoading || knowledgeUploading}
+              disabled={scenarioRunning || exampleLoading || knowledgeUploading || knowledgeDeleting}
               on:change={changeScenario}
               ><option value="audio">Scenario 0 · audio examples</option><option
                 value="maintenance"
@@ -3571,6 +3586,7 @@
             <p><strong>{selectedKnowledgeScenario.name}</strong> · {selectedKnowledgeScenario.qaCount} Q/A pairs</p>
             {#each selectedKnowledgeScenario.files as file}<p>{file.name}</p>{/each}
             <small>These documents are available to n8n knowledge retrieval. Speak or type a question during a call.</small>
+            <button title="Remove this scenario’s uploaded files and Q/A" disabled={knowledgeDeleting || knowledgeUploading} on:click={removeSelectedKnowledgeScenario}><Trash2 size={14} /> {knowledgeDeleting ? "Removing scenario…" : "Remove scenario"}</button>
             <p role="status">{knowledgeStatus}</p>
           {:else if isAudioScenario}
             <div class="scenario-upload">

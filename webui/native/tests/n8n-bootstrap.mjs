@@ -196,3 +196,10 @@ const intakeUpgrade=mergedWorkflowMigration(revisionTen,null,template);
 assert.ok(intakeUpgrade.nodes.some(n=>n.name==='Return fixed reply'));
 assert.equal(intakeUpgrade.connections['Register caller turn'].main[0][0].node,'Fixed reply?');
 assert.equal(mergedWorkflowMigration(intakeUpgrade,null,template),null);
+
+const revisionEleven=structuredClone(template);revisionEleven.meta.ivrWorkflowRevision=11;
+revisionEleven.nodes=revisionEleven.nodes.filter(n=>n.name!=='Remove uploaded scenario');
+const removalUpgrade=mergedWorkflowMigration(revisionEleven,null,template);
+assert.equal(removalUpgrade.meta.ivrWorkflowRevision,12);
+assert.ok(removalUpgrade.nodes.some(n=>n.name==='Remove uploaded scenario'));
+assert.equal(mergedWorkflowMigration(removalUpgrade,null,template),null);
