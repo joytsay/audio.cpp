@@ -72,11 +72,13 @@ the existing reference-audio or continuation-prompt behavior.
 
 **Streaming output:**
 
-Streaming decodes each new feature patch with the offline AudioVAE graph and a
-bounded history covering the decoder's causal receptive field. Only the new
-patch's samples are emitted, so context is neither replayed nor crossfaded.
-This avoids the separate stateful decoder graph; it uses more decoder work per
-chunk in exchange for matching the offline decoding path.
+Streaming decodes groups of four new feature patches (320 ms of audio) with the
+offline AudioVAE graph and a bounded history covering the decoder's causal
+receptive field. Grouping patches reduces repeated context decoding, providing
+more real-time headroom without changing diffusion steps or model weights.
+Only the new samples are emitted, so context is neither replayed nor crossfaded;
+the final partial group is always flushed. Set
+`--request-option stream_decode_patches=1` for the original 80 ms chunk cadence.
 
 ```bash
 ./build/linux-cpu-release/bin/audiocpp_cli \
@@ -120,6 +122,7 @@ Measured on Ubuntu 24.04 with OpenMP optimization (CPU backend):
 | `--num-inference-steps` | integer | `10` | CFM diffusion sampling steps; default 10. Must be positive. |
 | `--guidance-scale` | float | `2.0` | CFM classifier-free guidance rate. Must be nonnegative. |
 | `--request-option retry_badcase` | `true`, `false` | offline: `true`; streaming: `false` | Auto-retry when generation is detected as a bad case. Streaming ignores explicit true with a warning. |
+| `--request-option stream_decode_patches` | integer, 1–16 | `4` | Audio patches decoded together during streaming; each patch represents 80 ms. Smaller values emit more often but repeat more decoder work. |
 | `--request-option retry_badcase_max_times` | integer | `3` | Maximum total generation attempts, including the initial attempt. |
 | `--text-chunk-mode` | `default`, `tag_aware`, `japanese`, `endline` | `tag_aware` | Long-form text chunking strategy. |
 
@@ -189,6 +192,17 @@ The GGUF embeds:
 No separate tokenizer or config files are needed at inference time.
 
 ---
+
+## Demo streaming playback
+
+The demo uses one AudioWorklet PCM queue for VoxCPM1, clocked at the model's
+16 kHz output rate (adjusted for the selected playback speed). It retains a
+320 ms startup reserve and keeps playing from the same queue across model
+chunks. The Events panel shows `TTS_PLAYBACK_MODE · Continuous PCM queue` when
+this renderer is active. `TTS_BUFFER_UNDERRUN` indicates generation or delivery
+fell behind audio consumption. Origins without AudioWorklet support retain the
+scheduled-source fallback.
+
 
 ## 🔗 References
 

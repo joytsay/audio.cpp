@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 const require = createRequire(new URL('../package.json', import.meta.url));
 const { buildSync } = require('esbuild');
 const compiled = buildSync({ entryPoints: [fileURLToPath(new URL('../src/lib/speech-stream.ts', import.meta.url))], bundle: true, platform: 'node', format: 'esm', write: false });
-const { decodeSpeechChunk, speechStreamEvents, playSpeechStream } = await import(`data:text/javascript;base64,${Buffer.from(compiled.outputFiles[0].text).toString('base64')}`);
+const { decodeSpeechChunk, speechStreamEvents, playSpeechStream, speechContextOptions } = await import(`data:text/javascript;base64,${Buffer.from(compiled.outputFiles[0].text).toString('base64')}`);
 globalThis.document = { baseURI: 'https://example.test/' };
 const originalFetch = globalThis.fetch;
 const pcm = Buffer.alloc(8); [32767, -32768, 16384, -16384].forEach((n, i) => pcm.writeInt16LE(n, i * 2));
@@ -31,6 +31,10 @@ class FakeContext {
  }
 }
 try {
+ assert.deepEqual(speechContextOptions("voxcpm1"),{sampleRate:16000});
+ assert.equal(speechContextOptions("bluemagpie"),undefined);
+ assert.deepEqual(speechContextOptions("voxcpm1",0.9),{sampleRate:14400});
+ assert.deepEqual(speechContextOptions("voxcpm1",1.25),{sampleRate:20000});
  const decoded=decodeSpeechChunk(delta);
  assert.equal(decoded.frames,2);assert.equal(decoded.samples[0][1],0.5);assert.equal(decoded.samples[1][0],-1);
  assert.throws(()=>decodeSpeechChunk({...delta,sample_rate:undefined}),/metadata/);
@@ -87,23 +91,38 @@ try {
  await send(patch,0.39);
  assert.equal(jitterCtx.starts.length,4);
  for(let i=1;i<4;i++)assert.ok(Math.abs(jitterCtx.starts[i].when-jitterCtx.starts[i-1].when-0.1)<1e-9,'jitter must not insert gaps');
- await send(patch,1);await send(patch,1.12);
- assert.equal(jitterCtx.starts.length,4,'underrun rebuilds a reserve instead of playing each late patch');
- await send(patch,1.24);
- assert.equal(jitterCtx.starts.length,7);
+ // A chunk arriving with 10 ms still queued must not be treated as an
+ // underrun and held until another complete reserve has accumulated.
+ await send(patch,0.69);
+ assert.equal(jitterCtx.starts.length,5,'keep scheduling while audio is still queued');
+ assert.ok(Math.abs(jitterCtx.starts[4].when-0.7)<1e-9,'near-deadline chunk remains contiguous');
+ await send(patch,1);
+ assert.equal(jitterCtx.starts.length,6,'a genuinely late chunk resumes immediately, like the TUI PCM queue');
+ assert.ok(jitterCtx.starts[5].when<=1.003,'do not add a fixed safety gap or rebuild a 300 ms reserve');
+ await send(patch,1.12);await send(patch,1.24);
+ assert.equal(jitterCtx.starts.length,8);
  await send(patch,1.3);await send(done,1.3);wireController.close();
  const jitterSummary=await jitterPlay;
- assert.equal(jitterSummary.chunks,8);assert.equal(jitterCtx.starts.length,8);
- assert.equal(jitterSummary.audio.size,44+8*3200,'all PCM samples are retained');
+ assert.equal(jitterSummary.chunks,9);assert.equal(jitterCtx.starts.length,9);
+ assert.equal(jitterSummary.audio.size,44+9*3200,'all PCM samples are retained');
  globalThis.fetch=async()=>response([patch,done]);
  const shortCtx=new FakeContext();
  assert.equal((await playSpeechStream(shortCtx,{input:'short'},new AbortController().signal,{bufferSeconds:0.32})).chunks,1,'short replies flush at end of stream');
+ class NativeRateContext extends FakeContext {
+  sampleRate=14400; formats=[];
+  createBufferSource(){const source=super.createBufferSource(),start=source.start;source.start=when=>{this.formats.push({sampleRate:source.buffer.sampleRate,rate:source.playbackRate.value});start.call(source,when);};return source;}
+ }
+ const nativeRate=new NativeRateContext();
+ globalThis.fetch=async()=>response([patch,patch,done]);
+ const paced=await playSpeechStream(nativeRate,{input:'native rate'},new AbortController().signal,{playbackRate:0.9,collectAudio:true});
+ assert.ok(nativeRate.formats.every(format=>format.sampleRate===14400&&format.rate===1),'default 0.9x playback must not restart a source resampler');
+ assert.equal(new DataView(await paced.audio.arrayBuffer()).getUint32(24,true),16000,'saved/replay WAV retains the original PCM sample rate');
  const bufferedAbort=new AbortController(), bufferedCtx=new FakeContext();
  globalThis.fetch=async()=>new Response(new ReadableStream({start(controller){controller.enqueue(new TextEncoder().encode(wire(patch)));bufferedAbort.signal.addEventListener('abort',()=>controller.error(new DOMException('Cancelled','AbortError')));}}));
  const bufferedPlay=playSpeechStream(bufferedCtx,{input:'cancel buffered'},bufferedAbort.signal,{bufferSeconds:0.32});
  await new Promise(resolve=>setTimeout(resolve,0));bufferedAbort.abort();
  await assert.rejects(bufferedPlay,{name:'AbortError'});assert.equal(bufferedCtx.starts.length,0);
- console.log('PASS startup buffering, delayed patches, gap-free scheduling, underrun rebuffering, short reply drain, PCM preservation and buffered cancellation');
+ console.log('PASS startup buffering, near-deadline chunks, contiguous scheduling, immediate underrun recovery, short reply drain, PCM preservation and buffered cancellation');
  const textCompiled=buildSync({entryPoints:[fileURLToPath(new URL('../src/lib/speech-text.ts',import.meta.url))],bundle:true,platform:'node',format:'esm',write:false});
  const {splitSpeechText}=await import(`data:text/javascript;base64,${Buffer.from(textCompiled.outputFiles[0].text).toString('base64')}`);
  const longText='備註：SN14778725，製造日期2010年12月3日，電容值6460MF。'.repeat(10);

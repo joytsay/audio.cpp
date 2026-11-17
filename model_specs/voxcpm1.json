@@ -109,6 +109,15 @@
         "default": 2048
       },
       {
+        "name": "stream_decode_patches",
+        "type": "int",
+        "description": "Adjacent audio patches per streaming decoder call (80 ms each). Batching reduces repeated causal-context decoding.",
+        "required": false,
+        "min": 1,
+        "max": 16,
+        "default": 4
+      },
+      {
         "name": "language",
         "type": "string",
         "description": "Language hint for Chinese-script normalization; Cantonese/yue preserves Traditional characters. Inherits structured transcript or voice language when provided.",

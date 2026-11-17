@@ -5432,6 +5432,12 @@ if (ENGINE_BUILD_EXAMPLES)
     endif()
 endif()
 
+if (ENGINE_BUILD_TESTS AND "voxcpm1" IN_LIST AUDIOCPP_ENABLED_MODELS AND
+    EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/voxcpm1/streaming_decode.cpp")
+    add_executable(voxcpm1_streaming_decode EXCLUDE_FROM_ALL tests/voxcpm1/streaming_decode.cpp)
+    target_link_libraries(voxcpm1_streaming_decode PRIVATE engine_runtime ggml)
+endif()
+
 if ("bluemagpie" IN_LIST AUDIOCPP_ENABLED_MODELS AND UNIX AND
    EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/bluemagpie/smoke.cpp")
     add_executable(bluemagpie_smoke EXCLUDE_FROM_ALL tests/bluemagpie/smoke.cpp)

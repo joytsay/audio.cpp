@@ -472,6 +472,12 @@ VoxCPM1SessionBase::run_streaming_request(
     return engine::text::maybe_convert_traditional_to_simplified_opt(text, language);
   };
   auto generation_options = generation_options_from_request(request);
+  const int64_t decode_batch_patches = runtime::parse_i64_option(
+      request.options, {"voxcpm1.stream_decode_patches", "stream_decode_patches"})
+      .value_or(4);
+  if (decode_batch_patches < 1 || decode_batch_patches > 16) {
+    throw std::runtime_error("VoxCPM1 stream_decode_patches must be between 1 and 16");
+  }
   const auto prompt_text_raw =
       runtime::find_option(request.options, {"voxcpm1.prompt_text",
                                              "voxcpm1.prompt_text",
@@ -516,15 +522,20 @@ VoxCPM1SessionBase::run_streaming_request(
   const int64_t samples_per_patch = patch_size *
       product(assets_->config.audio_vae.decoder_rates);
   std::vector<float> decode_history;
+  int64_t pending_patches = 0;
+  int64_t generated_patches = 0;
 
-  auto emit_chunk = [&](const VoxCPM1StreamingChunk &chunk) {
+  // Each decode recomputes the causal context. Amortize that work across
+  // adjacent patches instead of decoding the same history every 80 ms.
+  auto flush_audio = [&]() {
+    if (pending_patches == 0) {
+      return;
+    }
     const auto decoder_start = Clock::now();
-    decode_history.insert(decode_history.end(), chunk.decode_features.begin(),
-                          chunk.decode_features.end());
     const int64_t history_patches =
         static_cast<int64_t>(decode_history.size()) / patch_elements;
     auto audio = decoder_->decode_features(decode_history, history_patches);
-    const int64_t new_samples = chunk.decode_patches * samples_per_patch;
+    const int64_t new_samples = pending_patches * samples_per_patch;
     if (new_samples > static_cast<int64_t>(audio.samples.size())) {
       throw std::runtime_error("VoxCPM1 streaming decoder output is too short");
     }
@@ -548,7 +559,7 @@ VoxCPM1SessionBase::run_streaming_request(
     named.id = "chunk_" + std::to_string(emitted_chunks);
     named.audio = std::move(audio);
     named.meta.insert_or_assign(
-        "generated_patches", std::to_string(chunk.generated_patches));
+        "generated_patches", std::to_string(generated_patches));
     if (stream_event_sink) {
       runtime::StreamEvent event;
       event.named_audio_outputs.push_back(named);
@@ -556,12 +567,24 @@ VoxCPM1SessionBase::run_streaming_request(
     }
     result.named_audio_outputs.push_back(std::move(named));
     ++emitted_chunks;
+    pending_patches = 0;
+  };
+  auto emit_chunk = [&](const VoxCPM1StreamingChunk &chunk) {
+    decode_history.insert(decode_history.end(), chunk.decode_features.begin(),
+                          chunk.decode_features.end());
+    pending_patches += chunk.decode_patches;
+    generated_patches = chunk.generated_patches;
+    if (pending_patches >= decode_batch_patches) {
+      flush_audio();
+    }
   };
 
   const auto generator_start = Clock::now();
   const std::string streaming_text = maybe_convert(request.text_input->text);
   (void)generator_->generate_streaming(streaming_text, prompt,
                                        generation_options, emit_chunk);
+  // Also emit short utterances and the final partial group.
+  flush_audio();
   const auto generator_end = Clock::now();
   const double generator_with_callbacks_ms =
       engine::debug::elapsed_ms(generator_start, generator_end);
@@ -577,6 +600,8 @@ VoxCPM1SessionBase::run_streaming_request(
   debug::timing_log_scalar("voxcpm1.audiovae_decoder_ms", decoder_ms);
   debug::timing_log_scalar("voxcpm1.streaming_chunks",
                            static_cast<double>(emitted_chunks));
+  debug::timing_log_scalar("voxcpm1.streaming_decode_patches",
+                           static_cast<double>(decode_batch_patches));
   debug::timing_log_scalar("session.wall_ms",
                            engine::debug::elapsed_ms(wall_start, wall_end));
   return result;
@@ -957,6 +982,7 @@ runtime::ModelCliInterface cli_v1(const VoxCPM1Assets &) {
       {"prompt_text", "string", "Text prompt for prompt-continuation voice cloning.", false},
       {"reference_text", "string", "Alias for prompt_text; text prompt for prompt-continuation voice cloning.", false},
       {"text_chunk_size", "int", "Maximum characters per offline text chunk; must be positive. Does not control streaming chunk cadence. Default: 2048.", false, "2048", "1"},
+      {"stream_decode_patches", "int", "Adjacent audio patches per streaming decoder call (80 ms each). Batching reduces repeated causal-context decoding. Default: 4; range: 1-16.", false, "4", "1", "16"},
   };
   out.session_options = {
       {"voxcpm1.lora", "path", "Native LoRA directory or checkpoint file with adjacent lora_config.json; merged into generator weights at session creation.", false},

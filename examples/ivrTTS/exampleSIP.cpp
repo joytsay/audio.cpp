@@ -155,7 +155,7 @@ public:
         }
     }
     struct Playback { std::vector<int16_t> wide, narrow; };
-    static Playback prepare(const std::vector<unsigned char>& wav) {
+    static Playback prepare(const std::vector<unsigned char>& wav, bool make_narrow = true) {
         auto audio = decode_wav(wav);
         std::vector<int16_t> samples(audio.pcm.size() / 2);
         for (size_t i = 0; i < samples.size(); ++i)
@@ -163,7 +163,7 @@ public:
         Playback prepared;
         prepared.wide = mono(samples.data(), samples.size() / audio.channels, audio.channels, audio.rate, 48000);
         if (prepared.wide.empty()) throw std::runtime_error("TTS WAV has no playable samples");
-        prepared.narrow = phone_pcm(prepared.wide);
+        if (make_narrow) prepared.narrow = phone_pcm(prepared.wide);
         return prepared;
     }
     void play(const std::vector<unsigned char>& wav) { play(prepare(wav)); }
@@ -172,23 +172,30 @@ public:
         pcm_ = std::move(prepared.wide); narrow_pcm_ = std::move(prepared.narrow);
         position_ = 0; playing_ = true; streaming_ = false; finished_ = false;
     }
-    void begin_stream() {
+    void begin_stream(unsigned prebuffer_ms = 320) {
         std::lock_guard<std::mutex> lock(mutex_);
-        pcm_.clear(); narrow_pcm_.clear(); stream_pending_.clear(); position_ = 0;
+        pcm_.clear(); narrow_pcm_.clear(); stream_pending_.clear(); stream_input_.clear(); position_ = 0;
+        stream_source_rate_ = 0; stream_input_position_ = 0; stream_input_frames_ = 0;
         auresamp_init(&stream_resampler_);
         if (auresamp_setup(&stream_resampler_, 48000, 1, 8000, 1)) throw std::runtime_error("cannot configure streaming telephone resampler");
+        stream_started_ = false; stream_reserve_ = size_t(48) * prebuffer_ms;
         streaming_ = true; playing_ = true; finished_ = false;
     }
     void append_stream(const std::vector<unsigned char>& wav) {
-        auto chunk = prepare(wav);
+        auto audio = decode_wav(wav);
+        std::vector<int16_t> samples(audio.pcm.size()/2);
+        for(size_t i=0;i<samples.size();++i)samples[i]=int16_t(unsigned(audio.pcm[2*i])|unsigned(audio.pcm[2*i+1])<<8);
+        auto input=mono(samples.data(),samples.size()/audio.channels,audio.channels,audio.rate,audio.rate);
         std::lock_guard<std::mutex> lock(mutex_);
-        pcm_.insert(pcm_.end(), chunk.wide.begin(), chunk.wide.end());
-        stream_pending_.insert(stream_pending_.end(), chunk.wide.begin(), chunk.wide.end());
+        if(stream_source_rate_&&stream_source_rate_!=audio.rate)throw std::runtime_error("SIP speech sample rate changed within a stream");
+        stream_source_rate_=audio.rate;stream_input_frames_+=input.size();
+        stream_input_.insert(stream_input_.end(),input.begin(),input.end());
+        resample_stream_input(false);
         flush_stream(false);
     }
     void finish_stream() {
         std::lock_guard<std::mutex> lock(mutex_);
-        flush_stream(true); streaming_ = false;
+        resample_stream_input(true);flush_stream(true);streaming_=false;
     }
     void stop_playback() {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -216,6 +223,10 @@ public:
         }
         echo_.clear(); echo_position_ = 0;
         if (!playing_) return;
+        if (streaming_ && !stream_started_) {
+            if (!stream_source_rate_ || stream_input_frames_ * 48000 < uint64_t(stream_reserve_) * stream_source_rate_) return;
+            stream_started_ = true;
+        }
         for (size_t i = 0; i < frames && position_ < pcm_.size() && (rate != 8000 || position_ / 6 < narrow_pcm_.size()); ++i) {
             const auto& buffer = rate == 8000 ? narrow_pcm_ : pcm_;
             const double position = rate == 8000 ? position_ / 6 : position_;
@@ -281,6 +292,23 @@ private:
         recording_.put(static_cast<char>(value & 255));
         recording_.put(static_cast<char>((unsigned(value) >> 8) & 255));
     }
+    void resample_stream_input(bool final) {
+        if(!stream_source_rate_)return;
+        // Keep the last source sample and fractional phase across chunks.
+        // Clamping every patch's last sample creates a click at each join.
+        while(stream_input_position_/48000<stream_input_.size()){
+            const size_t a=size_t(stream_input_position_/48000);
+            if(!final&&a+1>=stream_input_.size())break;
+            const size_t b=std::min(a+1,stream_input_.size()-1);
+            const double fraction=double(stream_input_position_%48000)/48000;
+            const int16_t value=int16_t(std::lround(stream_input_[a]*(1-fraction)+stream_input_[b]*fraction));
+            pcm_.push_back(value);stream_pending_.push_back(value);
+            stream_input_position_+=stream_source_rate_;
+        }
+        const size_t consumed=std::min(size_t(stream_input_position_/48000),stream_input_.size());
+        stream_input_.erase(stream_input_.begin(),stream_input_.begin()+consumed);
+        stream_input_position_-=uint64_t(consumed)*48000;
+    }
     void flush_stream(bool final) {
         if (final && stream_pending_.size() % 6) stream_pending_.resize((stream_pending_.size() + 5) / 6 * 6, 0);
         const size_t length = stream_pending_.size() / 6 * 6;
@@ -316,9 +344,12 @@ private:
     std::deque<int16_t> echo_;
     double echo_position_ = 0;
     Clock::time_point speech_until_{};
-    bool playing_ = false, finished_ = false, streaming_ = false;
+    bool playing_ = false, finished_ = false, streaming_ = false, stream_started_ = false;
+    size_t stream_reserve_ = 0;
     struct auresamp stream_resampler_{};
-    std::vector<int16_t> stream_pending_;
+    std::vector<int16_t> stream_pending_, stream_input_;
+    unsigned stream_source_rate_ = 0;
+    uint64_t stream_input_position_ = 0, stream_input_frames_ = 0;
     std::atomic<bool> active_{false}, failed_{false}, listening_{true};
 };
 AudioBridge* bridge = nullptr; // libbaresip is a process-wide singleton.
@@ -868,13 +899,51 @@ void self_test() {
     int16_t samples[320]{}; test.transmit(samples, 320, 1, 16000);
     if (samples[0] != 32767 || !test.finished()) throw std::runtime_error("PCM playback self-test failed");
     {
-        AudioBridge streamed(nullptr, ""); streamed.activate(true); streamed.begin_stream(); streamed.append_stream(wav);
+        AudioBridge streamed(nullptr, ""); streamed.activate(true); streamed.begin_stream(0); streamed.append_stream(wav);
         streamed.transmit(samples, 320, 1, 16000);
         if (streamed.finished()) throw std::runtime_error("stream completed before synthesis ended");
         streamed.transmit(samples, 320, 1, 16000);
         if (streamed.finished() || std::any_of(samples, samples + 320, [](int16_t v) { return v != 0; })) throw std::runtime_error("stream underrun did not wait silently");
         streamed.append_stream(wav); streamed.finish_stream(); streamed.transmit(samples, 320, 1, 16000);
         if (!streamed.finished()) throw std::runtime_error("stream completion did not release playback");
+    }
+    {
+        // VoxCPM emits 80 ms patches. Keep a short initial queue instead of
+        // sending each patch to RTP as soon as it arrives.
+        auto patch=wav;patch.resize(44+1920*2); // 80 ms at 24 kHz
+        auto le32=[&](size_t offset,unsigned value){for(unsigned i=0;i<4;++i)patch[offset+i]=value>>(8*i);};
+        le32(4,unsigned(patch.size()-8));le32(40,unsigned(patch.size()-44));
+        for(size_t i=44;i<patch.size();i+=2){patch[i]=0xd0;patch[i+1]=0x07;}
+        AudioBridge buffered(nullptr, "");buffered.activate(true);buffered.begin_stream();
+        for(int i=0;i<3;++i){
+            buffered.append_stream(patch);buffered.transmit(samples,320,1,16000);
+            if(std::any_of(samples,samples+320,[](int16_t value){return value!=0;}))throw std::runtime_error("stream started without its jitter reserve");
+        }
+        buffered.append_stream(patch);buffered.transmit(samples,320,1,16000);
+        if(std::none_of(samples,samples+320,[](int16_t value){return value!=0;}))throw std::runtime_error("buffered stream did not start before synthesis ended");
+        // With production paused briefly, queued speech continues into RTP.
+        for(int i=0;i<5;++i){buffered.transmit(samples,320,1,16000);if(std::none_of(samples,samples+320,[](int16_t value){return value!=0;}))throw std::runtime_error("stream reserve did not cover delayed patches");}
+        buffered.finish_stream();
+        bool finished=false;for(int i=0;i<30&&!finished;++i){buffered.transmit(samples,320,1,16000);finished=buffered.finished();}
+        if(!finished)throw std::runtime_error("buffered stream did not drain");
+        buffered.begin_stream();buffered.append_stream(patch);buffered.finish_stream();buffered.transmit(samples,320,1,16000);
+        if(std::none_of(samples,samples+320,[](int16_t value){return value!=0;}))throw std::runtime_error("short stream was stranded below the startup reserve");
+    }
+    {
+        // Chunk boundaries must not reset interpolation, even when chunks
+        // arrive early enough that there is no playback underrun.
+        for(unsigned source_rate : {16000u,24000u,44100u,48000u}){
+        const size_t patch_frames=source_rate*80/1000;
+        auto complete=wav;const size_t frames=patch_frames*6;complete.resize(44+frames*2);
+        auto length=[&](std::vector<unsigned char>& data){unsigned riff=unsigned(data.size()-8),pcm=unsigned(data.size()-44);for(unsigned i=0;i<4;++i){data[4+i]=riff>>(8*i);data[40+i]=pcm>>(8*i);}};
+        length(complete);for(unsigned i=0;i<4;++i){complete[24+i]=source_rate>>(8*i);complete[28+i]=(source_rate*2)>>(8*i);}
+        for(size_t i=0;i<frames;++i){const int16_t sample=int16_t(std::lround(14000*std::sin(2*3.141592653589793*1234*i/source_rate)));complete[44+2*i]=unsigned(sample)&255;complete[45+2*i]=unsigned(sample)>>8;}
+        AudioBridge whole(nullptr, ""),pieces(nullptr, "");whole.activate(true);pieces.activate(true);whole.play(complete);pieces.begin_stream();
+        for(size_t offset=0;offset<frames;offset+=patch_frames){auto part=std::vector<unsigned char>(complete.begin(),complete.begin()+44);part.insert(part.end(),complete.begin()+44+2*offset,complete.begin()+44+2*(offset+patch_frames));length(part);pieces.append_stream(part);}
+        pieces.finish_stream();
+        std::vector<int16_t> expected(frames*48000/source_rate),actual(frames*48000/source_rate);whole.transmit(expected.data(),expected.size(),1,48000);pieces.transmit(actual.data(),actual.size(),1,48000);
+        for(size_t i=0;i<expected.size();++i)if(std::abs(int(expected[i])-int(actual[i]))>1)throw std::runtime_error("stream resampling introduced a chunk-boundary discontinuity");
+        }
     }
     {
         AudioBridge echo(nullptr, ""); echo.enable_echo(true); echo.activate(true); echo.play(wav);

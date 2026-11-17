@@ -8,6 +8,7 @@
   import { catalog, modelModes, modelCapabilities } from "$lib/catalog";
   import {
     playSpeechStream,
+    speechContextOptions,
     type SpeechStreamSummary,
   } from "$lib/speech-stream";
   import { readHotwordsCsv, writeHotwordsCsv } from "$lib/hotwords";
@@ -1076,7 +1077,7 @@
     let previewContext: AudioContext | null = null;
     try {
       if (streamingTts) {
-        previewContext = new AudioContext();
+        previewContext = new AudioContext(speechContextOptions(selectedTts?.family, ttsPlaybackRate));
         await previewContext.resume();
       }
       const model = await load(
@@ -1101,6 +1102,9 @@
             {
               collectAudio: true,
               bufferSeconds: selectedTts?.family === "voxcpm1" ? 0.32 : 0,
+              continuousPcm: selectedTts?.family === "voxcpm1",
+              onUnderrun: () => record("TTS_BUFFER_UNDERRUN", "Speech generation or delivery fell behind playback"),
+              onRenderer: (renderer) => record("TTS_PLAYBACK_MODE", renderer === "pcm-queue" ? "Continuous PCM queue" : "Scheduled audio chunks"),
               playbackRate: ttsPlaybackRate,
               onFirstAudio: (wallMs) => {
                 cloneStatus = "Playing cloned voice · streaming";
@@ -1758,6 +1762,9 @@
         destination: streamAnalyser,
         leadInSeconds,
         bufferSeconds: selectedTts?.family === "voxcpm1" ? 0.32 : 0,
+              continuousPcm: selectedTts?.family === "voxcpm1",
+              onUnderrun: () => record("TTS_BUFFER_UNDERRUN", "Speech generation or delivery fell behind playback"),
+              onRenderer: (renderer) => record("TTS_PLAYBACK_MODE", renderer === "pcm-queue" ? "Continuous PCM queue" : "Scheduled audio chunks"),
         playbackRate: ttsPlaybackRate,
         onFirstAudio: (wallMs) => {
           began = true;
@@ -2403,7 +2410,7 @@
         throw new Error(
           "Open this page over trusted HTTPS to use the microphone.",
         );
-      context = new AudioContext();
+      context = new AudioContext(speechContextOptions(selectedTts?.family, ttsPlaybackRate));
       await context.resume();
       if (useAsr) {
         const acquired = await navigator.mediaDevices.getUserMedia({

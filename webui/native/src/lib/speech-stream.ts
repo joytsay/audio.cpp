@@ -1,6 +1,14 @@
+import { PcmQueuePlayer } from "./pcm-queue-player";
 import { splitSpeechText } from "./speech-text";
 import { encodePcm16Wav } from "./audio";
 import { reportedRtf } from "./response-timing";
+
+// Match the context clock to the effective source rate, including speed.
+// Web Audio then resamples the continuous output once instead of restarting
+// an independent resampler for every PCM source.
+export function speechContextOptions(family: string | undefined, playbackRate = 1): AudioContextOptions | undefined {
+  return family === "voxcpm1" ? {sampleRate: Math.round(16000 * playbackRate)} : undefined;
+}
 
 export interface SpeechChunk {
   type: "speech.audio.delta";
@@ -154,7 +162,7 @@ export interface SpeechStreamSummary {
   audio?: Blob;
 }
 
-// Buffer a short reserve when requested, while generation continues.
+// Build a short startup reserve when requested, while generation continues.
 // The shared audio clock keeps chunks ordered without overlapping playback.
 export async function playSpeechStream(
   ctx: AudioContext,
@@ -167,7 +175,10 @@ export async function playSpeechStream(
     collectAudio?: boolean;
     playbackRate?: number;
     groupPauseSeconds?: number;
+    continuousPcm?: boolean;
     onFirstAudio?: (wallMs: number) => void;
+    onUnderrun?: () => void;
+    onRenderer?: (renderer: "pcm-queue" | "scheduled-sources") => void;
     onSynthesized?: (summary: SpeechStreamSummary) => void;
   } = {},
 ): Promise<SpeechStreamSummary> {
@@ -188,10 +199,13 @@ export async function playSpeechStream(
     scheduledChunks = 0,
     rtf: number | null = null;
   let format: { sampleRate: number; channels: number } | undefined;
+  let pcmPlayer: PcmQueuePlayer | undefined;
+  let pcmAttempted = false;
   const sources = new Map<AudioBufferSourceNode, () => void>();
   const playback: Promise<void>[] = [],
     captured: AudioBuffer[] = [];
   const stop = () => {
+    pcmPlayer?.stop();
     for (const [source, resolve] of sources) {
       source.onended = null;
       try {
@@ -218,6 +232,7 @@ export async function playSpeechStream(
         buffering = true;
       const flushPending = () => {
         for (const buffer of pending) {
+          if (pcmPlayer) { pcmPlayer.push(buffer); scheduledChunks++; continue; }
           if (!scheduledChunks) {
             firstAudio = performance.now();
             nextStart = ctx.currentTime + (options.leadInSeconds ?? 0.06);
@@ -225,8 +240,21 @@ export async function playSpeechStream(
           }
           scheduledChunks++;
           const source = ctx.createBufferSource();
-          source.buffer = buffer;
-          source.playbackRate.value = rate;
+          let duration = buffer.duration / rate;
+          if (rate !== 1 && Math.abs(ctx.sampleRate - buffer.sampleRate * rate) < 0.5) {
+            // Playback speed is represented by the context clock. Relabel
+            // identical PCM at that rate instead of enabling a per-source
+            // resampler through playbackRate (even 0.9 has float32 rounding).
+            const paced = ctx.createBuffer(buffer.numberOfChannels, buffer.length, ctx.sampleRate);
+            for (let channel = 0; channel < buffer.numberOfChannels; channel++)
+              paced.copyToChannel(buffer.getChannelData(channel), channel);
+            source.buffer = paced;
+            source.playbackRate.value = 1;
+            duration = paced.duration;
+          } else {
+            source.buffer = buffer;
+            source.playbackRate.value = rate;
+          }
           source.connect(options.destination || ctx.destination);
           playback.push(
             new Promise<void>((resolve) => {
@@ -238,9 +266,11 @@ export async function playSpeechStream(
               };
             }),
           );
-          const when = Math.max(nextStart, ctx.currentTime + 0.015);
+          // Keep already queued chunks contiguous. A late chunk can start now;
+          // adding a new safety delay to every source creates audible holes.
+          const when = Math.max(nextStart, ctx.currentTime);
           source.start(when);
-          nextStart = when + buffer.duration / rate;
+          nextStart = when + duration;
         }
         pending.length = 0;
         pendingSeconds = 0;
@@ -266,9 +296,23 @@ export async function playSpeechStream(
           sampleRate: buffer.sampleRate,
           channels: buffer.numberOfChannels,
         };
+        if (options.continuousPcm && !pcmAttempted) {
+          pcmAttempted = true;
+          if (Math.abs(ctx.sampleRate-buffer.sampleRate*rate)<0.5)
+            pcmPlayer = await PcmQueuePlayer.create(ctx, format.channels, options.destination || ctx.destination, options.leadInSeconds ?? 0.06, () => {
+              firstAudio = performance.now();
+              options.onFirstAudio?.(firstAudio-started);
+            }, options.onUnderrun);
+          options.onRenderer?.(pcmPlayer ? "pcm-queue" : "scheduled-sources");
+          if (signal.aborted) {
+            pcmPlayer?.stop();
+            throw signal.reason || new DOMException("Cancelled", "AbortError");
+          }
+        }
         if (group > 0 && !groupChunks) {
           const pause = options.groupPauseSeconds ?? 0.22;
           nextStart += pause;
+          pcmPlayer?.pause(pause,ctx.sampleRate,format.channels);
           if (options.collectAudio && pause > 0)
             captured.push(
               ctx.createBuffer(
@@ -284,9 +328,9 @@ export async function playSpeechStream(
         chunks++;
         pending.push(buffer);
         pendingSeconds += buffer.duration / rate;
-        // A late chunk must rebuild a reserve instead of restarting playback
-        // for every tiny patch. Normal arrivals keep the existing audio clock.
-        if (nextStart < ctx.currentTime + 0.015) buffering = true;
+        // Once playback has started, feed the queue continuously like the
+        // native TUI. Even a near-deadline arrival used to restart buffering,
+        // holding several patches and turning small jitter into long pauses.
         if (!buffering || pendingSeconds >= bufferSeconds) flushPending();
       }
       flushPending(); // Drain short utterances and the last partial reserve.
@@ -309,8 +353,9 @@ export async function playSpeechStream(
       wallMs: performance.now() - started,
       playbackMs: 0,
     };
+    const pcmDrained = pcmPlayer?.finish();
     options.onSynthesized?.(summary);
-    await Promise.all(playback);
+    await Promise.all(pcmDrained ? [...playback,pcmDrained] : playback);
     if (signal.aborted)
       throw signal.reason || new DOMException("Cancelled", "AbortError");
     summary.playbackMs = performance.now() - firstAudio;
