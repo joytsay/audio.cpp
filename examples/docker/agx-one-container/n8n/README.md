@@ -77,11 +77,11 @@ VAD now waits for 2000 ms of silence by default. The demo VAD section exposes `E
 
 ## Add a scenario from documents
 
-In the demo **Scenarios** dropdown, choose **Add New Scenario**, enter a name and choose PDF, DOCX, XLSX, CSV, TXT or Markdown files, then press **Add scenario**. Up to eight files and 10 MiB total are accepted. Source text is converted into grounded Q/A: existing question/answer conversations are retained, spreadsheet rows become reference answers, and other passages become answer excerpts without inventing facts. CSV files must use UTF-8 with a header row; Q/A, Question/Answer or 問題/答案 columns become question/answer pairs, and other columns become reference facts. Quoted commas, multiline cells and leading-zero codes are preserved. Office archives are limited to 25 MiB expanded content and extracted text to 250,000 characters per upload.
+In the demo **Scenarios** dropdown, choose **Add New Scenario**, select PDF, DOCX, XLSX, CSV, TXT or Markdown files, and press **Add scenario**. Up to eight files and 10 MiB total are accepted. Each file creates an n8n subworkflow and a tool in **Scenario MCP**. The filename stem becomes the subworkflow and table name. Excel tables append the worksheet name, such as `CSD資料庫_派工`.
 
-The production webhook `/webhook/ivr-add-scenario` runs **Validate scenario files → Create scenario Q/A → Index scenario Q/A → Scenario upload result** inside the RAG group. Indexing invokes the existing RAG subflow and embedding model. `/webhook/ivr-scenarios` lists saved scenarios for the dropdown. If indexing fails, Q/A remains saved and the UI supports retrying the same upload without creating a duplicate.
+The production webhook `/webhook/ivr-import-scenario` imports one file at a time. Generated subworkflows read the live Data Tables and return original column labels. Word question-and-answer conversations become voice templates, and recognizable tables become rows. The tool flags tables that contain OCR results. The legacy reference upload at `/webhook/ivr-add-scenario` still produces indexed Q/A.
 
-Original uploads and Q/A manifests persist at `/data/scenarios/<id>/` in `audiocpp-knowledge-data`. Normal knowledge retrieval includes these documents after restarts. Uploads add reference knowledge; they do not insert work orders into the Data Table. Selecting an uploaded scenario enables the n8n dialogue source. There are no bundled demo scenario documents.
+Original uploads and import metadata persist at `/data/scenarios/<id>/` in `audiocpp-knowledge-data`. Retrying the same upload resumes its import. `/webhook/ivr-scenarios` lists completed imports for the dropdown. Selecting an uploaded scenario enables the n8n dialogue source.
 
 Local upload/client checks: `node webui/native/tests/knowledge-scenarios.mjs`; the isolated n8n workflow runtime check also verifies upload, indexing retry, listing and a later caller question grounded in the uploaded file.
 
@@ -89,7 +89,6 @@ Local upload/client checks: `node webui/native/tests/knowledge-scenarios.mjs`; t
 
 On the demo page, select an uploaded scenario in **Scenario**, then click
 **Remove scenario**. This calls `/webhook/ivr-delete-scenario` in the same
-workflow and deletes that scenario's uploaded files and saved Q/A. Fresh RAG
-executions rebuild their vector store from the remaining documents, so deleted
-Q/A is excluded from future retrievals. Existing conversation text is retained.
+workflow and deletes the scenario's uploaded files, tool, generated subworkflow,
+and owned tables. For legacy Q/A uploads, it removes their files and saved Q/A.
 The dropdown contains your uploaded scenarios and the manual Audio input option.

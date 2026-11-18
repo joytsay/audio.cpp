@@ -3,6 +3,7 @@ import path from 'node:path';
 import {createHash,randomUUID} from 'node:crypto';
 import {inflateRawSync} from 'node:zlib';
 import {qaDocument} from './qa.mjs';
+import {fileDataset,scenarioFileName} from './scenario-files.mjs';
 
 const maxBytes=10*1024*1024;
 const extensions=new Set(['.pdf','.docx','.xlsx','.csv','.txt','.md']);
@@ -90,10 +91,33 @@ export function createScenarioStore({root=path.join(process.env.KNOWLEDGE_DATA_R
   }
   return items.sort((a,b)=>a.createdAt.localeCompare(b.createdAt));
  }
- const metadata=({documents,...record})=>({...record,qaCount:documents.length});
+ const metadata=({documents,dataset,resources,...record})=>({
+  ...record,qaCount:documents.length,
+  ...(dataset?{tables:dataset.tables.map(({name,sheet,records})=>({name,sheet,rowCount:records.length})),tool:resources?.toolName}:{}),
+ });
+ async function get(id){
+  if(typeof id!=='string'||!/^[a-f0-9]{24}$/.test(id))throw fail('Invalid uploaded scenario ID');
+  try{return JSON.parse(await fs.readFile(path.join(root,id,'scenario.json'),'utf8'));}
+  catch(error){if(error.code==='ENOENT')throw fail('Scenario not found',404);throw error;}
+ }
  return {
-  async list(){return (await manifests()).map(metadata);},
-  async documents(){return (await manifests()).flatMap(record=>record.documents);},
+  async list(){return (await manifests()).filter(record=>!record.dataset||record.resources?.ready).map(metadata);},
+  async documents(){return (await manifests()).filter(record=>!record.dataset).flatMap(record=>record.documents);},
+  get,
+  async saveImport(id,resources){
+   const operation=async()=>{
+    const record=await get(id);
+    if(!record.dataset)throw fail('Scenario has no import resources');
+    const target=path.join(root,id,'scenario.json');
+    const temp=path.join(root,id,`.resources-${randomUUID()}.json`);
+    try{
+     await fs.writeFile(temp,JSON.stringify({...record,resources}),{mode:0o600});
+     await fs.rename(temp,target);
+    }finally{await fs.rm(temp,{force:true});}
+    return metadata({...record,resources});
+   };
+   const result=pending.then(operation);pending=result.catch(()=>{});return result;
+  },
   async remove(id){
    if(typeof id!=='string'||!/^[a-f0-9]{24}$/.test(id))throw fail('Invalid uploaded scenario ID');
    const operation=async()=>{
@@ -108,30 +132,47 @@ export function createScenarioStore({root=path.join(process.env.KNOWLEDGE_DATA_R
    const result=pending.then(operation);pending=result.catch(()=>{});return result;
   },
   async add(input){
+   const fileMode=input?.fileMode===true;
+   if(fileMode){
+    if(input.files?.length!==1||typeof input.files[0]?.name!=='string')throw fail('One document is required per scenario import');
+    input={...input,name:scenarioFileName(input.files[0].name)};
+   }
    const upload=validateScenarioUpload(input);
    const operation=async()=>{
-    const id=hash(JSON.stringify([upload.name,upload.files.map(f=>[f.name,f.sha256]).sort()])).slice(0,24);
+    const identity=[upload.name,upload.files.map(f=>[f.name,f.sha256]).sort()];
+    if(fileMode)identity.push('file');
     const existing=await manifests();
-    const duplicate=existing.find(r=>r.id===id);if(duplicate)return {scenario:metadata(duplicate),duplicate:true};
-    if(existing.some(r=>r.name.toLocaleLowerCase()===upload.name.toLocaleLowerCase()))throw fail('That scenario name already exists; choose another name',409);
-    if(existing.length>=100)throw fail('The knowledge store already contains 100 uploaded scenarios',409);
+    const previous=fileMode&&existing.find(record=>
+     record.fileMode===true&&record.name===upload.name&&record.files.length===1&&
+     record.files[0].name===upload.files[0].name&&record.files[0].sha256===upload.files[0].sha256
+    );
+    const legacy=previous&&!Array.isArray(previous.dataset?.tables)?previous:undefined;
+    const id=previous?.id||hash(JSON.stringify(identity)).slice(0,24);
+    const duplicate=existing.find(r=>r.id===id);if(duplicate&&!legacy)return {scenario:metadata(duplicate),duplicate:true};
+    if(existing.some(r=>r.id!==id&&r.name.toLocaleLowerCase()===upload.name.toLocaleLowerCase()))throw fail('That scenario name already exists; choose another name',409);
+    if(!legacy&&existing.length>=100)throw fail('The knowledge store already contains 100 uploaded scenarios',409);
     await fs.mkdir(root,{recursive:true});
     const temp=await fs.mkdtemp(path.join(root,'.upload-'));
     try{
-     const documents=[];let textLength=0;
+     const documents=[],fileSources=[];let textLength=0;
      for(const file of upload.files){
       if(file.extension==='.docx'||file.extension==='.xlsx')validateOfficeArchive(file.bytes);
       const stored=file.sha256+file.extension,filename=path.join(temp,stored);await fs.writeFile(filename,file.bytes,{mode:0o600});
-      let sources;try{sources=await extract(filename,file);}catch(error){throw fail(`Cannot read ${file.name}: ${error.message}`);}
+      let sources;try{sources=await extract(filename,{...file,fileMode});}catch(error){throw fail(`Cannot read ${file.name}: ${error.message}`);}
       for(const source of sources){
        textLength+=source.text.length;if(textLength>250000)throw fail('Extracted scenario text exceeds 250,000 characters',413);
-       documents.push(...scenarioQa({...source,source:file.name,sha256:file.sha256,scenario_id:id},upload.name));
+       if(fileMode)fileSources.push(source);
+       const {fields,headers,...reference}=source;
+       documents.push(...scenarioQa({...reference,source:file.name,sha256:file.sha256,scenario_id:id},upload.name));
       }
      }
-     if(!documents.length)throw fail('No readable content was found in these files');
-     const record={id,name:upload.name,createdAt:new Date().toISOString(),files:upload.files.map(({name,size,sha256})=>({name,size,sha256})),documents};
+     if(!documents.length&&!fileSources.some(source=>source.headers))throw fail('No readable content was found in these files');
+     const record={...legacy,id,name:upload.name,createdAt:legacy?.createdAt||new Date().toISOString(),files:upload.files.map(({name,size,sha256})=>({name,size,sha256})),documents};
+     if(fileMode)Object.assign(record,{fileMode:true,dataset:fileDataset(upload.files[0].name,fileSources)});
      await fs.writeFile(path.join(temp,'scenario.json'),JSON.stringify(record),{mode:0o600});
-     await fs.rename(temp,path.join(root,id));return {scenario:metadata(record),duplicate:false,qa_preview:documents.slice(0,3).map(({question,answer,source})=>({question,answer,source}))};
+     if(legacy)await fs.rename(path.join(temp,'scenario.json'),path.join(root,id,'scenario.json'));
+     else await fs.rename(temp,path.join(root,id));
+     return {scenario:metadata(record),duplicate:false,qa_preview:documents.slice(0,3).map(({question,answer,source})=>({question,answer,source}))};
     }finally{await fs.rm(temp,{recursive:true,force:true});}
    };
    const result=pending.then(operation);pending=result.catch(()=>{});return result;

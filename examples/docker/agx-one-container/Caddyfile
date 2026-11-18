@@ -31,7 +31,30 @@
 		reverse_proxy voice-ai:8082
 	}
 
-	# The native server serves the embedded UI, audio API, uploads, and RAG.
+	@webui {
+		method GET HEAD
+		path / /index.html /_app/* /logo_cloud.svg
+		file {
+			root /srv/geovision
+			try_files {path}index.html {path}
+		}
+	}
+	handle @webui {
+		@document path / /index.html
+		header @document {
+			Cache-Control "no-store, no-cache, must-revalidate, max-age=0"
+			Clear-Site-Data "\"cache\""
+			Expires "0"
+			Pragma "no-cache"
+			Content-Security-Policy "default-src 'self' 'unsafe-inline' blob: data:; connect-src 'self' http://*:8082 http://*:8083; media-src 'self' blob: data:"
+			X-Content-Type-Options "nosniff"
+		}
+		file_server {
+			root /srv/geovision
+		}
+	}
+
+	# The audio API, uploads, and RAG still use the native server.
 	handle {
 		reverse_proxy voice-ai:8081
 	}

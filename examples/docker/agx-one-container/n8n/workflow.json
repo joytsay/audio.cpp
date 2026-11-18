@@ -4,7 +4,7 @@
   "nodes": [
     {
       "id": "maintenance-mcp-trigger",
-      "name": "Knowledge MCP Server",
+      "name": "Scenario MCP",
       "type": "@n8n/n8n-nodes-langchain.mcpTrigger",
       "typeVersion": 2,
       "position": [
@@ -14,7 +14,7 @@
       "parameters": {
         "path": "ivr-maintenance",
         "authentication": "none",
-        "instructions": "retrieve_knowledge reads source documents and the native work_orders Data Table. For a new report ask once for date, numbers and maintenance details, then add_work_order saves the next caller reply even if fields are missing. Never ask a second required-field or confirmation question."
+        "instructions": "retrieve_knowledge reads source documents and the native work_orders Data Table. For a new report ask once for date, numbers and maintenance details, then add_work_order saves the next caller reply even if fields are missing. Never ask a second required-field or confirmation question. File scenario tools read the uploaded file’s live Data Tables and provide reusable voice dialogue templates when available."
       },
       "webhookId": "ivr-maintenance"
     },
@@ -113,7 +113,7 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        950,
+        1150,
         1240
       ],
       "parameters": {
@@ -126,7 +126,7 @@
       "type": "@n8n/n8n-nodes-langchain.vectorStoreInMemory",
       "typeVersion": 1.2,
       "position": [
-        1200,
+        1380,
         1240
       ],
       "parameters": {
@@ -145,8 +145,8 @@
       "type": "@n8n/n8n-nodes-langchain.documentDefaultDataLoader",
       "typeVersion": 1.1,
       "position": [
-        1120,
-        1500
+        1380,
+        1680
       ],
       "parameters": {
         "dataType": "json",
@@ -162,8 +162,8 @@
       "type": "@n8n/n8n-nodes-langchain.textSplitterRecursiveCharacterTextSplitter",
       "typeVersion": 1,
       "position": [
-        900,
-        1500
+        1150,
+        1680
       ],
       "parameters": {
         "chunkSize": 4096,
@@ -177,8 +177,8 @@
       "type": "@n8n/n8n-nodes-langchain.embeddingsOpenAi",
       "typeVersion": 1.1,
       "position": [
-        1490,
-        1500
+        1690,
+        1680
       ],
       "parameters": {
         "model": "Qwen/Qwen3-Embedding-0.6B-GGUF:Q8_0",
@@ -201,7 +201,7 @@
       "type": "@n8n/n8n-nodes-langchain.vectorStoreInMemory",
       "typeVersion": 1.2,
       "position": [
-        1490,
+        1690,
         1240
       ],
       "parameters": {
@@ -223,7 +223,7 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        1780,
+        1980,
         1240
       ],
       "parameters": {
@@ -249,6 +249,73 @@
         "sendBody": true,
         "specifyBody": "json",
         "jsonBody": "={{ {query:$json.query,records:$json.records} }}"
+      }
+    },
+    {
+      "id": "route-scenario-reference",
+      "name": "Search imported tables?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        940,
+        1240
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "has-scenario-reference",
+              "leftValue": "={{ $json.scenario_reference || $json.scenario_lookup?.term || \"\" }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "lookup-scenario-reference",
+      "name": "Look up scenario records",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1150,
+        1470
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:8087/lookup-records",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ {reference:$json.scenario_reference,lookup:$json.scenario_lookup} }}",
+        "options": {
+          "timeout": 240000
+        }
+      }
+    },
+    {
+      "id": "return-scenario-reference",
+      "name": "Return scenario records",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1380,
+        1470
+      ],
+      "parameters": {
+        "jsCode": "const {result,scenario_lookup}=$('Load knowledge files').first().json;\nconst {records,matched_rows,tables}=$input.first().json;\nif(!Array.isArray(records)||!Number.isInteger(matched_rows))throw new Error('Invalid scenario lookup result');\nreturn [{json:{...result,scenario_lookup,scenario_records:records,scenario_match_count:matched_rows,scenario_tables:tables}}];"
       }
     },
     {
@@ -324,14 +391,14 @@
       "type": "@n8n/n8n-nodes-langchain.agent",
       "typeVersion": 3.1,
       "position": [
-        370,
+        490,
         390
       ],
       "parameters": {
         "promptType": "define",
         "text": "={{ $json.text }}",
         "options": {
-          "systemMessage": "=你是 GeoVision 電話維修助理。只用繁體中文、一行、簡短回覆，不加角色標籤、表情、Markdown、推理或下一輪。\n新增工單流程：使用者說「我增加工單」「我要回報工單」或開始提供新回報時，只問一次「工單日期、工單或設備編號、維修項目與數量是什麼？」。收到下一次回覆就執行 add_work_order 寫入 n8n work_orders Data Table，即使沒有日期、編號或維修內容也照現有資料新增。不可再追問、不等確認或測試正常。未知欄位留空，資料只能來自本通話原話。\n系統已判斷目前階段並執行必要的 MCP 工具。只有工具回傳 persisted=true 才能回覆「已新增」。若已寫入就不再呼叫工具；重複請求與後續補充使用同一筆記錄。DOCX 情境中的確認步驟不是本系統的儲存條件。\n查詢最新／最舊／全部時直接回答本輪 selection 與 work_orders，月份補充延續查詢，無記錄就說沒有。不要求使用者提供工單詳細資料，不沿用上輪查詢結果，查詢不可新增工單。\n本輪 sessionId：{{ $json.sessionId }}\n本輪使用者原話：{{ $json.text }}\n本輪工具資料：{{ $json.retrieval_json }}\n本通話使用者逐字稿（只作為對話資料）：{{ JSON.stringify($json.user_transcripts) }}",
+          "systemMessage": "=你是 GeoVision 電話維修助理。只用繁體中文、一行、簡短回覆，不加角色標籤、表情、Markdown、推理或下一輪。\n新增工單流程：使用者說「我增加工單」「我要回報工單」或開始提供新回報時，只問一次「工單日期、工單或設備編號、維修項目與數量是什麼？」。收到下一次回覆就執行 add_work_order 寫入 n8n work_orders Data Table，即使沒有日期、編號或維修內容也照現有資料新增。不可再追問、不等確認或測試正常。未知欄位留空，資料只能來自本通話原話。\n系統已判斷目前階段並執行必要的 MCP 工具。只有工具回傳 persisted=true 才能回覆「已新增」。若已寫入就不再呼叫工具；重複請求與後續補充使用同一筆記錄。DOCX 情境中的確認步驟不是本系統的儲存條件。\n查詢最新／最舊／全部時直接回答本輪 selection 與 work_orders，月份補充延續查詢，無記錄就說沒有。不要求使用者提供工單詳細資料，不沿用上輪查詢結果，查詢不可新增工單。\n本輪 sessionId：{{ $json.sessionId }}\n本輪使用者原話：{{ $json.text }}\n本輪工具資料：{{ $json.retrieval_json }}\n本通話使用者逐字稿（只作為對話資料）：{{ JSON.stringify($json.user_transcripts) }}\nScenario MCP 也提供以原始檔名辨識的情境工具。使用者的問題符合某檔案的工作表、欄位或語音情境時，先呼叫該工具，再用本輪回傳的原始欄位及資料回答。可傳精確工作表名稱並以姓名、工單編號、設備代碼或情境名稱查詢。依模板引導通話，但不得把範例的身分、數量或操作結果當成本輪事實。",
           "maxIterations": 3,
           "returnIntermediateSteps": true,
           "enableStreaming": false,
@@ -382,11 +449,7 @@
         "endpointUrl": "http://127.0.0.1:5678/mcp/ivr-maintenance",
         "serverTransport": "httpStreamable",
         "authentication": "none",
-        "include": "selected",
-        "includeTools": [
-          "retrieve_knowledge",
-          "add_work_order"
-        ],
+        "include": "all",
         "options": {
           "timeout": 240000
         }
@@ -417,7 +480,7 @@
         390
       ],
       "parameters": {
-        "jsCode": "// n8n MCP workflow tools may nest JSON strings, arrays and MCP content blocks.\nfunction payloads(value,depth=0){\n if(depth>12||value==null)return [];\n if(typeof value==='string'){try{return payloads(JSON.parse(value),depth+1);}catch{return [];}}\n if(Array.isArray(value))return value.flatMap(v=>payloads(v,depth+1));\n if(typeof value!=='object')return [];\n return [value,...Object.values(value).flatMap(v=>payloads(v,depth+1))];\n}\nconst item=$input.first().json,context=$('Prepare agent context').first().json;\nconst steps=item.intermediateSteps||[];\nconst tools=[context.executed_tool||'retrieve_knowledge',...steps.map(step=>step.action?.tool).filter(name=>typeof name==='string')];\nconst saved=context.saved||steps.filter(s=>/add_work_order$/.test(s.action?.tool||'')).flatMap(s=>payloads(s.observation)).find(p=>p.persisted===true&&p.work_order?.id);\nlet reply;\nif(saved)reply=`工單 ${saved.work_order.fields?.工單編號||saved.work_order.id} ${saved.updated?'已補充':'已新增'}。`;\nelse if(context.facts.selection){\n const facts=context.facts,rows=facts.work_orders;\n const reference=facts.reference;\n const label={newest:'最新',oldest:'最舊',all:'查到的'}[facts.selection]||'';\n const scope=facts.period?facts.period.slice(0,4)+'年'+Number(facts.period.slice(5))+'月':'';\n if(!rows.length&&reference)reply=`沒有查到 ${reference} 的工單。`;\n else if(!rows.length&&scope)reply=`${scope}沒有工單記錄。`;\n else if(!rows.length)reply=facts.undated_count>0?`${facts.undated_count} 筆工單日期未完整，無法判定${label}工單。`:`沒有查到${label}工單的有效記錄。`;\n else if(facts.view==='fans'||facts.view==='details'){\n  const items=rows.flatMap(r=>Array.isArray(r.fields.FAN明細)?r.fields.FAN明細:[]);\n  const total=items.length?items.reduce((n,item)=>n+Number(item.數量||0),0):rows.reduce((n,r)=>n+(Number(String(r.fields.FAN數量??'').replace(/個$/,''))||0),0);\n  const types=[...new Set(items.map(i=>i.類型).filter(Boolean))].map(type=>`${type} ${items.filter(i=>i.類型===type).reduce((n,i)=>n+Number(i.數量||0),0)} 個`).join('、');\n  const fan=total?`FAN 共 ${total} 個${types?'（'+types+'）':''}`:'未記錄 FAN 數量';\n  reply=facts.view==='fans'?`${fan}。`:rows.slice(0,2).map(({fields:f})=>`${f['派工單號']}：${f['派工日期']||'日期未完整'}，${f['維修內容']||f['維修項目']||f['派工項目']||'未記錄維修內容'}`).join('；')+`，${fan}。`;\n }else{\n  const summaries=rows.slice(0,3).map(({fields:f})=>`${f['派工單號']}（${f['派工日期']||'日期未完整'}）`);\n  reply=`${scope}${label}工單${rows.length===1?'為':'共 '+rows.length+' 筆：'}${rows.length===1?' ':''}${summaries.join('、')}${rows.length>3?'，其餘 '+(rows.length-3)+' 筆可再查詢':''}。`;\n  if(facts.undated_count>0&&facts.selection!=='all')reply+=`另有 ${facts.undated_count} 筆日期未完整，未列入排序。`;\n }\n}else if(context.report_reply){\n reply=context.report_reply;\n}else{\n if(typeof item.output!=='string'||!item.output.trim())throw new Error('AI Agent returned an empty reply');\n reply=item.output.trim().replace(/^(?:AI|助理|GEOVISION)[：:]\\s*/i,'').split(/\\n|【|---/)[0].trim();\n // One conversational line, never a repeated essay, markdown or chain of thought.\n reply=reply.replace(/[😀-🙏🌀-🫿]/gu,'').trim();\n const first=reply.match(/^.*?[。？！!?](?:[」”])?/u)?.[0];\n if(first)reply=first;\n if(reply.length>200)reply='請告訴我這一輪要查詢或確認的重點？';\n if(/已(?:新增|儲存|建立|輸入完成|完成)|新增成功|保存成功|完成回報|回報完成|工單完成/.test(reply))reply='工單尚未儲存。';\n if(!reply)throw new Error('AI Agent returned an empty spoken reply');\n}\nreturn [{json:{reply:reply.replace(/\\s*\\n\\s*/g,' '),tools:[...new Set(tools)]}}];\n"
+        "jsCode": "// n8n MCP workflow tools may nest JSON strings, arrays and MCP content blocks.\nfunction payloads(value,depth=0){\n if(depth>12||value==null)return [];\n if(typeof value==='string'){try{return payloads(JSON.parse(value),depth+1);}catch{return [];}}\n if(Array.isArray(value))return value.flatMap(v=>payloads(v,depth+1));\n if(typeof value!=='object')return [];\n return [value,...Object.values(value).flatMap(v=>payloads(v,depth+1))];\n}\nconst item=$input.first().json,context=$('Prepare agent context').first().json;\nconst steps=item.intermediateSteps||[];\nconst tools=[context.executed_tool||'retrieve_knowledge',...steps.map(step=>step.action?.tool).filter(name=>typeof name==='string')];\nconst saved=context.saved||steps.filter(s=>/add_work_order$/.test(s.action?.tool||'')).flatMap(s=>payloads(s.observation)).find(p=>p.persisted===true&&p.work_order?.id);\nconst scenarioResult=steps.flatMap(step=>payloads(step.observation)).find(value=>Array.isArray(value.tables)&&(value.matched_rows>0||value.voice_template?.scenarios?.length));\nlet reply;\nif(saved)reply=`工單 ${saved.work_order.fields?.工單編號||saved.work_order.id} ${saved.updated?'已補充':'已新增'}。`;\nelse if(context.facts.scenario_lookup?.kind==='catalog'){\n const {scenario_lookup:lookup,scenario_tables:tables=[]}=context.facts;\n const labels=tables.map(table=>{\n  const fields=table.headers.slice(0,3).join('、');\n  return (table.sheet||table.name)+(fields?`（${fields}）`:'');\n });\n const summary=labels.join('、');\n reply=summary?`${lookup.term} 可查詢：${summary.slice(0,175)}${summary.length>175?'…':''}。`:`目前沒有可查詢的 ${lookup.term} 資料表。`;\n}\nelse if(Array.isArray(context.facts.scenario_records)){\n const {reference,scenario_lookup:lookup,scenario_records:records,scenario_match_count:count}=context.facts;\n const term=reference||{\n  employee:`員工編號 ${lookup?.term}`,serial:`SN ${lookup?.term}`,customer_site:`${lookup?.customer} ${lookup?.term}`,\n }[lookup?.kind]||lookup.term;\n const key=reference||lookup.term;\n const row=records[0];\n if(!row)reply=reference?`沒有查到 ${reference} 的工單。`:`沒有查到 ${term} 的資料。`;\n else{\n  const fields=Object.entries(row.fields).flatMap(([name,value])=>{\n   const text=String(value??'').replace(/\\s+/g,' ').trim();\n   return !text||text.normalize('NFKC').toUpperCase()===key.normalize('NFKC').toUpperCase()?[]:[`${name} ${text}`];\n  });\n  const prefix=`${term}（${row.table}）`;\n  const suffix=(count>1?`；另有 ${count-1} 筆相符記錄`:'')+(row.ocr?'；圖片辨識結果請核對原件':'')+'。';\n  const details=fields.length?`：${fields.join('，')}`:'';\n  const budget=Math.max(0,200-suffix.length);\n  const line=prefix+details;\n  reply=(line.length>budget?line.slice(0,budget-1)+'…':line)+suffix;\n }\n}\nelse if(context.facts.selection&&!scenarioResult){\n const facts=context.facts,rows=facts.work_orders;\n const displayDate=date=>/^\\d{4}-\\d{2}-\\d{2}$/.test(date)?date.replaceAll('-','/'):date||'日期未完整';\n const reference=facts.reference;\n const label={newest:'最新',oldest:'最舊',all:'查到的'}[facts.selection]||'';\n const scope=facts.period?facts.period.slice(0,4)+'年'+Number(facts.period.slice(5))+'月':'';\n if(!rows.length&&reference)reply=`沒有查到 ${reference} 的工單。`;\n else if(!rows.length&&scope)reply=`${scope}沒有工單記錄。`;\n else if(!rows.length)reply=facts.undated_count>0?`${facts.undated_count} 筆工單日期未完整，無法判定${label}工單。`:`沒有查到${label}工單的有效記錄。`;\n else if(facts.view==='fans'||facts.view==='details'){\n  const items=rows.flatMap(r=>Array.isArray(r.fields.FAN明細)?r.fields.FAN明細:[]);\n  const total=items.length?items.reduce((n,item)=>n+Number(item.數量||0),0):rows.reduce((n,r)=>n+(Number(String(r.fields.FAN數量??'').replace(/個$/,''))||0),0);\n  const types=[...new Set(items.map(i=>i.類型).filter(Boolean))].map(type=>`${type} ${items.filter(i=>i.類型===type).reduce((n,i)=>n+Number(i.數量||0),0)} 個`).join('、');\n  const fan=total?`FAN 共 ${total} 個${types?'（'+types+'）':''}`:'未記錄 FAN 數量';\n  reply=facts.view==='fans'?`${fan}。`:rows.slice(0,2).map(({fields:f})=>`${f['派工單號']}：${displayDate(f['派工日期'])}，${f['維修內容']||f['維修項目']||f['派工項目']||'未記錄維修內容'}`).join('；')+`，${fan}。`;\n }else{\n  const summaries=rows.slice(0,3).map(({fields:f})=>`${f['派工單號']}（${displayDate(f['派工日期'])}）`);\n  reply=`${scope}${label}工單${rows.length===1?'為':'共 '+rows.length+' 筆：'}${rows.length===1?' ':''}${summaries.join('、')}${rows.length>3?'，其餘 '+(rows.length-3)+' 筆可再查詢':''}。`;\n  if(facts.undated_count>0&&facts.selection!=='all')reply+=`另有 ${facts.undated_count} 筆日期未完整，未列入排序。`;\n }\n}else if(context.report_reply&&!scenarioResult){\n reply=context.report_reply;\n}else{\n if(typeof item.output!=='string'||!item.output.trim())throw new Error('AI Agent returned an empty reply');\n reply=item.output.replace(/<(?:think|analysis)\\b[^>]*>[\\s\\S]*?(?:<\\/(?:think|analysis)>|$)/gi,'')\n  .replace(/<\\/?\\p{L}[\\p{L}\\p{N}_:-]*(?:\\s+[^<>]*)?\\s*\\/?>/gu,'').trim().replace(/^(?:AI|助理|GEOVISION)[：:]\\s*/i,'').split(/\\n|【|---/)[0].trim();\n // One conversational line, never a repeated essay, markdown or chain of thought.\n reply=reply.replace(/[😀-🙏🌀-🫿]/gu,'').trim();\n const first=reply.match(/^.*?[。？！!?](?:[」”])?/u)?.[0];\n if(first)reply=first;\n if(reply.length>200)reply='請告訴我這一輪要查詢或確認的重點？';\n if(/已(?:新增|儲存|建立|輸入完成|完成)|新增成功|保存成功|完成回報|回報完成|工單完成/.test(reply))reply='工單尚未儲存。';\n if(!reply||/[：:]$/.test(reply))reply='目前沒有足夠的資料回答這個問題。';\n}\nreturn [{json:{reply:reply.replace(/\\s*\\n\\s*/g,' '),tools:[...new Set(tools)]}}];\n"
       }
     },
     {
@@ -536,7 +599,41 @@
         390
       ],
       "parameters": {
-        "jsCode": "// n8n MCP workflow tools may nest JSON strings, arrays and MCP content blocks.\nfunction payloads(value,depth=0){\n if(depth>12||value==null)return [];\n if(typeof value==='string'){try{return payloads(JSON.parse(value),depth+1);}catch{return [];}}\n if(Array.isArray(value))return value.flatMap(v=>payloads(v,depth+1));\n if(typeof value!=='object')return [];\n return [value,...Object.values(value).flatMap(v=>payloads(v,depth+1))];\n}\nconst input=$('Prepare IVR input').first().json;\nconst decision=$('Register caller turn').first().json;\nconst results=payloads($input.first().json);\nconst saved=results.find(v=>v.persisted===true&&v.work_order?.id);\nconst facts=results.find(v=>Array.isArray(v.work_orders)&&v.selection)||results.find(v=>Array.isArray(v.passages));\nif(decision.tool==='add_work_order'&&!saved)throw new Error('Knowledge MCP did not confirm saving the work order');\nif(!facts&&!saved)throw new Error('Knowledge MCP returned no fresh retrieval result');\nif(decision.selection&&facts?.selection!==decision.selection)throw new Error('Knowledge MCP returned the wrong work-order selection');\nif(decision.period&&facts?.period!==decision.period)throw new Error('Knowledge MCP returned the wrong work-order month');\nif(decision.reference&&facts?.reference!==decision.reference)throw new Error('Knowledge MCP returned the wrong work-order reference');\nif(decision.view&&facts?.view!==decision.view)throw new Error('Knowledge MCP returned the wrong work-order detail view');\nconst preview=saved?{persisted:true,work_order_id:saved.work_order.id}:facts.work_orders?{selection:facts.selection,period:facts.period,selected_count:facts.selected_count,undated_count:facts.undated_count,work_orders:facts.work_orders.slice(0,3).map(({fields:f})=>({fields:{派工單號:f['派工單號'],派工日期:f['派工日期'],負責人:f['負責人'],客戶名稱:f['客戶名稱'],派工項目:f['派工項目']}}))}:{passages:facts.passages.slice(0,3).map(text=>text.slice(0,500)),sources:[...new Set((facts.sources||[]).map(s=>s.source))]};\nreturn [{json:{...input,...decision,facts:facts||{},saved,executed_tool:decision.tool||'retrieve_knowledge',retrieval_json:JSON.stringify(preview)}}];\n"
+        "jsCode": "// n8n MCP workflow tools may nest JSON strings, arrays and MCP content blocks.\nfunction payloads(value,depth=0){\n if(depth>12||value==null)return [];\n if(typeof value==='string'){try{return payloads(JSON.parse(value),depth+1);}catch{return [];}}\n if(Array.isArray(value))return value.flatMap(v=>payloads(v,depth+1));\n if(typeof value!=='object')return [];\n return [value,...Object.values(value).flatMap(v=>payloads(v,depth+1))];\n}\nconst input=$('Prepare IVR input').first().json;\nconst decision=$('Register caller turn').first().json;\nconst results=payloads($input.first().json);\nconst saved=results.find(v=>v.persisted===true&&v.work_order?.id);\nconst facts=results.find(v=>Array.isArray(v.scenario_records)&&(v.scenario_lookup||v.reference))||results.find(v=>Array.isArray(v.work_orders)&&v.selection)||results.find(v=>Array.isArray(v.passages));\nif(decision.tool==='add_work_order'&&!saved)throw new Error('Knowledge MCP did not confirm saving the work order');\nif(!facts&&!saved)throw new Error('Knowledge MCP returned no fresh retrieval result');\nif(decision.selection&&facts?.selection!==decision.selection)throw new Error('Knowledge MCP returned the wrong work-order selection');\nif(decision.period&&facts?.period!==decision.period)throw new Error('Knowledge MCP returned the wrong work-order month');\nif(decision.reference&&facts?.reference!==decision.reference)throw new Error('Knowledge MCP returned the wrong work-order reference');\nif(decision.view&&facts?.view!==decision.view)throw new Error('Knowledge MCP returned the wrong work-order detail view');\nconst preview=saved?{persisted:true,work_order_id:saved.work_order.id}:Array.isArray(facts.scenario_records)?{reference:facts.reference,scenario_match_count:facts.scenario_match_count,scenario_record:facts.scenario_records[0]}:facts.work_orders?{selection:facts.selection,period:facts.period,selected_count:facts.selected_count,undated_count:facts.undated_count,work_orders:facts.work_orders.slice(0,3).map(({fields:f})=>({fields:{派工單號:f['派工單號'],派工日期:f['派工日期'],負責人:f['負責人'],客戶名稱:f['客戶名稱'],派工項目:f['派工項目']}}))}:{passages:facts.passages.slice(0,3).map(text=>text.slice(0,500)),sources:[...new Set((facts.sources||[]).map(s=>s.source))]};\nreturn [{json:{...input,...decision,facts:facts||{},saved,executed_tool:decision.tool||'retrieve_knowledge',retrieval_json:JSON.stringify(preview)}}];\n"
+      }
+    },
+    {
+      "id": "ivr-route-scenario-result",
+      "name": "Scenario lookup result?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        270,
+        390
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "has-scenario-records",
+              "leftValue": "={{ $json.facts.scenario_records ? 'yes' : '' }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
       }
     },
     {
@@ -1223,9 +1320,15 @@
       ],
       "parameters": {
         "method": "DELETE",
-        "url": "={{ 'http://knowledge:8085/scenarios/' + $json.id }}",
+        "url": "={{ 'http://127.0.0.1:8087/scenarios/' + $json.id }}",
         "options": {
-          "timeout": 30000
+          "timeout": 600000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
         }
       }
     },
@@ -1240,8 +1343,70 @@
       ],
       "parameters": {
         "respondWith": "json",
-        "responseBody": "={{ $json }}",
+        "responseBody": "={{ $json.body }}",
+        "options": {
+          "responseCode": "={{ $json.statusCode }}"
+        }
+      }
+    },
+    {
+      "id": "scenario-file-import-webhook",
+      "name": "Upload scenario file",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        70,
+        2490
+      ],
+      "webhookId": "ivr-import-scenario",
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ivr-import-scenario",
+        "responseMode": "responseNode",
         "options": {}
+      }
+    },
+    {
+      "id": "scenario-file-import-request",
+      "name": "Create file scenario and tables",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        360,
+        2490
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:8087/imports",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.body }}",
+        "options": {
+          "timeout": 600000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "scenario-file-import-response",
+      "name": "Return file scenario",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        730,
+        2490
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json.body }}",
+        "options": {
+          "responseCode": "={{ $json.statusCode }}"
+        }
       }
     }
   ],
@@ -1294,7 +1459,7 @@
       "main": [
         [
           {
-            "node": "AI Agent",
+            "node": "Scenario lookup result?",
             "type": "main",
             "index": 0
           }
@@ -1327,7 +1492,7 @@
       "main": [
         [
           {
-            "node": "Prepare guidance",
+            "node": "Search imported tables?",
             "type": "main",
             "index": 0
           }
@@ -1415,7 +1580,7 @@
       "ai_tool": [
         [
           {
-            "node": "Knowledge MCP Server",
+            "node": "Scenario MCP",
             "type": "ai_tool",
             "index": 0
           }
@@ -1426,7 +1591,7 @@
       "ai_tool": [
         [
           {
-            "node": "Knowledge MCP Server",
+            "node": "Scenario MCP",
             "type": "ai_tool",
             "index": 0
           }
@@ -1715,6 +1880,75 @@
           }
         ]
       ]
+    },
+    "Upload scenario file": {
+      "main": [
+        [
+          {
+            "node": "Create file scenario and tables",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create file scenario and tables": {
+      "main": [
+        [
+          {
+            "node": "Return file scenario",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Search imported tables?": {
+      "main": [
+        [
+          {
+            "node": "Look up scenario records",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Prepare guidance",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Look up scenario records": {
+      "main": [
+        [
+          {
+            "node": "Return scenario records",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Scenario lookup result?": {
+      "main": [
+        [
+          {
+            "node": "Prepare IVR output",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "AI Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     }
   },
   "active": false,
@@ -1725,6 +1959,6 @@
   "pinData": {},
   "tags": [],
   "meta": {
-    "ivrWorkflowRevision": 12
+    "ivrWorkflowRevision": 18
   }
 }

@@ -16,13 +16,15 @@ ARG RAGCPP_REF=748bbd4895e0939857ffcc10276da1c91f20b439
 ARG BASE_CUDA_DEV_CONTAINER=docker.io/nvidia/cuda:${CUDA_VERSION}-devel-ubuntu${UBUNTU_VERSION}
 ARG BASE_CUDA_RUN_CONTAINER=docker.io/nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu${UBUNTU_VERSION}
 ARG BASE_NODE_CONTAINER=docker.io/library/node:22-alpine
+ARG BASE_N8N_CONTAINER=docker.n8n.io/n8nio/n8n:2.46.6
 
-# ── WEBUI: Build the embedded Svelte application ──────────────────────────────
+# ── WEBUI: Build the Svelte application and the SIP transcript module ────────
 FROM ${BASE_NODE_CONTAINER} AS webui-build
 
 WORKDIR /src
 COPY webui/native/package.json webui/native/package-lock.json ./webui/native/
-RUN npm --prefix webui/native ci
+RUN --mount=type=cache,id=audiocpp-webui-npm,target=/root/.npm \
+    npm --prefix webui/native ci --prefer-offline
 
 COPY webui/native/ ./webui/native/
 COPY webui/configs/ ./webui/configs/
@@ -35,13 +37,20 @@ COPY hotwords.csv ./hotwords.csv
 COPY greetings.csv ./greetings.csv
 RUN npm --prefix webui/native run build
 
+# Compose can build these targets directly without reaching the CUDA stages.
+FROM caddy:2.11.4-alpine AS geovision-web
+COPY --from=webui-build /src/webui/native/dist/index.html /src/webui/native/dist/logo_cloud.svg /srv/geovision/
+COPY --from=webui-build /src/webui/native/dist/_app/ /srv/geovision/_app/
+
+FROM ${BASE_N8N_CONTAINER} AS geovision-n8n
+COPY --from=webui-build /src/webui/native/dist/transcript.mjs /dialogue/transcript.mjs
+
 # ── RAG.CPP: Static RAG / GraphRAG worker ────────────────────────────────────
 FROM alpine:3.22 AS rag-build
 
 RUN apk add --no-cache build-base cmake git ca-certificates
 
 ARG RAGCPP_REF
-ARG BUILD_JOBS=0
 WORKDIR /src
 RUN mkdir rag-cpp && \
     cd rag-cpp && \
@@ -55,6 +64,7 @@ COPY .devops/rag-cpp-llamacpp-embedder.patch /tmp/rag-cpp-llamacpp-embedder.patc
 WORKDIR /src/rag-cpp
 RUN git apply /tmp/rag-cpp-cjk-tokenizer.patch && \
     git apply /tmp/rag-cpp-llamacpp-embedder.patch
+ARG BUILD_JOBS=0
 RUN --mount=type=cache,target=/src/rag-cpp/build,sharing=locked \
     cmake -S . -B build \
         -DCMAKE_BUILD_TYPE=Release \
@@ -164,8 +174,6 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 ENV CC=gcc-${GCC_VERSION} CXX=g++-${GCC_VERSION} CUDAHOSTCXX=g++-${GCC_VERSION}
 ENV CCACHE_DIR=/root/.cache/ccache CCACHE_MAXSIZE=10G CCACHE_COMPILERCHECK=content
 
-ARG CUDA_DOCKER_ARCH=default
-ARG BUILD_JOBS=0
 ARG LLAMA_CPP_REF
 
 WORKDIR /src
@@ -177,6 +185,8 @@ RUN mkdir llama.cpp && \
     git checkout --detach FETCH_HEAD
 
 WORKDIR /src/llama.cpp
+ARG CUDA_DOCKER_ARCH=default
+ARG BUILD_JOBS=0
 RUN --mount=type=cache,target=/src/llama.cpp/build,sharing=locked \
     --mount=type=cache,id=audiocpp-cuda-ccache,target=/root/.cache/ccache \
     if [ "${CUDA_DOCKER_ARCH}" != "default" ]; then \
@@ -207,7 +217,6 @@ RUN --mount=type=cache,target=/src/llama.cpp/build,sharing=locked \
 
 # ── SIP: Build native SIP/RTP support without host-side dependencies ────────
 FROM ubuntu:${UBUNTU_VERSION} AS sip-build
-ARG BUILD_JOBS=2
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential cmake pkg-config git ca-certificates libssl-dev \
         zlib1g-dev libopus-dev libcurl4-openssl-dev libjson-c-dev && \
@@ -215,6 +224,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /src
 RUN git clone --depth 1 --branch v4.12.0 https://github.com/baresip/re.git && \
     git clone --depth 1 --branch v4.12.0 https://github.com/baresip/baresip.git
+ARG BUILD_JOBS=2
 RUN cmake -S re -B re/build -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_INSTALL_PREFIX=/opt/sip -DCMAKE_INSTALL_LIBDIR=lib \
         -DCMAKE_INSTALL_RPATH=/opt/sip/lib && \
@@ -254,7 +264,7 @@ USER ubuntu
 ENTRYPOINT ["/app/sip-entrypoint.sh"]
 
 # ── BASE: Shared runtime (NVIDIA CUDA + common libs) ──────────────────────────
-FROM ${BASE_CUDA_RUN_CONTAINER} AS base
+FROM ${BASE_CUDA_RUN_CONTAINER} AS runtime-base
 
 ARG BUILD_DATE=N/A
 ARG APP_VERSION=N/A
@@ -288,12 +298,13 @@ RUN if ! id -u ubuntu >/dev/null 2>&1; then \
         useradd --create-home --shell /bin/bash ubuntu; \
     fi
 
-COPY --from=build /app/lib/ /app
-
 WORKDIR /app
 
+FROM runtime-base AS base
+COPY --from=build /app/lib/ /app
+
 # ── FULL: All binaries + entrypoint.sh multiplexer ────────────────────────────
-FROM base AS full
+FROM runtime-base AS full
 
 # Keep conversion dependencies cached independently of native binary changes.
 COPY tools/community_models/audio8_tts_conversion_requirements.txt /tmp/audio8_tts_conversion_requirements.txt
@@ -308,6 +319,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     rm -f /tmp/audio8_tts_conversion_requirements.txt && \
     rm -rf /var/lib/apt/lists/*
 
+COPY --from=build /app/lib/ /app
 COPY --from=build /app/full /app
 COPY model_specs/ /app/model_specs/
 COPY assets/framework/models/ /app/assets/framework/models/

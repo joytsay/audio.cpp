@@ -6,6 +6,7 @@ import ExcelJS from 'exceljs';
 import JSZip from 'jszip';
 import {workOrderSelection,filenames,createKnowledgeStore,readWorkbook,extractPdf,createKnowledgeServer} from './server.mjs';
 import {createWorkOrderStore} from './work-orders.mjs';
+import {callDecision} from './conversation.mjs';
 const dir=await fs.mkdtemp(path.join(os.tmpdir(),'ivr-knowledge-test-'));
 try{
  // Generate fixtures locally; production no longer ships scenario documents.
@@ -27,6 +28,34 @@ try{
  assert.deepEqual(await empty.documents(),{documents:[],format:'qa'});
  assert.equal((await empty.documents('最新工單')).result.selected_count,0);
  assert.equal((await empty.documents('保固多久？')).documents[0].answer,'目前尚未上傳情境文件。');
+ const referenceQuery=callDecision(['YCS-16866 的內容']);
+ assert.equal(referenceQuery.reference,'YCS-16866');
+ assert.equal(callDecision(['查詢 YCS-16866']).reference,'YCS-16866');
+ assert.equal(callDecision(['YCS-16862']).reference,'YCS-16862');
+ assert.equal(callDecision(['我要新增工單。','YCS-16862']).tool,'add_work_order');
+ const nearOrder={id:'near',fields:{派工單號:'YCS-168660'}};
+ const exactOrder={id:'exact',fields:{派工單號:'ycs-16866',派工項目:'更換風扇'}};
+ const fallback=await empty.documents(referenceQuery.query,[nearOrder]);
+ assert.equal(fallback.result.selected_count,0);
+ assert.equal(fallback.scenario_reference,'YCS-16866');
+ const native=await empty.documents(referenceQuery.query,[nearOrder,exactOrder]);
+ assert.equal(native.scenario_reference,undefined);
+ assert.equal(native.result.work_orders[0].fields.派工項目,'更換風扇');
+ for(const [query,lookup] of [
+  ['查尋F20P1廠區',{kind:'site',term:'F20P1'}],
+  ['查詢 黃思翰',{kind:'keyword',term:'黃思翰'}],
+  ['查詢員工 黃思翰？',{kind:'person',term:'黃思翰'}],
+  ['CSD 可以查詢什麼',{kind:'catalog',term:'CSD'}],
+  ['查詢 SN 14778788',{kind:'serial',term:'14778788'}],
+  ['查 台積電 F20P1',{kind:'customer_site',term:'F20P1',customer:'台積電'}],
+  ['查員工編號10100857',{kind:'employee',term:'10100857'}],
+  ['查設備類型 EF',{kind:'keyword',term:'EF',sheet:'設備類型'}],
+ ]){
+  const decision=callDecision(['我要新增工單。',query]);
+  assert.equal(decision.intent,'lookup');
+  assert.deepEqual((await empty.documents(decision.query)).scenario_lookup,lookup);
+ }
+ assert.ok((await empty.documents('查詢保固')).documents.length,'document questions keep the Q/A path');
  const original=await fs.readFile(path.join(dir,filenames.excel));
  const dataRoot=path.join(dir,'data'),orders=createWorkOrderStore({root:dataRoot});
  let ocrCalls=0;

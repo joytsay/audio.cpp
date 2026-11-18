@@ -4,7 +4,7 @@ import {createRequire} from 'node:module';
 
 // Use n8n's API for startup maintenance so its running webhook registry
 // stays synchronized. Temporary scoped keys are removed after each operation.
-export async function withN8nApi(scopes,run,{apiUrl='http://127.0.0.1:5678'}={}){
+export async function withN8nApi(scopes,run,{apiUrl='http://127.0.0.1:5678',expiresIn=120}={}){
   const require=createRequire('/usr/local/lib/node_modules/n8n/package.json');
   require('reflect-metadata');
   const {Container}=require('@n8n/di');
@@ -21,7 +21,7 @@ export async function withN8nApi(scopes,run,{apiUrl='http://127.0.0.1:5678'}={})
     const service=new PublicApiKeyService(repository,Container.get(JwtService),null,console);
     key=await service.createPublicApiKeyForUser(user,{
       label:`Temporary workflow ID migration ${Date.now()}`,
-      expiresAt:Math.floor(Date.now()/1000)+120,
+      expiresAt:Math.floor(Date.now()/1000)+expiresIn,
       scopes,
     });
     return await run(async (route,body,method) => {
@@ -29,7 +29,7 @@ export async function withN8nApi(scopes,run,{apiUrl='http://127.0.0.1:5678'}={})
         method:method||(body===undefined?'GET':'POST'),headers:{'X-N8N-API-KEY':key.apiKey,'Content-Type':'application/json'},
         ...(body===undefined?{}:{body:JSON.stringify(body)}),signal:AbortSignal.timeout(30000),
       });
-      if(!response.ok)throw new Error(`n8n API ${route}: HTTP ${response.status}`);
+      if(!response.ok)throw Object.assign(new Error(`n8n API ${route}: HTTP ${response.status}`),{status:response.status});
       const raw=await response.text();return raw?JSON.parse(raw):null;
     });
   }finally{

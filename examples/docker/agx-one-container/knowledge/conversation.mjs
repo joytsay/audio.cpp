@@ -5,7 +5,7 @@ export function spokenNumber(text){
  let total=0,current=0;for(const c of text){if(digits[c]!==undefined)current=Number(digits[c]);else if(/[十百千]/.test(c)){total+=(current||1)*({十:10,百:100,千:1000}[c]);current=0;}}return String(total+current);
 }
 export function normalizeCallText(text){
- let value=text.replace(/工单/g,'工單').replace(/最旧/g,'最舊').replace(/查询/g,'查詢').replace(/这个月/g,'這個月').replace(/这月/g,'這月').replace(/帮/g,'幫').replace(/设备/g,'設備').replace(/编号/g,'編號').replace(/维修/g,'維修').replace(/项目/g,'項目').replace(/数量/g,'數量').replace(/名称/g,'名稱').replace(/测试/g,'測試').replace(/结果/g,'結果').replace(/没有/g,'沒有').replace(/问题/g,'問題').replace(/试机/g,'試機').replace(/起机/g,'起機').replace(/确认/g,'確認').replace(/正确/g,'正確').replace(/备注/g,'備註').replace(/回报/g,'回報').replace(/台积电/g,'台積電').replace(/号/g,'號').replace(/个/g,'個').replace(/时间/g,'時間').replace(/为/g,'為');
+ let value=text.replace(/工单/g,'工單').replace(/最旧/g,'最舊').replace(/查[询尋寻]/g,'查詢').replace(/这个月/g,'這個月').replace(/这月/g,'這月').replace(/帮/g,'幫').replace(/设备/g,'設備').replace(/编号/g,'編號').replace(/维修/g,'維修').replace(/项目/g,'項目').replace(/数量/g,'數量').replace(/名称/g,'名稱').replace(/测试/g,'測試').replace(/结果/g,'結果').replace(/没有/g,'沒有').replace(/问题/g,'問題').replace(/试机/g,'試機').replace(/起机/g,'起機').replace(/确认/g,'確認').replace(/正确/g,'正確').replace(/备注/g,'備註').replace(/回报/g,'回報').replace(/台积电/g,'台積電').replace(/号/g,'號').replace(/个/g,'個').replace(/时间/g,'時間').replace(/为/g,'為');
  const numbers='[零〇○一二兩两三四五六七八九幺十百千]+';
  value=value.replace(/五年一[维維]/g,'五年一維');
  value=value.replace(new RegExp(`(${numbers})(?=年|月|日|號|個)`,'g'),(match,n,offset)=>value.slice(offset,offset+4)==='五年一維'?match:spokenNumber(n));
@@ -17,7 +17,7 @@ const negative=/不正確|不對|有誤|錯誤|尚未|未確認|不正常|異常
 export const confirmsStartup=raw=>{const text=normalizeCallText(raw);return !negative.test(text)&&!/[？?]|查詢|如何|怎麼/.test(text)&&/(?:起機(?:測試)?|試機|測試)(?:結果)?\s*(?:都|是|為|很)?\s*(?:正常|沒問題|沒有問題)/.test(text);};
 export const isReport=raw=>{const text=normalizeCallText(raw);return /回報工單|增加工單|新增工單|建立工單|工單回報/.test(text)&&!/如何|怎麼|流程|規則|查詢/.test(text);};
 export function identifiers(raw){
- return [...normalizeCallText(raw).matchAll(/(?<![A-Za-z0-9_/-])([A-Za-z]{1,6}\d[A-Za-z0-9_/-]*)(?![A-Za-z0-9_/-])/g)].map(m=>m[1]);
+ return [...normalizeCallText(raw).matchAll(/(?<![A-Za-z0-9_/-])([A-Za-z]{1,6}-?\d[A-Za-z0-9_/-]*)(?![A-Za-z0-9_/-])/g)].map(m=>m[1]);
 }
 export function fanItems(text){
  const items=new Map();
@@ -35,9 +35,12 @@ function localMonth(now){const parts=Object.fromEntries(new Intl.DateTimeFormat(
 export function lookupIntent(raw,previous=null,now=new Date()){
  const text=normalizeCallText(raw);
  if(isReport(text)||/流程|規則|SOP|(?:如何|怎麼).*(?:回報|新增)/i.test(text))return null;
+ const structured=scenarioLookupIntent(text);
+ if(structured&&(structured.kind!=='keyword'||(structured.sheet&&structured.sheet!=='派工')))return null;
  const codes=identifiers(text);
  const fanQuestion=/FAN.*(?:幾|多少|數量)|(?:幾|多少).*FAN/i.test(text);
- const detailQuestion=/內容|明細|詳情|細節|呢[？?。\s]*$/.test(text)||fanQuestion;
+ const detailQuestion=/內容|明細|詳情|細節|呢[？?。\s]*$/.test(text)||fanQuestion||
+  (codes.some(code=>/^[A-Za-z]+-\d/.test(code))&&/查|找出/.test(text));
  const explicit=/[工公]單/.test(text)&&/最新|最舊|最早|最近|列出|所有|全部|清單|查詢|哪些|歷史|找出|內容|明細|詳情|細節/.test(text);
  const shortSelection=/^(?:那|我要|我想|查詢|查|看|請|幫我|直接|的|呢|是|[。？?，,\s])*(?:最新|最舊|最早|全部|所有)(?:的|呢|是|[。？?，,\s])*$/u.test(text);
  const dateOnly=/^(?:(?:\d{4}年)?\d{1,2}月|\d{4}-\d{2}|這個月|這月|本月|上個月)(?:的|呢|是|[。？?，,\s])*$/u.test(text);
@@ -65,6 +68,41 @@ export function resolveLookup(text,history=[],now=new Date()){
  }
  return lookupIntent(text,previous,now);
 }
+export function scenarioLookupIntent(raw){
+ const text=normalizeCallText(raw.normalize('NFKC')).trim();
+ const catalog=text.match(/^(CSD(?:資料庫)?)(?:\s*可以|\s*能)?\s*(?:查詢|查|搜尋)\s*(?:什麼|甚麼|哪些(?:資料|表格|資料表)?)[。？?!！\s]*$/i);
+ if(catalog)return {kind:'catalog',term:catalog[1]};
+ const subject=text.match(/^(?:請\s*)?(?:幫我\s*)?(?:查詢|查找|查一下|找出|查)\s*[:：]?\s*(.+?)[。？?!！\s]*$/u)?.[1];
+ if(!subject)return null;
+ const table=subject.match(/^(派工|客戶設備|設備類型|通訊錄)(?:\s*[:：]?\s*)(.*)$/);
+ const sheet=table?.[1];
+ const target=table?table[2].trim():subject;
+ if(sheet&&!target)return {kind:'catalog',term:sheet,sheet};
+ const scoped=sheet?{sheet}:{};
+ const serial=target.match(/^(?:S\s*\/?\s*N|序號|序列號|序列編號|機身序號|serial(?:\s+number)?)\s*[:#]?\s*([a-z0-9][a-z0-9._/-]{0,63})$/i);
+ if(serial)return {kind:'serial',term:serial[1],...scoped};
+ const employee=target.match(/^(?:員工編號|员工編號|員編|工號|員工ID|employee\s*(?:id|number|no\.?))\s*[:#]?\s*([a-z0-9][a-z0-9_-]{0,47})$/i);
+ if(employee)return {kind:'employee',term:employee[1],...scoped};
+ const customerSite=target.match(/^([\p{Script=Han}][\p{Script=Han}a-z0-9 .&-]{1,39}?)\s*[,，]?\s*(F\d+P\d+[a-z0-9_/-]*)\s*(?:廠區|厂区)?$/iu);
+ if(customerSite)return {kind:'customer_site',term:customerSite[2],customer:customerSite[1].trim(),...scoped};
+ const site=target.match(/^(?:廠區|厂区)\s*([\p{Script=Han}a-z0-9_/-]{1,24})$|^([\p{Script=Han}a-z0-9_/-]{1,24})\s*(?:廠區|厂区)$/iu);
+ if(site)return {kind:'site',term:site[1]||site[2],...scoped};
+ const name=target.match(/^(?:員工|员工|姓名|聯絡人)\s*([\p{Script=Han}]{2,6}|[a-z][a-z .'-]{1,48})$/iu);
+ if(name)return {kind:'person',term:name[1].trim(),...scoped};
+ if(sheet||(/^(?:[\p{Script=Han}]{3,4}|[a-z][a-z0-9_/-]{1,48})$/iu.test(target)&&
+    !/^(?:工單內容|聯絡人)$/.test(target))){
+  return {kind:'keyword',term:target,...scoped};
+ }
+ return null;
+}
+export function dispatchDate(value){
+ const text=String(value??'').normalize('NFKC').trim();
+ const match=text.match(/^(\d{4})[-/年](\d{1,2})[-/月](\d{1,2})(?:日|號)?$/)||
+  text.match(/^(\d{4})(\d{2})\/(\d{1,2})$/)||text.match(/^(\d{4})(\d{2})(\d{2})$/);
+ if(!match)return '';
+ const date=`${match[1]}-${match[2].padStart(2,'0')}-${match[3].padStart(2,'0')}`;
+ return !Number.isNaN(Date.parse(date))&&new Date(date).toISOString().slice(0,10)===date?date:'';
+}
 export function reportDate(raw,now=new Date()){
  const text=normalizeCallText(raw);
  for(const match of text.matchAll(/(\d{4})[年/-](\d{1,2})[月/-](\d{1,2})(?:日|號)?/g)){
@@ -84,7 +122,7 @@ export function reportDraft(history,now=new Date()){
  if(previous===start-1&&previous>=0&&/^(?:我(?:想要|想|要)?|請|幫我)?(?:回報工單|增加工單|新增工單|建立工單|工單回報)[。！!，,\s]*$/.test(normalizeCallText(history[previous])))start=previous;
  const turns=history.slice(start),normalized=turns.map(t=>normalizeCallText(t).replace(/([A-Z]\d{2,}5)年一維/g,'$1，五年一維')); // ASR may merge the final 5 with 五年一維.
  const cancelled=normalized.some(t=>/取消(?:回報|工單)|不要(?:新增|儲存|回報)|不用(?:新增|儲存)/.test(t));
- const detailTurns=normalized.filter(t=>!lookupIntent(t)&&!confirmsStartup(t)&&!/^(?:正確|確認|是的|沒錯)[。！!\s]*$/.test(t));
+ const detailTurns=normalized.filter(t=>!lookupIntent(t)&&!scenarioLookupIntent(t)&&!confirmsStartup(t)&&!/^(?:正確|確認|是的|沒錯)[。！!\s]*$/.test(t));
  const date=detailTurns.map(t=>reportDate(t,now)).find(Boolean)||'';
  const details=detailTurns.filter(t=>!/^\s*(?:我(?:想要|想|要)?|請|幫我)?(?:回報工單|增加工單|新增工單|建立工單|工單回報)[。！!，,\s]*$/.test(t));
  const content=details.join('；');
@@ -101,8 +139,12 @@ export function reportDraft(history,now=new Date()){
  return {start,turns,date,details:content,fields,fanQuantity:fan,fanItems:items,cancelled};
 }
 export function callDecision(history,now=new Date()){
- const text=history.at(-1),lookup=resolveLookup(text,history,now);
+ const text=history.at(-1);
+ const bareOrder=/^YCS-\d+[。？?!！\s]*$/i.test(text.normalize('NFKC').trim());
+ const query=bareOrder&&!isReport(history.at(-2)??'')?`查詢 ${text.normalize('NFKC').trim()}`:text;
+ const lookup=resolveLookup(query,[...history.slice(0,-1),query],now);
  if(lookup)return {intent:'lookup',tool:'retrieve_knowledge',query:lookup.query,selection:lookup.selection,period:lookup.period,reference:lookup.reference,view:lookup.view,...(lookup.invalidPeriod?{report_reply:'沒有查到該月份的工單記錄。'}:{})};
+ if(scenarioLookupIntent(text))return {intent:'lookup',tool:'retrieve_knowledge',query:normalizeCallText(text)};
  if(!isReport(text)&&/[？?]|嗎|呢[。\s]*$|幾個|多少|可以.*(?:講|說|告訴)/.test(normalizeCallText(text)))return {intent:'knowledge',tool:'retrieve_knowledge',query:normalizeCallText(text)};
  const draft=reportDraft(history,now);
  if(!draft)return {intent:'knowledge',tool:'retrieve_knowledge',query:normalizeCallText(text),...(confirmsStartup(text)?{report_reply:'目前沒有待儲存的工單。'}:{})};

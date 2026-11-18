@@ -1,5 +1,6 @@
 import {publishWorkflow} from './publish-workflow.mjs';
 import {unpublishWorkflow,upgradeResultsColumn} from './unpublish-workflow.mjs';
+import {createScenarioManager} from './scenario-workflows.mjs';
 import { spawn } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
@@ -146,6 +147,13 @@ export function mergedWorkflowMigration(existing, rag, template) {
   const next={...structuredClone(existing),...structuredClone(template),id:existing.id,active:existing.active};
   next.meta={...existing.meta,...template.meta};
   next.settings={...existing.settings,...template.settings};
+  const scenarioTrigger=next.nodes.find(node=>node.id==='maintenance-mcp-trigger');
+  if(scenarioTrigger){
+    for(const node of existing.nodes.filter(node=>node.id.startsWith('scenario-file-')&&node.type==='@n8n/n8n-nodes-langchain.toolWorkflow')){
+      next.nodes.push(structuredClone(node));
+      next.connections[node.name]={ai_tool:[[{node:scenarioTrigger.name,type:'ai_tool',index:0}]]};
+    }
+  }
   const sources=[...(rag?.nodes??[]),...existing.nodes];
   for(const node of next.nodes){
     const old=sources.find(n=>n.id===node.id||n.name===node.name);
@@ -277,7 +285,10 @@ export async function importMissing({ templates = '/templates', run = runCli, ha
 
 export async function prepareStartupWorkflow({
   install=importMissing,
-  upgradeTables=upgradeResultsColumn,
+  upgradeTables=async()=>{
+    await upgradeResultsColumn();
+    await createScenarioManager().repairDispatchDates();
+  },
   publish=publishWorkflow,
   autoPublish=process.env.N8N_AUTO_PUBLISH_WORKFLOW!=='false',
   log=console.log,

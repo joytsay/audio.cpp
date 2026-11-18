@@ -86,7 +86,12 @@ services:
       start_period: 30s
 
   https:
-    image: caddy:2.11.4-alpine
+    image: audio.cpp-geovision-web:local
+    pull_policy: never
+    build:
+      context: ../../..
+      dockerfile: .devops/cuda.Dockerfile
+      target: geovision-web
     container_name: ivr-https
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -106,7 +111,14 @@ services:
     restart: unless-stopped
 
   n8n:
-    image: docker.n8n.io/n8nio/n8n:${N8N_VERSION:-2.46.6}
+    image: audio.cpp-geovision-n8n:local
+    pull_policy: never
+    build:
+      context: ../../..
+      dockerfile: .devops/cuda.Dockerfile
+      target: geovision-n8n
+      args:
+        BASE_N8N_CONTAINER: docker.n8n.io/n8nio/n8n:${N8N_VERSION:-2.46.6}
     container_name: ivr-n8n
     init: true
     entrypoint: ["/bin/sh", "/templates/start-n8n.sh"]
@@ -141,7 +153,6 @@ services:
       - ./n8n:/templates:ro
       - ./knowledge:/knowledge:ro
       - ../../../webui/native/src/lib/n8n-dialogue.ts:/dialogue/n8n-dialogue.ts:ro
-      - ../../../webui/native/dist/transcript.mjs:/dialogue/transcript.mjs:ro
       - ../../../webui/native/src/lib/mcp-http.ts:/dialogue/mcp-http.ts:ro
     healthcheck:
       test: ["CMD", "node", "-e", "Promise.all(['http://127.0.0.1:5678/healthz','http://127.0.0.1:8086/health'].map(u=>fetch(u))).then(rs=>process.exit(rs.every(r=>r.ok)?0:1)).catch(()=>process.exit(1))"]

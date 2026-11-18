@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy, tick } from "svelte";
   import { n8nDialogue, type DialogueSource } from "$lib/n8n-dialogue";
-  import {addKnowledgeScenario,listKnowledgeScenarios,removeKnowledgeScenario,type KnowledgeScenario} from "$lib/knowledge-scenarios";
+  import {importScenarioFiles,listKnowledgeScenarios,removeKnowledgeScenario,type KnowledgeScenario} from "$lib/knowledge-scenarios";
   import SipSidebar from "$lib/SipSidebar.svelte";
   import type { SipSettings, SipLive } from "$lib/sip";
   import PanelDivider from "$lib/PanelDivider.svelte";
@@ -485,7 +485,7 @@
   }
   let scenarioMode: "audio" | "add-scenario" | `scenario:${string}` = "add-scenario";
   let knowledgeScenarios: KnowledgeScenario[] = [];
-  let newScenarioName = "", newScenarioFiles: File[] = [], knowledgeUploading = false, knowledgeDeleting = false, knowledgeStatus = "";
+  let newScenarioFiles: File[] = [], knowledgeUploading = false, knowledgeDeleting = false, knowledgeStatus = "";
   let knowledgeAborter: AbortController | null = null;
   $: selectedKnowledgeScenario = knowledgeScenarios.find(scenario => scenarioMode === `scenario:${scenario.id}`);
   async function refreshKnowledgeScenarios() {
@@ -502,33 +502,33 @@
       knowledgeScenarios=knowledgeScenarios.filter(saved=>saved.id!==scenario.id);
       scenarioMode="add-scenario";
       changeScenario();
-      scenarioStatus=`${scenario.name} removed · uploaded files and Q/A deleted`;
+      scenarioStatus=`${scenario.name} removed`;
       record("SCENARIO_REMOVED",scenarioStatus);
     }catch(cause){knowledgeStatus=cause instanceof Error?cause.message:String(cause);}
     finally{knowledgeDeleting=false;}
   }
   function chooseKnowledgeFiles(files: FileList | null) {
     newScenarioFiles = Array.from(files || []);
-    if (!newScenarioName.trim() && newScenarioFiles[0]) newScenarioName = newScenarioFiles[0].name.replace(/\.[^.]+$/, "");
     knowledgeStatus = "";
   }
   async function uploadKnowledgeScenario() {
     if (knowledgeUploading) return;
     knowledgeUploading = true; knowledgeAborter = new AbortController();
-    knowledgeStatus = "Uploading files, creating Q/A and indexing knowledge…";
+    knowledgeStatus = "Creating n8n tables and Scenario MCP tools…";
+    const imported: KnowledgeScenario[] = [];
     try {
-      const result = await addKnowledgeScenario(newScenarioName,newScenarioFiles,AbortSignal.any([knowledgeAborter.signal,AbortSignal.timeout(900000)]));
-      await refreshKnowledgeScenarios();
-      if (!result.indexed) {
-        knowledgeStatus = `${result.scenario.qaCount} Q/A pairs saved. Indexing failed: ${result.index_error || "retry Add scenario"}. You can retry with the same files.`;
-        return;
-      }
-      knowledgeStatus = `${result.scenario.name} added · ${result.scenario.qaCount} Q/A pairs ready`;
-      record("SCENARIO_ADDED", knowledgeStatus);
-      scenarioMode = `scenario:${result.scenario.id}`;
+      await importScenarioFiles(newScenarioFiles,AbortSignal.any([knowledgeAborter.signal,AbortSignal.timeout(900000)]),scenario=>{
+        imported.push(scenario);
+        knowledgeScenarios=[...knowledgeScenarios.filter(saved=>saved.id!==scenario.id),scenario];
+        record("SCENARIO_ADDED", `${scenario.name} added to Scenario MCP`);
+      });
+      const scenario=imported.at(-1);
+      if(!scenario)return;
+      knowledgeStatus = `Imported ${imported.length} ${imported.length===1?"file":"files"} into Scenario MCP.`;
+      scenarioMode = `scenario:${scenario.id}`;
       dialogueSource = "n8n";
       await saveCallOption({dialogue_source:"n8n"});
-      newScenarioFiles = []; newScenarioName = "";
+      newScenarioFiles = [];
     } catch (cause) {
       if (!knowledgeAborter.signal.aborted) knowledgeStatus = cause instanceof Error ? cause.message : String(cause);
     } finally { knowledgeUploading = false; knowledgeAborter = null; }
@@ -3368,22 +3368,22 @@
             ></label
           >
           {#if scenarioMode === "add-scenario"}
-            <label>Scenario name<input aria-label="New scenario name" bind:value={newScenarioName} maxlength="120" disabled={knowledgeUploading} /></label>
             <label class="audio-choice">Choose documents<input
               class="audio-file-input" aria-label="Scenario documents" type="file" multiple accept=".pdf,.docx,.xlsx,.csv,.txt,.md"
               disabled={knowledgeUploading} on:change={(event) => chooseKnowledgeFiles(event.currentTarget.files)}
             /></label>
             <small>PDF, DOCX, XLSX, CSV, TXT, Markdown · up to 8 files, 10 MiB total</small>
             {#each newScenarioFiles as file}<p>{file.name} · {Math.ceil(file.size / 1024)} KB</p>{/each}
-            <button disabled={knowledgeUploading || !newScenarioName.trim() || !newScenarioFiles.length} on:click={uploadKnowledgeScenario}>
+            <button disabled={knowledgeUploading || !newScenarioFiles.length} on:click={uploadKnowledgeScenario}>
               {knowledgeUploading ? "Adding scenario…" : "Add scenario"}
             </button>
             <p role="status">{knowledgeStatus}</p>
           {:else if selectedKnowledgeScenario}
-            <p><strong>{selectedKnowledgeScenario.name}</strong> · {selectedKnowledgeScenario.qaCount} Q/A pairs</p>
+            <p><strong>{selectedKnowledgeScenario.name}</strong>{selectedKnowledgeScenario.tool ? " · Scenario MCP" : ` · ${selectedKnowledgeScenario.qaCount} Q/A pairs`}</p>
             {#each selectedKnowledgeScenario.files as file}<p>{file.name}</p>{/each}
-            <small>These documents are available to n8n knowledge retrieval. Speak or type a question during a call.</small>
-            <button title="Remove this scenario’s uploaded files and Q/A" disabled={knowledgeDeleting || knowledgeUploading} on:click={removeSelectedKnowledgeScenario}><Trash2 size={14} /> {knowledgeDeleting ? "Removing scenario…" : "Remove scenario"}</button>
+            {#each selectedKnowledgeScenario.tables ?? [] as table}<p>{table.name} · {table.rowCount} rows</p>{/each}
+            <small>Speak or type a question during a call.</small>
+            <button title="Remove this scenario and its imported data" disabled={knowledgeDeleting || knowledgeUploading} on:click={removeSelectedKnowledgeScenario}><Trash2 size={14} /> {knowledgeDeleting ? "Removing scenario…" : "Remove scenario"}</button>
             <p role="status">{knowledgeStatus}</p>
           {:else if isAudioScenario}
             <div class="scenario-upload">

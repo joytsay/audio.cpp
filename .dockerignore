@@ -20,6 +20,11 @@ tools/community_models/audio8_asr/*
 build/
 build*/
 models/
+# AGX runtime volumes are supplied by Compose, outside the image build.
+audio-models/
+llama-models/
+rag-data/
+voices/
 reference/
 logs/
 resources/

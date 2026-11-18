@@ -104,9 +104,9 @@ reply. Work-order saves are acknowledged only after the write succeeds.
 
 ## Upload a scenario
 
-**Scenarios → Add New Scenario** accepts PDF, DOCX, XLSX, XLS, CSV, TXT,
-Markdown and JSON. Each uploaded file creates one named tool, one subworkflow
-and one native Data Table.
+**Scenarios → Add New Scenario** accepts PDF, DOCX, XLSX, CSV, TXT and Markdown.
+Each uploaded file creates one tool and one n8n subworkflow. Excel files create
+a native Data Table per worksheet. Other files create one same-named table.
 
 ```text
                  Add New Scenario · upload file
@@ -118,9 +118,9 @@ and one native Data Table.
                  └─────────────┬─────────────┘
                                ▼
                  ┌───────────────────────────┐
-                 │ Selected LLM translates   │
-                 │ unsupported table headers │
-                 │ Original labels preserved│
+                 │ Map source headers to    │
+                 │ n8n-compatible column IDs│
+                 │ Preserve original labels │
                  └─────────────┬─────────────┘
                                ▼
                  ┌───────────────────────────┐
@@ -139,19 +139,19 @@ and one native Data Table.
 | Uploaded file | MCP tool display name | n8n subworkflow | n8n Data Table |
 | --- | --- | --- | --- |
 | `geovision_extension_directory_clean.csv` | `geovision_extension_directory_clean` | `geovision_extension_directory_clean` | `geovision_extension_directory_clean` |
-| `CSD資料庫.xlsx` | `CSD資料庫` | `CSD資料庫` | `CSD資料庫` |
+| `CSD資料庫.xlsx` | `CSD資料庫` | `CSD資料庫` | `CSD資料庫_派工`, `CSD資料庫_客戶設備`, `CSD資料庫_設備類型`, `CSD資料庫_通訊錄` |
 | `情境模擬_20261105.docx` | `情境模擬_20261105` | `情境模擬_20261105` | `情境模擬_20261105` |
 
 These are upload examples; documents are added by the user. MCP uses an ASCII
 wire alias where needed while preserving the filename as the display name.
-Excel sheets share one table with sheet provenance. Dialogue examples guide the
-conversation; example identities and quantities are not current caller facts.
+The Excel tool can search all worksheets or a specified worksheet. Dialogue
+examples guide the conversation and retain their source attribution.
 Screenshot tables use OCR and need verification against the source images.
 
 The MCP tool exposes a callable capability to the agent; its subworkflow executes
 the table query. Tool results restore original headers even though n8n stores
 English column IDs. Colliding translated IDs receive suffixes such as `_2`.
-Identical upload retries reuse saved mappings and imported row keys.
+Identical upload retries reuse saved mappings and retain duplicate source rows.
 
 ## Components and entry points
 
@@ -178,7 +178,7 @@ endpoint. The main workflow remains **GeoVision · Workflow** as uploads add too
 
 Original files, templates and mappings persist in `audiocpp-knowledge-data`;
 native Data Tables and workflows persist in the n8n data volume. Removing a
-scenario removes its registered tool, generated subworkflow, owned Data Table
+scenario removes its registered tool, generated subworkflow, owned Data Tables
 and stored source files.
 
 Diagram layout inspired by the boxed architecture overview in

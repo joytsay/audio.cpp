@@ -80,7 +80,9 @@ that source changes. Both regular RAG and GraphRAG use its linked department/con
 Restart `voice-ai` after saving prompt edits to refresh the index.
 
 `BUILD_JOBS=2` intentionally limits compiler memory use on Jetson. Increase it
-only when the board has enough free unified memory and swap. This deployment
+only when the board has enough free unified memory and swap. To try eight jobs
+for one voice image build, run `BUILD_JOBS=8 docker compose build voice-ai`.
+The shell setting overrides the value in `.env` for that command. This deployment
 builds the full audio.cpp model catalog, including the pipeline models. It also builds llama.cpp with that same CUDA
 toolkit and SM87 target; a newer prebuilt llama.cpp CUDA image is not mixed into
 the JetPack runtime. NCCL is disabled because AGX Orin uses one CUDA device;
@@ -117,9 +119,9 @@ all downloaded audio and LLM weights.
 - `http://HOST:8083/` opens the full GeoVision interface with all tabs.
 - `https://HOST:8084/` opens the full interface with HTTPS.
 - All four host ports use Caddy; the native audio server stays inside the container.
-- The gateways forward `/llm/*` to the internal llama.cpp worker on port 8082,
-  `/n8n/webhook/*` and `/n8n/mcp/*` to n8n, `/sip-ws` to Asterisk, and the
-  remaining UI/audio/RAG requests to audio.cpp. The HTTP demo uses port 8083's
+- Caddy serves the Svelte bundle and forwards `/llm/*` to the internal llama.cpp
+  worker on port 8082, `/n8n/webhook/*` and `/n8n/mcp/*` to n8n, `/sip-ws` to
+  Asterisk, and the audio and RAG APIs to audio.cpp. The HTTP demo uses port 8083's
   `/llm/*` gateway for LLM requests; HTTPS requests stay on the same origin.
 - The embedding worker on port 8084 and rag-cpp on port 8083 remain internal
   to the voice-ai container. Their ports are separate from the host UI ports.
@@ -142,11 +144,25 @@ beginning with `Technical terms: X光機 T5`; Save CSV persists `hotword.csv`.
 The default LLM knowledge base is the 台積電 receptionist in `prompt.csv`.
 Regular RAG and GraphRAG are generated from that same source.
 
-After updating the frontend, rebuild and recreate this stack so the native server includes
-the new embedded UI and Caddy starts with its proxy configuration:
+### Build only n8n, knowledge, and the demo
+
+From `examples/docker/agx-one-container`, build these services when the
+existing `voice-ai` service already provides the APIs the demo needs:
 
 ```bash
-docker compose -f examples/docker/agx-one-container/compose.yml up -d --build
+docker compose build n8n knowledge https
+```
+
+The `https` image serves the demo and full GeoVision UI on the existing Caddy
+ports. The n8n image packages the generated SIP transcript module. Workflow
+templates and startup scripts are mounted from the checkout. The build skips
+the CUDA targets.
+
+To build and apply the new images in one step while keeping `voice-ai` running:
+
+```bash
+docker compose build n8n knowledge https && \
+  docker compose up -d --no-deps --no-build n8n knowledge https
 ```
 
 Override `AUDIOCPP_BOOTSTRAP_PACKAGES`, `LLAMA_BOOTSTRAP_MODEL`, or
@@ -310,9 +326,14 @@ after rebuilding the worker.
 
 The CUDA Dockerfile retains the audio.cpp and llama.cpp build directories in
 BuildKit cache mounts and uses a shared, persistent 10 GiB ccache for C, C++, and
-CUDA compilation. Native dependency sources are copied separately from the
-WebUI, so a UI-only change keeps the dependency source layer unchanged. The
-embedded UI still requires recompiling its server wrapper and relinking.
+CUDA compilation. BuildKit also caches npm downloads for both the WebUI and
+knowledge service. The Python conversion environment is built before the native
+libraries are added, so native changes can reuse that dependency layer. Model
+downloads and other mounted runtime data stay outside the build context. A
+native image rebuild still embeds the WebUI for standalone use.
+
+For changes confined to the knowledge service, build only that image with
+`docker compose build knowledge`.
 
 The first build with this compiler-cache configuration can still take a long
 time: it populates the cache. Later builds on the same Docker builder can reuse

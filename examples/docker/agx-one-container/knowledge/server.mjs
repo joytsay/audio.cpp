@@ -1,4 +1,6 @@
 import {createScenarioStore} from './scenarios.mjs';
+import {uniqueHeaders} from './scenario-files.mjs';
+import {readScenarioImage} from './scenario-image.mjs';
 import {createServer} from 'node:http';
 import {promises as fs} from 'node:fs';
 import path from 'node:path';
@@ -11,16 +13,17 @@ import mammoth from 'mammoth';
 import ExcelJS from 'exceljs';
 import {createHash} from 'node:crypto';
 import {sourceQa,workbookQa,qaDocument} from './qa.mjs';
-import {lookupIntent} from './conversation.mjs';
+import {dispatchDate,identifiers,lookupIntent,scenarioLookupIntent} from './conversation.mjs';
 import {createWorkOrderStore} from './work-orders.mjs';
 const execFile=promisify(execFileCallback);
 export const filenames={prompt:'prompt.csv',word:'情境模擬_20261105.docx',excel:'CSD資料庫.xlsx',pdf:'(備品維修)PY252-0059-工單-20260602-2工-CL、JC.pdf'};
 function cellText(cell){const v=cell.result??cell.value;if(v instanceof Date)return v.toISOString().slice(0,10);if(typeof v==='number'&&/^0+$/.test(cell.numFmt||''))return String(v).padStart(cell.numFmt.length,'0');return cell.text?.trim()||'';}
 function worksheetRows(sheet){
   let headers;const rows=[];sheet.eachRow((row,rowNumber)=>{
-    if(!headers){headers=Array.from({length:sheet.columnCount},(_,i)=>cellText(row.getCell(i+1))||`欄位${i+1}`);return;}
-    const fields={};headers.forEach((name,i)=>fields[name]=cellText(row.getCell(i+1)));if(Object.values(fields).some(Boolean))rows.push({row:rowNumber,fields});
-  });return {name:sheet.name,rows};
+    if(!headers){headers=uniqueHeaders(Array.from({length:sheet.columnCount},(_,i)=>cellText(row.getCell(i+1))));return;}
+    const fields=Object.fromEntries(headers.map((name,i)=>[name,cellText(row.getCell(i+1))]));
+    if(Object.values(fields).some(Boolean))rows.push({row:rowNumber,fields});
+  });return {name:sheet.name,headers:headers||[],rows};
 }
 export async function readWorkbook(file){
   const workbook=new ExcelJS.Workbook();await workbook.xlsx.readFile(file);return workbook.worksheets.map(worksheetRows);
@@ -40,6 +43,60 @@ function referenceRow(row){
     return `Q: ${question[1]}\nA: ${answer[1]}${extra?'\n'+extra:''}`;
   }
   return entries.map(([key,value])=>`${key}：${value}`).join('；');
+}
+function wordText(html){
+  return html.replace(/<\/(?:p|h[1-6]|li)>|<br\s*\/?>/gi,'\n').replace(/<[^>]*>/g,'')
+    .replace(/&(?:amp|lt|gt|quot|apos|nbsp|#\d+|#x[\da-f]+);/gi,entity=>{
+      const value=entity.slice(1,-1);
+      if(value[0]!=='#')return {amp:'&',lt:'<',gt:'>',quot:'"',apos:"'",nbsp:' '}[value]||entity;
+      const code=value[1]==='x'?parseInt(value.slice(2),16):Number(value.slice(1));
+      return code<=0x10ffff?String.fromCodePoint(code):entity;
+    }).trim();
+}
+async function extractScenarioWord(file,ocrImage){
+  const images=[];
+  const result=await mammoth.convertToHtml({path:file},{
+    convertImage:mammoth.images.imgElement(async image=>{
+      if(/^image\/(png|jpeg)$/.test(image.contentType)){
+        images.push(await image.readAsBuffer());
+      }
+      return {src:''};
+    }),
+  });
+  const sources=[];
+  function appendRows(rows,name,extraction){
+    const headers=uniqueHeaders(Array.from({length:Math.max(...rows.map(row=>row.length))},(_,i)=>rows[0][i]));
+    sources.push({text:'',headers,section:name,extraction});
+    rows.slice(1).forEach((cells,i)=>{
+      if(!cells.some(Boolean))return;
+      const row={row:i+2,fields:Object.fromEntries(headers.map((header,index)=>[header,cells[index]||'']))};
+      sources.push({...row,text:referenceRow(row),headers,section:name,extraction});
+    });
+  }
+  let section=0;
+  const body=result.value.replace(/<table\b[^>]*>([\s\S]*?)<\/table>/gi,(_table,html)=>{
+    const rows=[...html.matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/gi)]
+      .map(([,row])=>[...row.matchAll(/<t[dh]\b([^>]*)>([\s\S]*?)<\/t[dh]>/gi)].flatMap(([,attributes,cell])=>{
+        const span=Math.min(Number(attributes.match(/\bcolspan="(\d+)"/i)?.[1])||1,256);
+        return [wordText(cell),...Array(span-1).fill('')];
+      })).filter(row=>row.some(Boolean));
+    if(rows.length)appendRows(rows,`表格 ${++section}`,'docx_table');
+    return '';
+  });
+  sources.unshift({text:wordText(body),extraction:'docx'});
+  for(const [i,bytes] of images.entries()){
+    const image=`圖片 ${i+1}`;
+    const {text,rows}=await ocrImage(bytes);
+    if(rows?.length)appendRows(rows,image,'ocr');
+    else if(text?.trim())sources.push({text,image,extraction:'ocr'});
+  }
+  return sources;
+}
+function spreadsheetSources(sheet,extraction){
+  const group=extraction==='xlsx'?{sheet:sheet.name}:{};
+  return [{...group,text:'',headers:sheet.headers,extraction},...sheet.rows.map(row=>({
+    ...group,...row,headers:sheet.headers,text:referenceRow(row),topic:`第 ${row.row} 列`,extraction,
+  }))];
 }
 export async function extractPdf(file,{languages=process.env.OCR_LANGUAGES||'chi_tra+eng',run=execFile}={}){
   const dir=await fs.mkdtemp(path.join(os.tmpdir(),'ivr-knowledge-pdf-'));
@@ -61,20 +118,18 @@ export async function extractPdf(file,{languages=process.env.OCR_LANGUAGES||'chi
     }return {text:chunks.join('\n\n'),extraction:'ocr',pages,languages,notice:'OCR output is not authoritative; verify codes, quantities and dates against the PDF image.'};
   }finally{await fs.rm(dir,{recursive:true,force:true});}
 }
-export function dispatchDate(value){
-  const text=String(value??'').trim();
-  const m=text.match(/^(\d{4})[-/年](\d{1,2})[-/月](\d{1,2})(?:日|號)?$/)||text.match(/^(\d{4})(\d{2})\/(\d{1,2})$/)||text.match(/^(\d{4})(\d{2})(\d{2})$/);
-  if(!m)return '';
-  const date=`${m[1]}-${m[2].padStart(2,'0')}-${m[3].padStart(2,'0')}`;
-  return !Number.isNaN(Date.parse(date))&&new Date(date).toISOString().slice(0,10)===date?date:'';
-}
+export {dispatchDate};
 export function workOrderSelection(query,sheets,{now=new Date()}={}){
   const intent=lookupIntent(query,null,now);if(!intent)return;
   const sheet=sheets.find(s=>s.name==='派工');if(!sheet)throw new Error('CSD資料庫.xlsx is missing 派工');
   const {selection:mode,period}=intent;
   const normalized=sheet.rows.map(row=>{const original=row.fields['派工日期'],date=dispatchDate(original);return date&&date!==original?{...row,original_dispatch_date:original,fields:{...row.fields,派工日期:date}}:row;});
-  const matching=intent.reference?normalized.filter(row=>[row.fields.派工單號,row.fields.工單編號].some(value=>String(value||'').toUpperCase().includes(intent.reference.toUpperCase()))):[];
-  const scoped=intent.reference?(matching.length?matching:normalized.filter(row=>JSON.stringify(row.fields).toUpperCase().includes(intent.reference.toUpperCase()))):normalized;
+  const reference=intent.reference?.toUpperCase();
+  const exactReference=reference&&/^[A-Z]+-\d/.test(reference);
+  const matches=value=>exactReference?identifiers(String(value??'')).some(code=>code.toUpperCase()===reference)
+    :String(value??'').toUpperCase().includes(reference);
+  const matching=reference?normalized.filter(row=>[row.fields.派工單號,row.fields.工單編號].some(matches)):[];
+  const scoped=reference?(matching.length?matching:normalized.filter(row=>Object.values(row.fields).some(matches))):normalized;
   const candidates=intent.invalidPeriod?[]:period?scoped.filter(r=>String(r.fields['派工日期']||'').startsWith(period+'-')):scoped;
   const dated=candidates.filter(row=>{const d=row.fields['派工日期'];return /^\d{4}-\d{2}-\d{2}$/.test(d)&&!Number.isNaN(Date.parse(d))&&new Date(d).toISOString().slice(0,10)===d;}).sort((a,b)=>a.fields['派工日期'].localeCompare(b.fields['派工日期'])||a.row-b.row);
   const date=mode==='oldest'?dated[0]?.fields['派工日期']:dated.at(-1)?.fields['派工日期'];
@@ -82,9 +137,12 @@ export function workOrderSelection(query,sheets,{now=new Date()}={}){
   return {source:filenames.excel,sheet:'派工',selection:mode,period,reference:intent.reference,view:intent.view,total_count:candidates.length,selected_count:rows.length,undated_count:candidates.length-dated.length,work_orders:rows};
 }
 function workbookDocument(excel,sheet){return {source:excel.source,sheet:sheet.name,modified:excel.modified,kind:'workbook_records',extraction:'xlsx',rowCount:sheet.rows.length,text:sheet.rows.length?sheet.rows.map(row=>`來源：${excel.source}；工作表：${sheet.name}；列：${row.row}\n${JSON.stringify(row.fields)}`).join('\n\n'):'此資料表目前沒有記錄。'};}
-export function createKnowledgeStore({root=process.env.KNOWLEDGE_ROOT,pdf=extractPdf,orders=createWorkOrderStore(),scenarioRoot}={}){
+export function createKnowledgeStore({root=process.env.KNOWLEDGE_ROOT,pdf=extractPdf,ocrImage=readScenarioImage,orders=createWorkOrderStore(),scenarioRoot}={}){
   const scenarios=createScenarioStore({root:scenarioRoot,extract:async(file,upload)=>{
     if(upload.extension==='.pdf')return [{...await pdf(file)}];
+    if(upload.fileMode&&upload.extension==='.docx')return extractScenarioWord(file,ocrImage);
+    if(upload.fileMode&&upload.extension==='.xlsx')return (await readWorkbook(file)).flatMap(sheet=>spreadsheetSources(sheet,'xlsx'));
+    if(upload.fileMode&&upload.extension==='.csv')return spreadsheetSources(await readCsv(file),'csv');
     if(upload.extension==='.docx'){const result=await mammoth.extractRawText({path:file});return [{text:result.value,extraction:'docx',kind:/情境\s*\d/.test(result.value)?'scenario_examples':'uploaded_reference'}];}
     if(upload.extension==='.csv'){const sheet=await readCsv(file);return sheet.rows.map(row=>({text:referenceRow(row),row:row.row,topic:`第 ${row.row} 列`,extraction:'csv'}));}
     if(upload.extension==='.xlsx')return (await readWorkbook(file)).flatMap(sheet=>sheet.rows.map(row=>({text:Object.entries(row.fields).filter(([,value])=>value).map(([key,value])=>`${key}：${value}`).join('；'),sheet:sheet.name,row:row.row,topic:`${sheet.name} 第 ${row.row} 列`,extraction:'xlsx'})));
@@ -106,6 +164,8 @@ export function createKnowledgeStore({root=process.env.KNOWLEDGE_ROOT,pdf=extrac
   const workbook=async()=>await read('excel',async file=>({sheets:await readWorkbook(file)}))||{source:'已儲存工單',sheets:[{name:'派工',rows:[]}]};
   return {
     addScenario:input=>scenarios.add(input),
+    readScenario:id=>scenarios.get(id),
+    saveScenarioImport:(id,state)=>scenarios.saveImport(id,state),
     listScenarios:()=>scenarios.list(),
     removeScenario:id=>scenarios.remove(id),
     registerTurn:input=>orders.register(input),
@@ -113,18 +173,22 @@ export function createKnowledgeStore({root=process.env.KNOWLEDGE_ROOT,pdf=extrac
     listWorkOrders:()=>orders.list(),
     async health(){const saved=await scenarios.list();return {status:'ok',scenarios:saved.length,files:saved.flatMap(scenario=>scenario.files.map(file=>file.name))};},
     async documents(query='',tableRecords=[]){
+      if(!Array.isArray(tableRecords)||tableRecords.some(r=>!r||typeof r.id!=='string'||!r.fields||typeof r.fields!=='object'))throw Object.assign(Error('Invalid Data Table records'),{status:400});
+      const scenarioLookup=scenarioLookupIntent(query);
+      if(scenarioLookup&&!lookupIntent(query))return {documents:[],format:'qa',scenario_lookup:scenarioLookup};
       // Work-order questions need actual dispatch records, not reporting rules.
       const excel=await workbook();
-      if(!Array.isArray(tableRecords)||tableRecords.some(r=>!r||typeof r.id!=='string'||!r.fields||typeof r.fields!=='object'))throw Object.assign(Error('Invalid Data Table records'),{status:400});
       const local=[...new Map([...(await orders.list()),...tableRecords].map(r=>[r.id,r])).values()];
       const uploaded=await scenarios.documents();
       const sheets=excel.sheets.map(sheet=>sheet.name==='派工'?{...sheet,rows:[...sheet.rows,...local.map((record,index)=>({row:100000+index,source:record.source,fields:record.fields}))]}:sheet);
       const result=workOrderSelection(query,sheets);
-      if(result&&(sheets.some(sheet=>sheet.rows.length)||!uploaded.length)){
+      if(result&&(result.reference||sheets.some(sheet=>sheet.rows.length)||!uploaded.length)){
         result.source=[...(excel.source==='已儲存工單'?[]:[excel.source]),...new Set(local.map(r=>r.source||'舊版 JSON 工單'))].join(' + ')||'已儲存工單';
         const document=workbookDocument(excel,{name:'派工',rows:result.work_orders});
         const documents=result.work_orders.length?result.work_orders.flatMap(row=>workbookQa({...document,source:row.source||excel.source},[row])):workbookQa(document,[]);
-        return {documents,result,format:'qa'};
+        const scenarioReference=result.selection==='details'&&result.view==='details'&&!result.period&&!result.selected_count
+          ?result.reference:null;
+        return {documents,result,format:'qa',...(scenarioReference?{scenario_reference:scenarioReference}:{})};
       }
       const word=await read('word',async file=>{const r=await mammoth.extractRawText({path:file});return {text:r.value,kind:'scenario_examples',extraction:'docx',warnings:r.messages.map(m=>m.message)};});
       const pdfDoc=await read('pdf',async file=>({...await pdf(file),kind:'work_order_document',sha256:createHash('sha256').update(await fs.readFile(file)).digest('hex')}));
@@ -141,7 +205,12 @@ export function createKnowledgeServer(store=createKnowledgeStore()){
     res.setHeader('Content-Type','application/json; charset=utf-8');res.setHeader('Cache-Control','no-store');
     try{
       const url=new URL(req.url,'http://localhost');let data;
-      if(req.method==='POST'&&['/call-turn','/work-order-draft','/documents','/scenarios'].includes(url.pathname)){
+      const importId=/^\/scenario-imports\/([a-f0-9]{24})$/.exec(url.pathname)?.[1];
+      if(req.method==='PUT'&&importId){
+        let raw='';for await(const chunk of req){raw+=chunk;if(raw.length>256*1024)throw Object.assign(Error('Request too large'),{status:413});}
+        data=await store.saveScenarioImport(importId,JSON.parse(raw));
+      }
+      else if(req.method==='POST'&&['/call-turn','/work-order-draft','/documents','/scenarios'].includes(url.pathname)){
         req.setEncoding('utf8');
         let raw='';for await(const chunk of req){raw+=chunk;if(Buffer.byteLength(raw)>(url.pathname==='/scenarios'?16*1024*1024:256*1024))throw Object.assign(Error('Request too large'),{status:413});}
         let body;try{body=JSON.parse(raw);}catch{throw Object.assign(Error('Invalid JSON'),{status:400});}
@@ -152,6 +221,7 @@ export function createKnowledgeServer(store=createKnowledgeStore()){
       else if(url.pathname==='/health')data=await store.health();
       else if(url.pathname==='/documents')data=await store.documents(url.searchParams.get('query')||'');
       else if(url.pathname==='/scenarios')data={scenarios:await store.listScenarios()};
+      else if(importId)data=await store.readScenario(importId);
       else if(url.pathname==='/work-orders')data={work_orders:await store.listWorkOrders()};
       else{res.writeHead(404);res.end(JSON.stringify({error:'Unknown knowledge endpoint'}));return;}
       res.end(JSON.stringify(data));

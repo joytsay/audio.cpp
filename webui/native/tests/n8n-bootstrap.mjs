@@ -50,7 +50,7 @@ try {
  assert.equal(merged.nodes.find(n=>n.name==='Local Embeddings').credentials.openAiApi.id,'custom-embeddings');
  assert.equal(merged.nodes.find(n=>n.name==='Retrieve guidance').parameters.topK,7);
  assert.ok(!merged.nodes.some(n=>n.name==='Custom read-only tool'),'requested two-tool set removes old tools');
- assert.deepEqual(merged.connections.retrieve_knowledge.ai_tool[0].map(e=>e.node),['Knowledge MCP Server']);
+ assert.deepEqual(merged.connections.retrieve_knowledge.ai_tool[0].map(e=>e.node),['Scenario MCP']);
  assert.equal(merged.nodes.find(n=>n.name==='retrieve_knowledge').parameters.workflowId.value,template.id);
  assert.equal(merged.name,'GeoVision · Workflow');
  assert.equal(merged.nodes.filter(n=>n.type==='n8n-nodes-base.stickyNote').length,3);
@@ -200,6 +200,6 @@ assert.equal(mergedWorkflowMigration(intakeUpgrade,null,template),null);
 const revisionEleven=structuredClone(template);revisionEleven.meta.ivrWorkflowRevision=11;
 revisionEleven.nodes=revisionEleven.nodes.filter(n=>n.name!=='Remove uploaded scenario');
 const removalUpgrade=mergedWorkflowMigration(revisionEleven,null,template);
-assert.equal(removalUpgrade.meta.ivrWorkflowRevision,12);
+assert.equal(removalUpgrade.meta.ivrWorkflowRevision,template.meta.ivrWorkflowRevision);
 assert.ok(removalUpgrade.nodes.some(n=>n.name==='Remove uploaded scenario'));
 assert.equal(mergedWorkflowMigration(removalUpgrade,null,template),null);
