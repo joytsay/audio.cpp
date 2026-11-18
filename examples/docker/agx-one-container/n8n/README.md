@@ -27,7 +27,7 @@ Columns are `order_id`, `report_key`, `session_id`, `dispatch_date`, `reference_
 
 The table persists with the existing n8n database in `/home/node/.n8n`, backed by **audiocpp-n8n-data**. No separate database server or additional credential is needed.
 
-New orders are no longer written to the knowledge service's JSON file. An existing `/data/work-orders.json` is retained read-only for recovery and legacy lookup; those old entries are not automatically copied into the Data Table UI. When IDs overlap, current Data Table values take precedence in lookup results. Original DOCX/XLSX/PDF files remain read-only.
+New orders are no longer written to the knowledge service's JSON file. An existing `/data/work-orders.json` is retained read-only for recovery and legacy lookup; those old entries are not automatically copied into the Data Table UI. When IDs overlap, current Data Table values take precedence in lookup results. Bundled source documents have been removed; upload your own through Add New Scenario.
 
 ## Knowledge MCP and RAG
 
@@ -42,7 +42,7 @@ Both tools invoke **RAG tool input → Prepare tool request → Ensure work_orde
 
 Latest/oldest/all queries use fresh facts on every turn. Month-only follow-ups inherit the query, “this month” uses Asia/Taipei time, and month filtering happens before date ranking. Unambiguous spreadsheet dates such as `202611/06` normalize to `2026-11-06` for sorting with the original value retained. Replies are one line and do not ask for lookup details or confirmation. Missing dates are not fabricated for ranking.
 
-DOCX scenario 2 supplies example field pairings and conversational context; its historic confirmation/startup sequence is not a storage requirement. XLSX Q/A uses actual rows across every worksheet. PDF source text/OCR stays attributed, with a few visually reviewed Q/A bound to the exact file hash. Each Q/A pair stays together in embedding input. Per-execution vector-store keys keep simultaneous queries separate. `prompt.csv` sample facts are not indexed as actual work orders.
+The knowledge store starts empty. Upload your own DOCX, XLSX, CSV, PDF, TXT or Markdown through **Add New Scenario**. Uploaded source text and Q/A stay attributed; spreadsheet rows preserve their source values. Each Q/A pair stays together in embedding input. Per-execution vector-store keys keep simultaneous queries separate. `prompt.csv` remains the system prompt and is not indexed as work-order facts.
 
 ## Browser, SIP and deployment
 
@@ -81,7 +81,7 @@ In the demo **Scenarios** dropdown, choose **Add New Scenario**, enter a name an
 
 The production webhook `/webhook/ivr-add-scenario` runs **Validate scenario files → Create scenario Q/A → Index scenario Q/A → Scenario upload result** inside the RAG group. Indexing invokes the existing RAG subflow and embedding model. `/webhook/ivr-scenarios` lists saved scenarios for the dropdown. If indexing fails, Q/A remains saved and the UI supports retrying the same upload without creating a duplicate.
 
-Original uploads and Q/A manifests persist at `/data/scenarios/<id>/` in `audiocpp-knowledge-data`. Normal knowledge retrieval includes these documents after restarts. Uploads add reference knowledge; they do not insert work orders into the Data Table. Selecting an uploaded scenario enables the n8n dialogue source. The original three source documents remain unchanged.
+Original uploads and Q/A manifests persist at `/data/scenarios/<id>/` in `audiocpp-knowledge-data`. Normal knowledge retrieval includes these documents after restarts. Uploads add reference knowledge; they do not insert work orders into the Data Table. Selecting an uploaded scenario enables the n8n dialogue source. There are no bundled demo scenario documents.
 
 Local upload/client checks: `node webui/native/tests/knowledge-scenarios.mjs`; the isolated n8n workflow runtime check also verifies upload, indexing retry, listing and a later caller question grounded in the uploaded file.
 
@@ -92,4 +92,4 @@ On the demo page, select an uploaded scenario in **Scenario**, then click
 workflow and deletes that scenario's uploaded files and saved Q/A. Fresh RAG
 executions rebuild their vector store from the remaining documents, so deleted
 Q/A is excluded from future retrievals. Existing conversation text is retained.
-The three bundled demo scenarios and the original knowledge documents are preserved.
+The dropdown contains your uploaded scenarios and the manual Audio input option.

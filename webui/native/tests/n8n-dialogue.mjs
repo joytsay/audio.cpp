@@ -10,7 +10,6 @@ const root=new URL('../../../examples/docker/agx-one-container/n8n/',import.meta
 const workflow=JSON.parse(fs.readFileSync(new URL('workflow.json',root)));
 const rag=workflow;
 const nodes=new Map(workflow.nodes.map(n=>[n.name,n]));
-const turns=JSON.parse(fs.readFileSync(new URL('scenario-1-turns.json',root)));
 const input={sessionId:'browser-call',text:'查詢最新工單',model:'selected-local-model',messages:[{role:'user',content:'真實先前逐字稿'}]};
 const signal=new AbortController().signal;
 const originalFetch=globalThis.fetch;

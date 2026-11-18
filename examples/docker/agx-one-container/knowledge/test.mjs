@@ -3,15 +3,30 @@ import {promises as fs} from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import ExcelJS from 'exceljs';
+import JSZip from 'jszip';
 import {workOrderSelection,filenames,createKnowledgeStore,readWorkbook,extractPdf,createKnowledgeServer} from './server.mjs';
 import {createWorkOrderStore} from './work-orders.mjs';
-const root=process.env.KNOWLEDGE_TEST_ROOT||new URL('../../../../',import.meta.url).pathname;
-const realSheets=await readWorkbook(path.join(root,'CSD資料庫.xlsx'));
-assert.deepEqual(realSheets.map(s=>s.name),['派工','客戶設備','設備類型','通訊錄']);
-assert.ok(realSheets.every(s=>s.rows.length>0));
 const dir=await fs.mkdtemp(path.join(os.tmpdir(),'ivr-knowledge-test-'));
 try{
- for(const name of Object.values(filenames))await fs.copyFile(path.join(root,name),path.join(dir,name));
+ // Generate fixtures locally; production no longer ships scenario documents.
+ const fixtureBook=new ExcelJS.Workbook();
+ for(const name of ['派工','客戶設備','設備類型','通訊錄']){
+  const sheet=fixtureBook.addWorksheet(name);sheet.addRow(['派工單號','派工日期','負責人']);
+  for(let i=1;i<=6;i++)sheet.addRow([`TEST-${name}-${i}`,`2026-10-0${i}`,'測試人員']);
+ }
+ await fixtureBook.xlsx.writeFile(path.join(dir,filenames.excel));
+ const docx=new JSZip();
+ docx.file('[Content_Types].xml','<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>');
+ docx.file('_rels/.rels','<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>');
+ docx.file('word/document.xml','<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>情境 2：工單回報</w:t></w:r></w:p><w:p><w:r><w:t>Q: 測試聯絡方式？</w:t></w:r></w:p><w:p><w:r><w:t>A: 分機 1234。</w:t></w:r></w:p></w:body></w:document>');
+ await fs.writeFile(path.join(dir,filenames.word),await docx.generateAsync({type:'nodebuffer'}));
+ await fs.writeFile(path.join(dir,filenames.pdf),'%PDF-1.4\nTest fixture for mocked PDF extraction.');
+ const realSheets=await readWorkbook(path.join(dir,filenames.excel));
+ const empty=createKnowledgeStore({orders:createWorkOrderStore({root:path.join(dir,'empty-orders')}),scenarioRoot:path.join(dir,'empty-scenarios')});
+ assert.deepEqual(await empty.health(),{status:'ok',scenarios:0,files:[]});
+ assert.deepEqual(await empty.documents(),{documents:[],format:'qa'});
+ assert.equal((await empty.documents('最新工單')).result.selected_count,0);
+ assert.equal((await empty.documents('保固多久？')).documents[0].answer,'目前尚未上傳情境文件。');
  const original=await fs.readFile(path.join(dir,filenames.excel));
  const dataRoot=path.join(dir,'data'),orders=createWorkOrderStore({root:dataRoot});
  let ocrCalls=0;
@@ -22,7 +37,6 @@ try{
  for(const d of a.documents){assert.equal(d.format,'qa');assert.ok(d.question);assert.ok(d.answer);assert.ok(d.text.startsWith('Q: '));assert.ok(d.text.includes('\nA: '));assert.ok(d.text.includes(d.source));}
  assert.deepEqual(new Set(a.documents.map(d=>d.source)),new Set([filenames.word,filenames.excel,filenames.pdf]));
  assert.ok(a.documents.some(d=>d.section==='情境 2：工單回報'&&d.answer.includes('SN')));
- assert.ok(a.documents.some(d=>d.source===filenames.pdf&&d.review==='visually_verified'));
  assert.deepEqual(new Set(a.documents.filter(d=>d.source===filenames.excel).map(d=>d.sheet)),new Set(realSheets.map(s=>s.name)));
  const latest=await store.documents('列出最新工單');
  assert.equal(latest.result.selection,'newest');
@@ -42,7 +56,7 @@ try{
  await assert.rejects(scenarioStore.addScenario({...upload,files:[encoded('其他.txt','不同內容。')]}),/already exists/);
  await assert.rejects(scenarioStore.addScenario({name:'bad',files:[encoded('../bad.txt','unsafe')]}),/Supported files/);
  await assert.rejects(scenarioStore.addScenario({name:'bad',files:[{name:'bad.txt',data:'invalid-base64'}]}),/Invalid/);
- const loadedAfterRestart=createKnowledgeStore({root:dir,orders,scenarioRoot});
+ const loadedAfterRestart=createKnowledgeStore({root:dir,orders,scenarioRoot,pdf:async()=>({text:'測試 PDF 的服務時間為星期三。',extraction:'pdf_text'})});
  assert.equal((await loadedAfterRestart.listScenarios())[0].id,scenario.scenario.id);
  const uploadedKnowledge=await loadedAfterRestart.documents('LAB-ZETA 包材何時回收');
  assert.ok(uploadedKnowledge.documents.some(d=>d.source==='服務.txt'&&d.answer.includes('7654')));
@@ -183,9 +197,9 @@ try{
  const fixture=new ExcelJS.Workbook();const sheet=fixture.addWorksheet('派工');sheet.addRow(['代碼','日期']);sheet.addRow([123,new Date('2026-06-02T00:00:00Z')]);sheet.getCell('A2').numFmt='000000';
  const file=path.join(dir,'formatted.xlsx');await fixture.xlsx.writeFile(file);const parsed=await readWorkbook(file);
  assert.equal(parsed[0].rows[0].fields['代碼'],'000123');assert.equal(parsed[0].rows[0].fields['日期'],'2026-06-02');
- await fs.unlink(path.join(dir,filenames.pdf));await assert.rejects(store.documents('維修流程'),/ENOENT/);
+ await fs.unlink(path.join(dir,filenames.pdf));assert.ok(!(await store.documents('維修流程')).documents.some(document=>document.source===filenames.pdf));
 }finally{await fs.rm(dir,{recursive:true,force:true});}
-console.log('PASS source-grounded Q/A for three original documents, fresh newest/oldest selections, single follow-up, deterministic native-table row preparation with optional fields, retry keys, read-only legacy recovery, original-file integrity and HTTP validation');
+console.log('PASS source-grounded Q/A with generated document fixtures, fresh newest/oldest selections, single follow-up, deterministic native-table row preparation with optional fields, retry keys, read-only legacy recovery, fixture integrity and HTTP validation');
 const calls=[];
 const pdf=await extractPdf('/fake/scanned.pdf',{run:async(command,args)=>{
   calls.push([command,args]);
@@ -198,7 +212,7 @@ assert.equal(pdf.extraction,'ocr');assert.ok(pdf.text.includes('需核對原件'
 assert.equal(calls.find(([c])=>c==='tesseract')[1][3],'chi_tra+eng');
 const textPdf=await extractPdf('/fake/text.pdf',{run:async(command,args)=>{assert.equal(command,'pdftotext');await fs.writeFile(args.at(-1),'已有文字層的 PDF 工單文件，保留 SN：00123456。');return {stdout:''};}});
 assert.equal(textPdf.extraction,'pdf_text');
-console.log('PASS actual Word and all four tables from the original XLSX, prompt refresh, formatting, extraction cache, missing-file errors and scanned/text PDF branches');
+console.log('PASS generated Word and XLSX, empty-store health, formatting, extraction cache, optional missing files and scanned/text PDF branches');
 
 const synthetic=[{name:'派工',rows:[{row:2,fields:{派工單號:'TEST-A',派工日期:'2026-11-02'}},{row:3,fields:{派工單號:'TEST-B',派工日期:'2026-10-01'}},{row:4,fields:{派工單號:'TEST-C',派工日期:'2026-11-02'}},{row:5,fields:{派工單號:'TEST-D',派工日期:'2026-02-30'}}]}];
 assert.deepEqual(workOrderSelection('列出最新工單',synthetic).work_orders.map(r=>r.fields.派工單號),['TEST-A','TEST-C']);

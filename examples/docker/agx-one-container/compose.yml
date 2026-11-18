@@ -157,35 +157,10 @@ services:
     restart: unless-stopped
     environment:
       PORT: 8085
-      KNOWLEDGE_ROOT: /files
       KNOWLEDGE_DATA_ROOT: /data
       OCR_LANGUAGES: chi_tra+eng
     volumes:
       - audiocpp-knowledge-data:/data
-      - type: bind
-        source: ../../../prompt.csv
-        target: /files/prompt.csv
-        read_only: true
-        bind:
-          create_host_path: false
-      - type: bind
-        source: ../../../情境模擬_20261105.docx
-        target: /files/情境模擬_20261105.docx
-        read_only: true
-        bind:
-          create_host_path: false
-      - type: bind
-        source: ../../../CSD資料庫.xlsx
-        target: /files/CSD資料庫.xlsx
-        read_only: true
-        bind:
-          create_host_path: false
-      - type: bind
-        source: ../../../(備品維修)PY252-0059-工單-20260602-2工-CL、JC.pdf
-        target: /files/(備品維修)PY252-0059-工單-20260602-2工-CL、JC.pdf
-        read_only: true
-        bind:
-          create_host_path: false
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8085/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 20s

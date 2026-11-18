@@ -1,6 +1,6 @@
 import {createScenarioStore} from './scenarios.mjs';
 import {createServer} from 'node:http';
-import {promises as fs,constants} from 'node:fs';
+import {promises as fs} from 'node:fs';
 import path from 'node:path';
 import {Readable} from 'node:stream';
 import os from 'node:os';
@@ -10,7 +10,7 @@ import {pathToFileURL} from 'node:url';
 import mammoth from 'mammoth';
 import ExcelJS from 'exceljs';
 import {createHash} from 'node:crypto';
-import {sourceQa,workbookQa} from './qa.mjs';
+import {sourceQa,workbookQa,qaDocument} from './qa.mjs';
 import {lookupIntent} from './conversation.mjs';
 import {createWorkOrderStore} from './work-orders.mjs';
 const execFile=promisify(execFileCallback);
@@ -82,7 +82,7 @@ export function workOrderSelection(query,sheets,{now=new Date()}={}){
   return {source:filenames.excel,sheet:'派工',selection:mode,period,reference:intent.reference,view:intent.view,total_count:candidates.length,selected_count:rows.length,undated_count:candidates.length-dated.length,work_orders:rows};
 }
 function workbookDocument(excel,sheet){return {source:excel.source,sheet:sheet.name,modified:excel.modified,kind:'workbook_records',extraction:'xlsx',rowCount:sheet.rows.length,text:sheet.rows.length?sheet.rows.map(row=>`來源：${excel.source}；工作表：${sheet.name}；列：${row.row}\n${JSON.stringify(row.fields)}`).join('\n\n'):'此資料表目前沒有記錄。'};}
-export function createKnowledgeStore({root=process.env.KNOWLEDGE_ROOT||'/files',pdf=extractPdf,orders=createWorkOrderStore(),scenarioRoot}={}){
+export function createKnowledgeStore({root=process.env.KNOWLEDGE_ROOT,pdf=extractPdf,orders=createWorkOrderStore(),scenarioRoot}={}){
   const scenarios=createScenarioStore({root:scenarioRoot,extract:async(file,upload)=>{
     if(upload.extension==='.pdf')return [{...await pdf(file)}];
     if(upload.extension==='.docx'){const result=await mammoth.extractRawText({path:file});return [{text:result.value,extraction:'docx',kind:/情境\s*\d/.test(result.value)?'scenario_examples':'uploaded_reference'}];}
@@ -93,7 +93,9 @@ export function createKnowledgeStore({root=process.env.KNOWLEDGE_ROOT||'/files',
   // File-only cache; concurrent requests share OCR. User queries are never cached.
   const cache=new Map();
   async function read(kind,extract){
-    const file=path.join(root,filenames[kind]);const stat=await fs.stat(file);
+    if(!root)return;
+    const file=path.join(root,filenames[kind]);
+    let stat;try{stat=await fs.stat(file);}catch(error){if(error.code==='ENOENT')return;throw error;}
     if(!stat.isFile()||stat.size>25*1024*1024)throw new Error(`${filenames[kind]} must be a regular file under 25 MiB`);
     const key=`${stat.mtimeMs}:${stat.ctimeMs}:${stat.size}`;
     if(cache.get(kind)?.key===key)return cache.get(kind).promise;
@@ -101,7 +103,7 @@ export function createKnowledgeStore({root=process.env.KNOWLEDGE_ROOT||'/files',
     cache.set(kind,{key,promise});
     try{return await promise;}catch(e){cache.delete(kind);throw e;}
   }
-  const workbook=()=>read('excel',async file=>({sheets:await readWorkbook(file)}));
+  const workbook=async()=>await read('excel',async file=>({sheets:await readWorkbook(file)}))||{source:'已儲存工單',sheets:[{name:'派工',rows:[]}]};
   return {
     addScenario:input=>scenarios.add(input),
     listScenarios:()=>scenarios.list(),
@@ -109,23 +111,25 @@ export function createKnowledgeStore({root=process.env.KNOWLEDGE_ROOT||'/files',
     registerTurn:input=>orders.register(input),
     prepareWorkOrder:sessionId=>orders.prepare(sessionId),
     listWorkOrders:()=>orders.list(),
-    async health(){for(const name of Object.values(filenames)){const file=path.join(root,name);await fs.access(file,constants.R_OK);if(!(await fs.stat(file)).isFile())throw new Error(`${name} must be a readable file`);}return {status:'ok',files:Object.values(filenames)};},
+    async health(){const saved=await scenarios.list();return {status:'ok',scenarios:saved.length,files:saved.flatMap(scenario=>scenario.files.map(file=>file.name))};},
     async documents(query='',tableRecords=[]){
       // Work-order questions need actual dispatch records, not reporting rules.
       const excel=await workbook();
       if(!Array.isArray(tableRecords)||tableRecords.some(r=>!r||typeof r.id!=='string'||!r.fields||typeof r.fields!=='object'))throw Object.assign(Error('Invalid Data Table records'),{status:400});
       const local=[...new Map([...(await orders.list()),...tableRecords].map(r=>[r.id,r])).values()];
+      const uploaded=await scenarios.documents();
       const sheets=excel.sheets.map(sheet=>sheet.name==='派工'?{...sheet,rows:[...sheet.rows,...local.map((record,index)=>({row:100000+index,source:record.source,fields:record.fields}))]}:sheet);
       const result=workOrderSelection(query,sheets);
-      if(result){
-        if(local.length)result.source='CSD資料庫.xlsx + '+[...new Set(local.map(r=>r.source||'舊版 JSON 工單'))].join(' + ');
+      if(result&&(sheets.some(sheet=>sheet.rows.length)||!uploaded.length)){
+        result.source=[...(excel.source==='已儲存工單'?[]:[excel.source]),...new Set(local.map(r=>r.source||'舊版 JSON 工單'))].join(' + ')||'已儲存工單';
         const document=workbookDocument(excel,{name:'派工',rows:result.work_orders});
         const documents=result.work_orders.length?result.work_orders.flatMap(row=>workbookQa({...document,source:row.source||excel.source},[row])):workbookQa(document,[]);
         return {documents,result,format:'qa'};
       }
       const word=await read('word',async file=>{const r=await mammoth.extractRawText({path:file});return {text:r.value,kind:'scenario_examples',extraction:'docx',warnings:r.messages.map(m=>m.message)};});
       const pdfDoc=await read('pdf',async file=>({...await pdf(file),kind:'work_order_document',sha256:createHash('sha256').update(await fs.readFile(file)).digest('hex')}));
-      const documents=[...sourceQa(word),...excel.sheets.flatMap(sheet=>workbookQa(workbookDocument(excel,sheet),sheet.rows)),...local.flatMap((record,index)=>workbookQa({source:record.source,sheet:'派工',kind:'workbook_records',extraction:record.source?.includes('n8n Data Table')?'n8n_data_table':'legacy_json'},[{row:100000+index,fields:record.fields}])),...sourceQa(pdfDoc),...await scenarios.documents()];
+      const documents=[...(word?sourceQa(word):[]),...excel.sheets.filter(sheet=>sheet.rows.length).flatMap(sheet=>workbookQa(workbookDocument(excel,sheet),sheet.rows)),...local.flatMap((record,index)=>workbookQa({source:record.source,sheet:'派工',kind:'workbook_records',extraction:record.source?.includes('n8n Data Table')?'n8n_data_table':'legacy_json'},[{row:100000+index,fields:record.fields}])),...(pdfDoc?sourceQa(pdfDoc):[]),...uploaded];
+      if(!documents.length&&query.trim())documents.push(qaDocument({source:'知識庫狀態'},'目前有可查詢的情境文件嗎？','目前尚未上傳情境文件。'));
       for(const d of documents){if(!d.text.trim())throw new Error(`No text extracted from ${d.source}${d.sheet?' / '+d.sheet:''}`);if(d.text.length>500000)throw new Error(`Extracted text too large: ${d.source}`);}
       return {documents,format:'qa'};
     },
