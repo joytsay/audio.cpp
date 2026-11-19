@@ -4,15 +4,22 @@
 
 ## Architecture
 
-The Demo's voice path is **VAD → STT / ASR → LLM ↔ n8n / MCP → TTS**.
-With **Dialogue source → n8n**, the **GeoVision · Workflow** AI Agent owns the
-LLM conversation and tool loop. audio.cpp handles speech recognition and speech
-generation; the agent uses the selected local LLM to choose tools and compose
-the spoken reply.
+The Demo's voice path is **VAD → STT / ASR → n8n → TTS**.
+With **Dialogue source → n8n**, **GeoVision · Workflow** routes fixed replies
+and structured lookup results directly to IVR Output. The AI Agent uses the
+selected local LLM and can call Scenario MCP tools to compose other replies.
+audio.cpp handles speech recognition and synthesis.
 
 ```text
    Browser microphone             SIP caller                  Typed input
            │                         │                            │
+           │                         ▼                            │
+           │            ┌─────────────────────────┐               │
+           │            │ Optional SIP greeting   │               │
+           │            │ greetings.csv + saved   │               │
+           │            │ TTS settings → playback │               │
+           │            └────────────┬────────────┘               │
+           │                         │ Listen                     │
            └────────────┬────────────┘                            │
                         ▼                                         │
              ┌──────────────────────┐                             │
@@ -32,36 +39,48 @@ the spoken reply.
   ┌──────────────────────────────────────────────────────────────────────┐
   │  n8n · GeoVision Workflow                                            │
   │                                                                      │
-  │  ┌───────────┐      ┌─────────────────┐      ┌────────────────────┐  │
-  │  │ IVR Input │─────▶│    AI Agent     │◀────▶│  Local LLM         │  │
-  │  └───────────┘      │                 │      │  Selected model    │  │
-  │                     │ Session memory  │      └────────────────────┘  │
-  │                     └─────────┬───────┘                              │
-  │                               │ tool call / result                   │
-  │                               ▼                                      │
-  │                    ┌────────────────────┐                            │
-  │                    │ Scenario MCP Server│                            │
-  │                    └─────────┬──────────┘                            │
-  │                               │                                      │
-  │            ┌──────────────────┴──────────────────┐                   │
-  │            ▼                  ▼                  ▼                   │
-  │    ┌────────────────┐ ┌────────────────┐ ┌────────────────┐          │
-  │    │ Uploaded file  │ │ retrieve_      │ │ add_work_order │          │
-  │    │ scenario tool  │ │ knowledge      │ │                │          │
-  │    └───────┬────────┘ └───────┬────────┘ └───────┬────────┘          │
-  │            ▼                  ▼                  ▼                   │
-  │    ┌────────────────┐ ┌────────────────┐ ┌────────────────┐          │
-  │    │ File's n8n     │ │ RAG / source   │ │ Native n8n     │          │
-  │    │ subworkflow    │ │ Q/A retrieval  │ │ work_orders    │          │
-  │    └───────┬────────┘ └────────────────┘ │ Data Table     │          │
-  │            ▼                             └────────────────┘          │
-  │    ┌────────────────┐                                                │
-  │    │ Same-name n8n  │   Results return to the AI Agent.              │
-  │    │ Data Table +   │   The LLM produces a short grounded reply.     │
-  │    │ voice template │                                                │
-  │    └────────────────┘                                                │
-  │                                                                      │
-  │                    AI Agent ──────▶ IVR Output                       │
+  │  ┌───────────┐                                                       │
+  │  │ IVR Input │──▶ Register caller turn                               │
+  │  └───────────┘             │                                         │
+  │  ┌◀───── Fixed reply ──────┤                                         │
+  │  │                         ▼                                         │
+  │  │                 Retrieve or save                                  │
+  │  │                         ├─ Structured lookup result ────────────┐ │
+  │  │                         └──┐                                    │ │
+  │  │                            ▼ Other context                      │ │
+  │  │                  ┌─────────────────┐      ┌──────────────────┐  │ │
+  │  │                  │    AI Agent     │◀────▶│  Local LLM       │  │ │
+  │  │                  │                 │      │  Selected model  │  │ │
+  │  │                  │ Session memory  │      └──────────────────┘  │ │
+  │  │                  └─────────┬─────┬─┘                            │ │
+  │  │         tool call / result │     └──────────────────────────┐   │ │
+  │  │                            ↕                          reply │   │ │
+  │  │                 ┌────────────────────┐                      │   │ │
+  │  │                 │ Scenario MCP Server│                      │   │ │
+  │  │                 └─────────┬──────────┘                      │   │ │
+  │  │                            │                                │   │ │
+  │  │         ┌──────────────────┴──────────────────┐             │   │ │
+  │  │         ↕                  ↕                  ↕             │   │ │
+  │  │ ┌────────────────┐ ┌────────────────┐ ┌────────────────┐    │   │ │
+  │  │ │ Uploaded file  │ │ retrieve_      │ │ add_work_order │    │   │ │
+  │  │ │ scenario tool  │ │ knowledge      │ │                │    │   │ │
+  │  │ └───────┬────────┘ └───────┬────────┘ └───────┬────────┘    │   │ │
+  │  │         ▼                  ▼                  ▼             │   │ │
+  │  │ ┌────────────────┐ ┌────────────────┐ ┌────────────────┐    │   │ │
+  │  │ │ File's n8n     │ │ Imported rows  │ │ Native n8n     │    │   │ │
+  │  │ │ subworkflow    │ │ or source Q/A  │ │ work_orders    │    │   │ │
+  │  │ └───────┬────────┘ │                │ │ Data Table     │    │   │ │
+  │  │         ▼          │ Possible name  │ └────────────────┘    │   │ │
+  │  │ ┌────────────────┐ │ with no match  │                       │   │ │
+  │  │ │ Same-name n8n  │ │ → source Q/A   │                       │   │ │
+  │  │ │ Data Table +   │ └────────────────┘                       │   │ │
+  │  │ │ voice template │                                          │   │ │
+  │  │ └────────────────┘                                          │   │ │
+  │  │                                     ┌───────────────────────┴───┘ │
+  │  │                                     ▼                             │
+  │  │                            Prepare IVR output                     │
+  │  │                                     ▼                             │
+  │  └──────────────────────────────▶ IVR Output                         │
   └────────────────────────────────────────┬─────────────────────────────┘
                                            │ reply text + tool events
                                            ▼
@@ -80,17 +99,21 @@ STT (speech-to-text) and ASR (automatic speech recognition) describe the same
 recognition stage here. Typed input enters at the transcript stage. Browser and
 SIP turns use the same n8n agent workflow.
 
+The Demo's upload webhook creates the uploaded-file tool shown above.
+[Upload a scenario](#upload-a-scenario)
+
 ## One conversation turn
 
 1. **Listen:** browser or SIP audio enters VAD, which detects the end of speech.
 2. **Transcribe:** the selected ASR model produces text. Transcript normalization,
    the session ID and caller history accompany the request to n8n.
-3. **Reason:** the AI Agent asks the selected LLM how to handle the caller's
-   request, using session memory for conversational context.
+3. **Route.** n8n can return a fixed reply or call Scenario MCP. Structured
+   results go directly to reply formatting. Other retrieved context goes to
+   the AI Agent, which uses the selected LLM and session memory.
 4. **Use tools when needed:** Scenario MCP exposes the uploaded-file tools and
    the core retrieval/save tools. A file tool calls its subworkflow, reads the
    live Data Table and returns original field labels and matching records or
-   dialogue guidance. The LLM receives those results before answering.
+   dialogue guidance. The LLM receives agent tool results before answering.
 5. **Reply:** n8n returns a short Traditional Chinese reply and the completed
    tool names. While a lookup exceeds the configured wait time, the Demo/SIP
    dialogue layer can speak `查詢中，請稍後。` through TTS.
@@ -98,9 +121,10 @@ SIP turns use the same n8n agent workflow.
    browser or SIP playback. The Demo shows the transcript, assistant reply,
    audio waveforms and workflow/tool events.
 
-Recognized lookup requests require a first tool call so smaller models cannot
-skip retrieval and simply echo the question. Greetings can receive a direct
-reply. Work-order saves are acknowledged only after the write succeeds.
+Structured lookups include directory names, equipment models and serial
+numbers. If the request looks like a name and the directory has no match,
+the workflow searches the source Q/A.
+Work-order saves are acknowledged only after the write succeeds.
 
 ## Upload a scenario
 
@@ -109,7 +133,10 @@ Each uploaded file creates one tool and one n8n subworkflow. Excel files create
 a native Data Table per worksheet. Other files create one same-named table.
 
 ```text
-                 Add New Scenario · upload file
+                 Demo · Add New Scenario
+                               │ POST /n8n/webhook/ivr-import-scenario
+                               ▼
+                 n8n · Upload scenario file
                                │
                                ▼
                  ┌───────────────────────────┐
