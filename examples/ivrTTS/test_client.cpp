@@ -155,7 +155,7 @@ public:
     std::string url, wav, pcm;
     std::filesystem::path player_audio;
     std::atomic<bool> early{false}, bad_catalog{false};
-    std::atomic<bool> custom_reference{false};
+    std::atomic<bool> custom_reference{false}, greeting_fails{false};
     std::atomic<bool> streaming_tts{false}, stream_hold{false}, stream_first{false};
     std::atomic<bool> pipeline_mode{false}, rag_fails{false}, stt_waits{false}, dialogue_fails{false}, dialogue_progress{false};
     Server() {
@@ -241,7 +241,21 @@ private:
                     "\r\nConnection: close\r\nContent-Type: application/json\r\n\r\n" + json);
             };
             if (route == "/settings") { respond(R"({"vad_end_silence_ms":2000})"); return; }
-            if (route == "/tts-config") { if (custom_reference) { respond(R"({"model":"bluemagpie-test","streaming":false,"reference":{"audio":"UklGRg==","text":""}})"); return; } respond(streaming_tts ? R"({"model":"streaming-test","streaming":true})" : R"({"model":"test-tts","streaming":false})"); return; }
+            if (route == "/tts-config") {
+                auto input = parse(body);
+                json_object* welcome = nullptr;
+                if (json_object_object_get_ex(input.get(), "welcomeGreeting", &welcome) && json_object_get_boolean(welcome)) {
+                    if (greeting_fails) respond(R"({"error":"greeting unavailable"})", false);
+                    else respond(R"({"model":"demo-selected-tts","streaming":false,"greeting":"您好，這裡是 GeoVision IVR。"})");
+                    return;
+                }
+                if (custom_reference) {
+                    respond(R"({"model":"bluemagpie-test","streaming":false,"reference":{"audio":"UklGRg==","text":""}})");
+                    return;
+                }
+                respond(streaming_tts ? R"({"model":"streaming-test","streaming":true})" : R"({"model":"test-tts","streaming":false})");
+                return;
+            }
             if (route == "/normalize") { respond(body); return; }
             if (route == "/dialogue") {
                 auto input = parse(body);
@@ -787,6 +801,7 @@ void test_sip(const std::string& executable) {
         write_file(options, "SIP_MODE= pipeline\nSIP_ACCOUNT=sip:1001@127.0.0.1\nSIP_PROXY=" + sip.uri +
             "\nSIP_TARGET=listen\nSIP_WAIT_FOR_MEDIA=1\nSIP_ECHO_TEST=1\nSIP_DIALOGUE_URL=" + audio.url + "/dialogue\n");
         for (const char* key : {"SIP_MODE", "SIP_ACCOUNT", "SIP_PROXY", "SIP_TARGET", "SIP_WAIT_FOR_MEDIA", "SIP_ECHO_TEST", "SIP_GREETING"}) unsetenv(key);
+        setenv("SIP_GREETING", "", 1);
         setenv("SIP_CONTINUOUS", "0", 1);
         setenv("SIP_CODEC", "PCMU", 1);
         setenv("AUDIOCPP_URL", audio.url.c_str(), 1);
@@ -834,7 +849,7 @@ void test_sip(const std::string& executable) {
         const std::string messages = json_object_to_json_string(message_array);
         check(messages.find("Where is the office?") != std::string::npos && messages.find("The office is on floor 3.") != std::string::npos,
               "SIP conversation text missing from demo monitor");
-        unsetenv("SIP_MONITOR_DIR"); unsetenv("SIP_CONTINUOUS");
+        unsetenv("SIP_MONITOR_DIR"); unsetenv("SIP_CONTINUOUS"); unsetenv("SIP_GREETING");
         setenv("SIP_WAIT_FOR_MEDIA", "0", 1);
     }
     {
@@ -970,7 +985,36 @@ void test_pipeline() {
     {
         auto shared = config; shared.dialogue_url = server.url + "/dialogue";
         const auto start = server.pipeline_requests().size();
-        SipPipeline pipeline(shared); pipeline.resume(); send_turn(pipeline); reply(pipeline);
+        setenv("SIP_GREETING", "Legacy greeting", 1);
+        SipPipeline pipeline(shared);
+        check(pipeline.queue_greeting(), "SIP did not queue the demo greeting");
+        check(!pipeline.submit_text("Too early"), "SIP accepted a turn before the greeting");
+        reply(pipeline);
+        const auto opening = server.pipeline_requests();
+        check(opening.size() == start + 2 && opening[start].first == "/tts-config" && opening[start + 1].first == "/v1/audio/speech",
+              "SIP did not load the saved greeting before speech synthesis");
+        const auto welcome = parse(opening[start + 1].second);
+        check(field(welcome.get(), "input") == "您好，這裡是 GeoVision IVR。" && field(welcome.get(), "model") == "demo-selected-tts",
+              "SIP did not synthesize the saved greeting with the selected TTS model");
+        SipMonitor::get().publish();
+        check(read_file(monitor.path / "live.json").find("您好，這裡是 GeoVision IVR。") != std::string::npos,
+              "SIP did not publish the saved greeting in the transcript");
+        setenv("SIP_GREETING", "", 1);
+        check(!pipeline.queue_greeting(), "SIP ignored the explicit greeting opt-out");
+        unsetenv("SIP_GREETING");
+        {
+            server.greeting_fails = true;
+            SipPipeline unavailable(shared);
+            check(unavailable.queue_greeting(), "SIP did not start loading an unavailable greeting");
+            auto deadline = Clock::now() + 8s;
+            std::vector<unsigned char> skipped;
+            bool completed = false;
+            while (Clock::now() < deadline && !(completed = unavailable.take_reply(skipped)))
+                std::this_thread::sleep_for(10ms);
+            check(completed && skipped.empty() && unavailable.error().empty(), "greeting failure blocked the SIP conversation");
+            server.greeting_fails = false;
+        }
+        pipeline.resume(); send_turn(pipeline); reply(pipeline);
         pipeline.resume(); send_turn(pipeline); reply(pipeline);
         const auto requests = server.pipeline_requests(); size_t turns = 0;
         for (size_t i = start; i < requests.size(); ++i) {

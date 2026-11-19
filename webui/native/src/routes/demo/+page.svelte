@@ -2577,7 +2577,7 @@
           cloneBusy}
       >
         <label
-          >Call greeting<textarea rows="3" bind:value={greeting}
+          >Greeting transcript<textarea rows="3" bind:value={greeting}
           ></textarea></label
         >
         <button

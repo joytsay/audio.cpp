@@ -111,8 +111,6 @@
         <label for="demo-sip-rtp">RTP port range</label><input id="demo-sip-rtp" bind:value={settings.rtp_ports} required placeholder="49160-49200" />
         <label for="demo-sip-codec">Codec</label><select id="demo-sip-codec" bind:value={settings.codec}><option value="PCMU">PCMU · G.711 μ-law</option><option value="OPUS">Opus</option></select>
         <label for="demo-sip-dtmf">DTMF</label><select id="demo-sip-dtmf" bind:value={settings.dtmf_mode}><option value="rtp">RTP telephone-event</option><option value="info">SIP INFO</option></select>
-        <h3>TTS greetings</h3>
-        <label for="demo-sip-tts">TTS model</label><input id="demo-sip-tts" bind:value={settings.tts_model} required />
         <label for="demo-sip-greeting1">#1 · lingCL</label><textarea id="demo-sip-greeting1" bind:value={settings.greeting1} rows="2" required></textarea>
         <label for="demo-sip-greeting2">#2 · WangSG</label><textarea id="demo-sip-greeting2" bind:value={settings.greeting2} rows="2" required></textarea>
         <label for="demo-sip-greeting3">#3 · lingCL</label><textarea id="demo-sip-greeting3" bind:value={settings.greeting3} rows="2" required></textarea>

@@ -596,7 +596,9 @@ private:
             if (pipeline_) {
                 // IVR consumes caller RTP automatically. The greeting-selection
                 // gate belongs to the standalone announcement test, not IVR.
-                if (!announcement_.empty()) start_announcement();
+                welcome_pending_ = pipeline_->queue_greeting();
+                if (welcome_pending_) SipMonitor::get().stage("Synthesizing greeting");
+                else if (!announcement_.empty()) start_announcement();
                 else { pipeline_->resume(); audio_.listen(true); }
             } else if (realtime_tts_) {
                 std::cout << "Waiting for TTS selection: #1 lingCL, #2 WangSG, #3 lingCL.\n";
@@ -685,7 +687,11 @@ private:
                 const auto url = env("AUDIOCPP_URL").empty() ? "http://127.0.0.1:8081" : env("AUDIOCPP_URL");
                 const auto model = env("TTS_MODEL").empty() ? "zipvoice" : env("TTS_MODEL");
                 std::cout << "Generating TTS on keypress: " << key << "\n";
-                ivrTTS tts; tts.create(url, model, digit == '2' ? "WangSG" : "lingCL");
+                const auto settings = resolve_sip_tts(env("SIP_DIALOGUE_URL"), model, digit == '2' ? "WangSG" : "lingCL", tts_stop_, SipTtsPurpose::Keypad);
+                if (tts_stop_ || tts_revision_ != revision) continue;
+                SipMonitor::get().tts_model(settings.model);
+                ivrTTS tts;
+                settings.apply(tts, url);
                 tts.run_stream(env(key.c_str()), [&](const unsigned char* bytes, size_t size) {
                     if (wav.size() + size > 64 * 1024 * 1024) throw std::runtime_error("TTS audio exceeds 64 MiB");
                     wav.insert(wav.end(), bytes, bytes + size);
@@ -815,7 +821,18 @@ private:
         while (!announcement_playing_ && (!pipeline_playing_ || pipeline_streaming_)) {
             std::vector<unsigned char> reply; bool interim = false, streaming = false, complete = true;
             if (!pipeline_->take_reply(reply, &interim, &streaming, &complete)) break;
+            if (!streaming && reply.empty()) {
+                welcome_pending_ = false;
+                pipeline_->resume(); audio_.listen(true);
+                SipMonitor::get().stage("Listening");
+                return true;
+            }
             if (!pipeline_playing_) {
+                if (welcome_pending_) {
+                    welcome_pending_ = false;
+                    std::cout << "Playing welcome greeting.\n";
+                    SipMonitor::get().event("GREETING_PLAYED", "Playing welcome greeting");
+                }
                 pipeline_playing_ = true; pipeline_interim_ = interim; pipeline_streaming_ = streaming;
                 audio_.listen(false); draining_ = false; started = true;
                 if (streaming) audio_.begin_stream();
@@ -862,7 +879,7 @@ private:
     struct tmr timer_{};
     bool libre_ = false, configured_ = false, initialized_ = false, ua_initialized_ = false, events_ = false;
     bool registered_ = false, established_ = false, waiting_ = false, closing_ = false, draining_ = false;
-    bool pipeline_playing_ = false, pipeline_interim_ = false, pipeline_streaming_ = false;
+    bool pipeline_playing_ = false, pipeline_interim_ = false, pipeline_streaming_ = false, welcome_pending_ = false;
     bool wait_for_media_ = false, waiting_for_media_ = false, media_ready_ = false, announcement_playing_ = false;
     bool greeting_prefix_ = false;
     std::string test_keys_;
@@ -1040,7 +1057,7 @@ int main(int argc, char** argv) {
                          "TTS greetings: exampleSIP --tts-greetings SIP_ACCOUNT SIP_PROXY TARGET_OR_listen (DTMF_1, DTMF_2, DTMF_3)\n"
                          "Prerecorded: exampleSIP --greetings DIR SIP_ACCOUNT SIP_PROXY TARGET_OR_listen\n"
                          "TURN client: COTURN_URL, COTURN_USERNAME, COTURN_PASSWORD\n"
-                         "SIP_GREETING: opening message; an empty value disables it\n"
+                         "SIP_GREETING: standalone opening text; an empty value disables the greeting\n"
                          "Greetings: #1 lingCL, #2 WangSG; repeat either sequence to replay\n"
                          "SIP_WAIT_FOR_MEDIA=1: wait for greeting selection (default 1; 0 starts automatically)\n"
                          "SIP_ECHO_TEST=1: pause greetings and echo caller audio during microphone activity\n"
@@ -1108,7 +1125,7 @@ int main(int argc, char** argv) {
             const char* configured_greeting = std::getenv("SIP_GREETING");
             std::string greeting = configured_greeting ? configured_greeting : "歡迎來電期偶科技 請問我可以怎麼服務您";
             std::vector<unsigned char> welcome, alternate;
-            if (!greeting.empty()) {
+            if (config.dialogue_url.empty() && !greeting.empty()) {
                 ivrTTS tts; tts.create(config.audio_url, config.tts_model, "lingCL");
                 std::cout << "Generating welcome greeting (lingCL)...\n";
                 welcome = tts.run(greeting); decode_wav(welcome);
@@ -1120,15 +1137,16 @@ int main(int argc, char** argv) {
             if (!continuous.empty() && continuous != "0" && continuous != "1")
                 throw std::runtime_error("SIP_CONTINUOUS must be 0 or 1");
             do {
-                // Each caller gets fresh conversation state, but greetings stay in
-                // memory across normal hangups instead of re-running TTS.
+                // Standalone welcome audio is cached. The demo greeting is
+                // fetched by the new conversation when its call connects.
                 auto conversation = std::make_unique<SipPipeline>(SipPipelineConfig::from_environment());
                 {
                     SipCall call(args[1], args[2], args[3], welcome, std::move(conversation), alternate);
                     call.run();
                 }
                 if (interrupted || args[3] != "listen" || continuous != "1") return 0;
-                std::cout << "Call finished; reusing greetings for the next caller.\n";
+                if (config.dialogue_url.empty()) std::cout << "Call finished; reusing greetings for the next caller.\n";
+                else std::cout << "Call finished; waiting for the next caller.\n";
             } while (!interrupted);
             return 0;
         }

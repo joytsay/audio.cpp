@@ -168,6 +168,33 @@ std::vector<unsigned char> wav(const std::vector<unsigned char>& pcm) {
 }
 }
 
+void SipTtsConfig::apply(ivrTTS& tts, const std::string& audio_url) const {
+    tts.create(audio_url, model, voice);
+    if (!reference_audio.empty()) tts.set_reference_base64(reference_audio, reference_text);
+}
+
+SipTtsConfig resolve_sip_tts(const std::string& dialogue_url, const std::string& model, const std::string& voice,
+                            const std::atomic<bool>& stopping, SipTtsPurpose purpose) {
+    SipTtsConfig config{model, voice, {}, {}, {}};
+    if (dialogue_url.empty()) return config;
+    auto body = object(); add(body.get(), "model", model);
+    if (purpose == SipTtsPurpose::Keypad)
+        json_object_object_add(body.get(), "keypadGreeting", json_object_new_boolean(true));
+    if (purpose == SipTtsPurpose::Welcome)
+        json_object_object_add(body.get(), "welcomeGreeting", json_object_new_boolean(true));
+    const auto endpoint = dialogue_url.substr(0, dialogue_url.rfind("/dialogue"));
+    auto settings = post(endpoint + "/tts-config", body.get(), stopping);
+    if (const auto selected = text(settings.get(), "model"); !selected.empty()) config.model = selected;
+    if (purpose != SipTtsPurpose::Keypad) {
+        config.streaming = json_object_get_boolean(member(settings.get(), "streaming"));
+        if (const auto selected = text(settings.get(), "voice"); !selected.empty()) config.voice = selected;
+        config.reference_audio = text(member(settings.get(), "reference"), "audio");
+        config.reference_text = text(member(settings.get(), "reference"), "text");
+        config.greeting = text(settings.get(), "greeting");
+    }
+    return config;
+}
+
 SipPipelineConfig SipPipelineConfig::from_environment() {
     SipPipelineConfig config;
     config.audio_url = base(env("AUDIOCPP_URL", "http://127.0.0.1:8081"));
@@ -207,6 +234,14 @@ SipPipeline::~SipPipeline() { stop(); }
 void SipPipeline::stop() { stopping_ = true; ready_.notify_all(); if (worker_.joinable()) worker_.join(); }
 void SipPipeline::resume() {
     std::lock_guard<std::mutex> lock(mutex_); input_.clear(); listening_ = true; ready_.notify_all();
+}
+bool SipPipeline::queue_greeting() {
+    const char* configured = std::getenv("SIP_GREETING");
+    if (config_.dialogue_url.empty() || (configured && !*configured)) return false;
+    std::lock_guard<std::mutex> lock(mutex_);
+    pending_greeting_ = true;
+    ready_.notify_all();
+    return true;
 }
 bool SipPipeline::submit_text(const std::string& text) {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -355,7 +390,13 @@ void SipPipeline::respond_text(std::string caller) {
     history_.emplace_back("user", caller); history_.emplace_back("assistant", answer);
     if (history_.size() > 12) history_.erase(history_.begin(), history_.begin() + 2);
 }
-void SipPipeline::synthesize_speech(const std::string& answer, bool interim) {
+void SipPipeline::synthesize_speech(std::string answer, bool interim, SipTtsPurpose purpose) {
+    const auto config = resolve_sip_tts(config_.dialogue_url, config_.tts_model, config_.voice, stopping_, purpose);
+    const bool welcome = purpose == SipTtsPurpose::Welcome;
+    if (welcome) {
+        if (config.greeting.empty()) throw std::runtime_error("Greeting transcript is empty");
+        answer = config.greeting;
+    }
     // The spoken form is separate from the original answer/history. Even if
     // the LLM misses the prompt's pronunciation rules, never send ASCII digits
     // to Chinese TTS, which can otherwise pronounce mixed IDs in English.
@@ -366,24 +407,18 @@ void SipPipeline::synthesize_speech(const std::string& answer, bool interim) {
         else spoken += static_cast<char>(c);
     }
     std::cout << "TTS text: " << spoken << "\n";
-    std::string model = config_.tts_model, voice = config_.voice, reference_audio, reference_text; bool streaming = false;
-    if (!config_.dialogue_url.empty()) {
-        auto body = object(); add(body.get(), "model", model);
-        const auto endpoint = config_.dialogue_url.substr(0, config_.dialogue_url.rfind("/dialogue"));
-        auto settings = post(endpoint + "/tts-config", body.get(), stopping_);
-        streaming = json_object_get_boolean(member(settings.get(), "streaming"));
-        if (!text(settings.get(), "voice").empty()) voice = text(settings.get(), "voice");
-        reference_audio = text(member(settings.get(), "reference"), "audio");
-        reference_text = text(member(settings.get(), "reference"), "text");
-        if (!text(settings.get(), "model").empty()) model = text(settings.get(), "model");
-    }
-    SipMonitor::get().tts_model(model);
-    ivrTTS tts; tts.create(config_.audio_url, model, voice);
-    if (!reference_audio.empty()) tts.set_reference_base64(reference_audio, reference_text);
+    const bool streaming = config.streaming;
+    SipMonitor::get().tts_model(config.model);
+    ivrTTS tts;
+    config.apply(tts, config_.audio_url);
     std::vector<unsigned char> output; bool first = true;
     try { tts.run_stream(spoken, [&](const unsigned char* bytes, size_t size) {
         if (streaming) {
-            if (first) { first = false; SipMonitor::get().event("TTS_FIRST_AUDIO", "First SIP speech chunk received"); }
+            if (first) {
+                first = false;
+                if (welcome) SipMonitor::get().message("assistant", answer);
+                SipMonitor::get().event("TTS_FIRST_AUDIO", "First SIP speech chunk received");
+            }
             std::lock_guard<std::mutex> lock(mutex_); replies_.push_back({std::vector<unsigned char>(bytes, bytes + size), interim, true, false});
         } else output.insert(output.end(), bytes, bytes + size);
     }, streaming ? ivrTTS::AudioMode::StreamingWavChunks : ivrTTS::AudioMode::Wav, [&] { return stopping_.load(); });
@@ -391,7 +426,8 @@ void SipPipeline::synthesize_speech(const std::string& answer, bool interim) {
         if (streaming && !first) { std::lock_guard<std::mutex> lock(mutex_); replies_.push_back({{}, interim, true, true}); }
         throw;
     }
-    if (!interim) SipMonitor::get().event("TTS_COMPLETED", model);
+    if (welcome && !streaming) SipMonitor::get().message("assistant", answer);
+    if (!interim) SipMonitor::get().event("TTS_COMPLETED", config.model);
     std::lock_guard<std::mutex> lock(mutex_);
     if (streaming) replies_.push_back({{}, interim, true, true});
     else replies_.push_back({std::move(output), interim});
@@ -409,14 +445,29 @@ void SipPipeline::work() {
         std::vector<unsigned char> utterance, previous;
         size_t silent = 0;
         while (!stopping_) {
-            std::vector<unsigned char> window; std::string typed;
+            std::vector<unsigned char> window; std::string typed; bool greeting = false;
             { std::unique_lock<std::mutex> lock(mutex_);
-              ready_.wait(lock, [&] { return stopping_ || !pending_text_.empty() || (listening_ && input_.size() >= 16000); });
+              ready_.wait(lock, [&] { return stopping_ || pending_greeting_ || !pending_text_.empty() || (listening_ && input_.size() >= 16000); });
               if (stopping_) return;
-              typed = std::move(pending_text_); pending_text_.clear();
-              if (typed.empty()) {
-              window.reserve(16000);
-              for (int i = 0; i < 16000; ++i) { window.push_back(input_.front()); input_.pop_front(); } } }
+              greeting = std::exchange(pending_greeting_, false);
+              if (!greeting) {
+                  typed = std::move(pending_text_); pending_text_.clear();
+                  if (typed.empty()) {
+                      window.reserve(16000);
+                      for (int i = 0; i < 16000; ++i) { window.push_back(input_.front()); input_.pop_front(); }
+                  }
+              }
+            }
+            if (greeting) {
+                try { synthesize_speech({}, false, SipTtsPurpose::Welcome); }
+                catch (const std::exception& error) {
+                    if (stopping_) return;
+                    SipMonitor::get().event("GREETING_UNAVAILABLE", error.what());
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    replies_.push_back({{}, false});
+                }
+                continue;
+            }
             if (!typed.empty()) { utterance.clear(); previous.clear(); silent = 0; SipMonitor::get().stage("Thinking"); SipMonitor::get().event("TEXT_INPUT", typed); respond_text(std::move(typed)); continue; }
             bool active = speech(window);
             if (active && utterance.empty()) refresh_settings();

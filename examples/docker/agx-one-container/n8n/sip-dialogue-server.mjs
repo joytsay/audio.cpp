@@ -4,12 +4,16 @@ import { stripTypeScriptTypes } from 'node:module';
 import { pathToFileURL } from 'node:url';
 import path from 'node:path';
 
-// Load the shared browser/SIP transport for the n8n AI Agent webhook.
-export async function loadDialogue(directory = '/dialogue') {
+async function loadDemoModule(directory, name) {
   // Strip-only loading is supported by both Node 22 and Node 26.
-  const compile = async name => stripTypeScriptTypes(await readFile(path.join(directory, name), 'utf8'), { mode: 'strip' });
-  const url = source => 'data:text/javascript;base64,' + Buffer.from(source).toString('base64');
-  return (await import(url(await compile('n8n-dialogue.ts')))).n8nDialogue;
+  const source = stripTypeScriptTypes(await readFile(path.join(directory, name), 'utf8'), { mode: 'strip' });
+  return import('data:text/javascript;base64,' + Buffer.from(source).toString('base64'));
+}
+export async function loadDialogue(directory = '/dialogue') {
+  return (await loadDemoModule(directory, 'n8n-dialogue.ts')).n8nDialogue;
+}
+export async function loadGreetingReader(directory = '/dialogue') {
+  return (await loadDemoModule(directory, 'greetings.ts')).readGreetingCsv;
 }
 
 export async function ensureModel(base, model, signal, fetchImpl = fetch) {
@@ -41,7 +45,7 @@ export async function ensureModel(base, model, signal, fetchImpl = fetch) {
   throw new Error(`Selected LLM did not become ready: ${model}`);
 }
 
-export function createDialogueServer({ dialogue, normalizeTranscript = text => text, fetchImpl = fetch,
+export function createDialogueServer({ dialogue, readGreetingCsv, normalizeTranscript = text => text, fetchImpl = fetch,
   audioUrl = process.env.SIP_DIALOGUE_AUDIO_URL || 'http://voice-ai:8081',
   llmUrl = process.env.SIP_DIALOGUE_LLM_URL || 'http://voice-ai:8082/v1',
   workflowUrl = process.env.SIP_DIALOGUE_WORKFLOW_URL || 'http://127.0.0.1:5678/webhook/ivr-agent',
@@ -70,9 +74,17 @@ export function createDialogueServer({ dialogue, normalizeTranscript = text => t
         if(!response.ok)throw new Error(`Could not read saved demo settings (${response.status})`);
         const saved=(await response.json()).settings||{};
         let model = body.model;
-        const streaming = saved.tts_streaming === true;
-        let reference;
+        const keypadGreeting = req.url === '/tts-config' && body.keypadGreeting === true;
+        const welcomeGreeting = req.url === '/tts-config' && body.welcomeGreeting === true;
+        const streaming = !keypadGreeting && saved.tts_streaming === true;
+        let reference, greeting;
         if (req.url === '/tts-config') {
+          if (welcomeGreeting) {
+            if (!readGreetingCsv) throw new Error('Greeting reader is unavailable');
+            const response = await fetchImpl(`${audioUrl}/v1/ui/greetings`, { signal, cache: 'no-store' });
+            if (!response.ok) throw new Error(`Could not read greetings.csv (${response.status})`);
+            greeting = readGreetingCsv((await response.json()).content);
+          }
           const selected = saved.tts_model_id && saved.tts_model_family && saved.tts_model_path;
           if (streaming && !selected) throw new Error('Save a streaming-capable TTS model in the demo settings first');
           if (selected) {
@@ -81,7 +93,7 @@ export function createDialogueServer({ dialogue, normalizeTranscript = text => t
             const loaded = await fetchImpl(`${audioUrl}/v1/models/load`, {method:'POST', headers:{'Content-Type':'application/json'}, signal, body:JSON.stringify({id:model, family:saved.tts_model_family, path:saved.tts_model_path, task:saved.tts_model_task||'tts', mode, load_options:saved.tts_load_options||{}, session_options:saved.tts_session_options||{}})});
             if (!loaded.ok) throw new Error(`Could not load selected TTS (${loaded.status}): ${(await loaded.text()).slice(0,500)}`);
           }
-          if (saved.tts_voice_id && !saved.tts_voice_id.startsWith('preset-')) {
+          if (!keypadGreeting && saved.tts_voice_id && !saved.tts_voice_id.startsWith('preset-')) {
             const voices = await fetchImpl(`${audioUrl}/v1/ui/voices`, {signal, cache:'no-store'});
             if (!voices.ok) throw new Error(`Could not read saved voices (${voices.status})`);
             const voice = (await voices.json()).voices?.find(voice => voice.id === saved.tts_voice_id);
@@ -90,7 +102,7 @@ export function createDialogueServer({ dialogue, normalizeTranscript = text => t
           }
         }
         res.setHeader('Content-Type','application/json');
-        res.end(JSON.stringify({model, streaming, reference, voice: saved.tts_voice_id?.startsWith('preset-') ? (saved.tts_voice_id === 'preset-wangSG9s' ? 'WangSG' : 'lingCL') : undefined, vad_end_silence_ms:saved.vad_end_silence_ms??2000}));return;
+        res.end(JSON.stringify({model, streaming, reference, greeting, voice: !keypadGreeting && saved.tts_voice_id?.startsWith('preset-') ? (saved.tts_voice_id === 'preset-wangSG9s' ? 'WangSG' : 'lingCL') : undefined, vad_end_silence_ms:saved.vad_end_silence_ms??2000}));return;
       }
       if (typeof body.text !== 'string' || !body.text.trim() || typeof body.model !== 'string' || typeof body.prompt !== 'string' || !Array.isArray(body.messages) || body.messages.length > 12 || body.messages.some(m => !['user', 'assistant'].includes(m.role) || typeof m.content !== 'string')) throw new Error('Invalid SIP dialogue request');
       const signal = controller.signal;
@@ -136,7 +148,11 @@ export function createDialogueServer({ dialogue, normalizeTranscript = text => t
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  const dialogue = await loadDialogue(process.env.SIP_DIALOGUE_SOURCE_DIR || '/dialogue');
-  const { normalizeTranscript } = await import(pathToFileURL(path.join(process.env.SIP_DIALOGUE_SOURCE_DIR || '/dialogue', 'transcript.mjs')).href);
-  createDialogueServer({ dialogue, normalizeTranscript }).listen(Number(process.env.SIP_DIALOGUE_PORT || 8086), '0.0.0.0', () => console.log('[sip-dialogue] Ready on port 8086'));
+  const directory = process.env.SIP_DIALOGUE_SOURCE_DIR || '/dialogue';
+  const [dialogue, readGreetingCsv, { normalizeTranscript }] = await Promise.all([
+    loadDialogue(directory),
+    loadGreetingReader(directory),
+    import(pathToFileURL(path.join(directory, 'transcript.mjs')).href),
+  ]);
+  createDialogueServer({ dialogue, readGreetingCsv, normalizeTranscript }).listen(Number(process.env.SIP_DIALOGUE_PORT || 8086), '0.0.0.0', () => console.log('[sip-dialogue] Ready on port 8086'));
 }

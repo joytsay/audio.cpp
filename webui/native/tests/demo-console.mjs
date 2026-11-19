@@ -504,7 +504,7 @@ const { chromium } = require("playwright");
   await page.getByText("Saved prompt.csv", { exact: true }).waitFor();
   assert.equal(promptCsv, "請簡短回覆。");
   await page
-    .getByLabel("Call greeting", { exact: true })
+    .getByLabel("Greeting transcript", { exact: true })
     .fill("您好，請說明維修項目。");
   await page.getByRole("button", { name: "Update greetings.csv" }).click();
   await page
@@ -1129,7 +1129,7 @@ const { chromium } = require("playwright");
     .getByLabel("Saved voices", { exact: true })
     .selectOption("preset-wangSG9s");
   await page
-    .getByLabel("Call greeting", { exact: true })
+    .getByLabel("Greeting transcript", { exact: true })
     .fill("您好，這是儲存的問候。");
   await page
     .getByLabel("ASR hotwords / context", { exact: true })
@@ -1202,7 +1202,7 @@ const { chromium } = require("playwright");
     "1000",
   );
   assert.equal(
-    await freshPage.getByLabel("Call greeting", { exact: true }).inputValue(),
+    await freshPage.getByLabel("Greeting transcript", { exact: true }).inputValue(),
     "您好，這是儲存的問候。",
   );
   assert.equal(

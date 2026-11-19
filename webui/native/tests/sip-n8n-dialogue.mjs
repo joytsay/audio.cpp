@@ -4,14 +4,16 @@ import {buildSync} from 'esbuild';
 const normalizedModule=buildSync({entryPoints:[new URL('../src/lib/transcript.ts',import.meta.url).pathname],bundle:true,platform:'node',format:'esm',write:false});
 const {normalizeTranscript}=await import('data:text/javascript;base64,'+Buffer.from(normalizedModule.outputFiles[0].text).toString('base64'));
 import { fileURLToPath } from 'node:url';
-import { createDialogueServer, loadDialogue } from '../../../examples/docker/agx-one-container/n8n/sip-dialogue-server.mjs';
+import { createDialogueServer, loadDialogue, loadGreetingReader } from '../../../examples/docker/agx-one-container/n8n/sip-dialogue-server.mjs';
 
-const dialogue = await loadDialogue(fileURLToPath(new URL('../src/lib/', import.meta.url)));
+const directory = fileURLToPath(new URL('../src/lib/', import.meta.url));
+const [dialogue, readGreetingCsv] = await Promise.all([loadDialogue(directory), loadGreetingReader(directory)]);
 let releaseLookup,holdLookup=false;
 let noticeDelaySeconds=3,ttsStreaming=false,endSilenceMs=2000;
 const ttsLoads=[];
 let ttsFamily='zipvoice',voiceId;
 let failTtsLoad=false;
+let greetingsCsv='greeting\n"您好，這裡是 GeoVision IVR，請問需要什麼協助？"\n';
 let source = 'n8n', failTool = false, modelReady = true, modelLoads = 0, modelDiscovery = 0;
 const requests = [], toolCalls = [];
 const originalFetch = globalThis.fetch;
@@ -19,6 +21,10 @@ const query = '如何確認維修起機測試流程？';
 const mockFetch = async (url, options = {}) => {
   url = String(url); options.signal?.throwIfAborted();
   if (url === 'http://audio.test/v1/ui/demo-settings') return Response.json({ settings: { dialogue_source: source, llm_model: 'selected-demo-llm', lookup_notice_delay_seconds: noticeDelaySeconds,tts_streaming:ttsStreaming,vad_end_silence_ms:endSilenceMs,tts_model_id:'zipvoice-test',tts_model_family:ttsFamily,tts_model_path:`/models/${ttsFamily}.gguf`,tts_model_task:ttsFamily==='bluemagpie'?'tts':'clon',tts_voice_id:voiceId } });
+  if (url === 'http://audio.test/v1/ui/greetings') {
+    assert.equal(options.cache,'no-store');
+    return Response.json({content:greetingsCsv});
+  }
   if (url === 'http://audio.test/v1/models/load') { ttsLoads.push(JSON.parse(options.body)); return failTtsLoad ? new Response('backend unavailable',{status:503}) : Response.json({loaded:true}); }
   if (url === 'http://audio.test/v1/ui/voices') return Response.json({voices:[{id:'my-clone',audio:'UklGRg==',transcript:''}]});
   if (url === 'http://llm.test/models') { modelDiscovery++; return Response.json({ data: [{ id: 'selected-demo-llm', loaded: modelReady, status: { value: modelReady ? 'loaded' : 'unloaded' } }] }); }
@@ -45,7 +51,7 @@ const mockFetch = async (url, options = {}) => {
 };
 globalThis.fetch = mockFetch;
 const seenNoticeDelays=[];
-const server = createDialogueServer({ dialogue: (...args)=>{seenNoticeDelays.push(args[2].noticeDelaySeconds);return dialogue(...args);}, normalizeTranscript, fetchImpl: mockFetch, audioUrl: 'http://audio.test', llmUrl: 'http://llm.test/v1', workflowUrl: 'http://n8n.test/webhook/ivr-agent' });
+const server = createDialogueServer({ dialogue: (...args)=>{seenNoticeDelays.push(args[2].noticeDelaySeconds);return dialogue(...args);}, readGreetingCsv, normalizeTranscript, fetchImpl: mockFetch, audioUrl: 'http://audio.test', llmUrl: 'http://llm.test/v1', workflowUrl: 'http://n8n.test/webhook/ivr-agent' });
 server.listen(0, '127.0.0.1'); await once(server, 'listening');
 const base = `http://127.0.0.1:${server.address().port}`;
 const input = { sessionId: 'same-sip-call', text: query, model: 'old-worker-model', prompt: 'Saved telephone prompt', messages: [{ role: 'user', content: 'Previous caller turn' }, { role: 'assistant', content: 'Previous reply' }] };
@@ -77,6 +83,19 @@ try {
     assert.equal(ttsLoads.at(-1).mode,streaming?'streaming':'offline');
     assert.deepEqual(config.reference,{audio:'UklGRg==',text:''},'BlueMagpie reference needs no transcript');
   }
+  const keypadConfig=await originalFetch(base+'/tts-config',{method:'POST',body:JSON.stringify({model:'zipvoice',keypadGreeting:true})});
+  assert.deepEqual(await keypadConfig.json(),{model:'demo-zipvoice-test',streaming:false,vad_end_silence_ms:3000});
+  assert.equal(ttsLoads.at(-1).family,'bluemagpie');
+  assert.equal(ttsLoads.at(-1).mode,'offline','keypad playback requires one WAV');
+  const fetchWelcome=()=>originalFetch(base+'/tts-config',{method:'POST',body:JSON.stringify({model:'zipvoice',welcomeGreeting:true})});
+  const welcome=await (await fetchWelcome()).json();
+  assert.equal(welcome.greeting,'您好，這裡是 GeoVision IVR，請問需要什麼協助？');
+  assert.equal(welcome.model,'demo-zipvoice-test-streaming');
+  assert.deepEqual(welcome.reference,{audio:'UklGRg==',text:''});
+  greetingsCsv='greeting\r\n"新的 ""GeoVision"" 問候，\n請問需要什麼協助？"\r\n';
+  assert.equal((await (await fetchWelcome()).json()).greeting,'新的 "GeoVision" 問候，\n請問需要什麼協助？');
+  greetingsCsv='greeting\n""\n';
+  assert.equal((await fetchWelcome()).status,500);
   failTtsLoad=true;
   const failedTts=await originalFetch(base+'/tts-config',{method:'POST',body:JSON.stringify({model:'zipvoice'})});
   assert.equal(failedTts.status,500,'never silently fall back to ZipVoice');
