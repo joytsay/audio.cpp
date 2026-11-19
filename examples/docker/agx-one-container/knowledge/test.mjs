@@ -31,6 +31,9 @@ try{
  const referenceQuery=callDecision(['YCS-16866 的內容']);
  assert.equal(referenceQuery.reference,'YCS-16866');
  assert.equal(callDecision(['查詢 YCS-16866']).reference,'YCS-16866');
+ assert.equal(callDecision(['我要查詢YCS-16866']).reference,'YCS-16866');
+ assert.equal(callDecision(['我要找YCS-16866']).reference,'YCS-16866');
+ assert.equal(callDecision(['查詢最新']).selection,'newest');
  assert.equal(callDecision(['YCS-16862']).reference,'YCS-16862');
  assert.equal(callDecision(['我要新增工單。','YCS-16862']).tool,'add_work_order');
  const nearOrder={id:'near',fields:{派工單號:'YCS-168660'}};
@@ -50,12 +53,22 @@ try{
   ['查 台積電 F20P1',{kind:'customer_site',term:'F20P1',customer:'台積電'}],
   ['查員工編號10100857',{kind:'employee',term:'10100857'}],
   ['查設備類型 EF',{kind:'keyword',term:'EF',sheet:'設備類型'}],
+  ['我要查詢型號20BD148AOANNANCO',{kind:'model',term:'20BD148AOANNANCO'}],
+  ['我要查詢 陳俞境',{kind:'keyword',term:'陳俞境'}],
+  ['我要查詢 蔡哲',{kind:'person',term:'蔡哲',fallback:true}],
+  ['我要查詢 louis wang',{kind:'person',term:'louis wang',fallback:true}],
+  ['我要找HR',{kind:'keyword',term:'HR'}],
+  ['我要查詢HR',{kind:'keyword',term:'HR'}],
+  ['查詢姓名 Louis Wang',{kind:'person',term:'Louis Wang'}],
+  ['「設備表」可以查詢什麼？',{kind:'catalog',term:'設備表'}],
  ]){
   const decision=callDecision(['我要新增工單。',query]);
   assert.equal(decision.intent,'lookup');
   assert.deepEqual((await empty.documents(decision.query)).scenario_lookup,lookup);
  }
- assert.ok((await empty.documents('查詢保固')).documents.length,'document questions keep the Q/A path');
+ const warranty=await empty.documents('查詢保固');
+ assert.ok(warranty.documents.length,'two-character queries keep the document fallback');
+ assert.equal(warranty.scenario_lookup.fallback,true);
  const original=await fs.readFile(path.join(dir,filenames.excel));
  const dataRoot=path.join(dir,'data'),orders=createWorkOrderStore({root:dataRoot});
  let ocrCalls=0;
@@ -77,9 +90,17 @@ try{
  const scenarioRoot=path.join(dir,'uploaded-scenarios');
  const scenarioStore=createKnowledgeStore({root:dir,orders,scenarioRoot,pdf:async()=>({text:'測試 PDF 的服務時間為星期三。',extraction:'pdf_text'})});
  const encoded=(name,text)=>({name,data:Buffer.from(text).toString('base64')});
+ const scenarioFile=encoded('可查詢情境.csv','派工單號,型號,姓名\nYCS-16866,20BD148AOANNANCO,陳俞境\n');
+ const imported=await scenarioStore.addScenario({fileMode:true,files:[scenarioFile]});
+ const examples=['我要查詢YCS-16866','我要查詢型號20BD148AOANNANCO','我要查詢 陳俞境'];
+ assert.deepEqual(imported.scenario.examples,examples);
+ await scenarioStore.saveScenarioImport(imported.scenario.id,{ready:true,toolName:'test_tool'});
+ assert.deepEqual((await scenarioStore.listScenarios()).find(item=>item.id===imported.scenario.id).examples,examples);
+ await scenarioStore.removeScenario(imported.scenario.id);
  const upload={name:'LAB-ZETA 服務',files:[encoded('服務.txt','Q: LAB-ZETA 包材何時回收？\nA: LAB-ZETA 每週三回收，聯絡分機 7654。'),encoded('保固.md','# LAB-ZETA 保固\nLAB-ZETA 維修保固為十二個月。')]};
  const scenario=await scenarioStore.addScenario(upload);
  assert.ok(scenario.scenario.qaCount>=2);assert.equal(scenario.duplicate,false);
+ assert.equal(scenario.scenario.examples.length,3);
  assert.deepEqual((await scenarioStore.listScenarios()).map(s=>s.name),['LAB-ZETA 服務']);
  assert.equal((await scenarioStore.addScenario(upload)).duplicate,true);
  await assert.rejects(scenarioStore.addScenario({...upload,files:[encoded('其他.txt','不同內容。')]}),/already exists/);

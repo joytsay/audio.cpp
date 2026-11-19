@@ -287,7 +287,9 @@ export async function prepareStartupWorkflow({
   install=importMissing,
   upgradeTables=async()=>{
     await upgradeResultsColumn();
-    await createScenarioManager().repairDispatchDates();
+    const scenarios=createScenarioManager();
+    await scenarios.repairDispatchDates();
+    await scenarios.refreshDirectoryWorkflows();
   },
   publish=publishWorkflow,
   autoPublish=process.env.N8N_AUTO_PUBLISH_WORKFLOW!=='false',

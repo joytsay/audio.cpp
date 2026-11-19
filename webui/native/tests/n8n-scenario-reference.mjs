@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {Readable} from 'node:stream';
 import {runInNewContext} from 'node:vm';
-import {createScenarioManager,createScenarioServer} from '../../../examples/docker/agx-one-container/n8n/scenario-workflows.mjs';
+import {compileScenarioWorkflow,createScenarioManager,createScenarioServer,refreshScenarioLookup,tableColumns} from '../../../examples/docker/agx-one-container/n8n/scenario-workflows.mjs';
 
 const base=new URL('../../../examples/docker/agx-one-container/n8n/',import.meta.url);
 const workflow=JSON.parse(await readFile(new URL('workflow.json',base)));
@@ -10,7 +10,8 @@ const nodes=new Map(workflow.nodes.map(node=>[node.name,node]));
 const next=name=>workflow.connections[name].main.map(branch=>branch[0].node);
 assert.deepEqual(next('Load knowledge files'),['Search imported tables?']);
 assert.deepEqual(next('Search imported tables?'),['Look up scenario records','Prepare guidance']);
-assert.deepEqual(next('Look up scenario records'),['Return scenario records']);
+assert.deepEqual(next('Look up scenario records'),['Use scenario result?']);
+assert.deepEqual(next('Use scenario result?'),['Return scenario records','Prepare guidance']);
 assert.deepEqual(next('Prepare agent context'),['Scenario lookup result?']);
 assert.deepEqual(next('Scenario lookup result?'),['Prepare IVR output','AI Agent']);
 
@@ -18,7 +19,18 @@ const tables=[
  {name:'CSD資料庫_派工',sheet:'派工',headers:['派工單號','派工項目','負責人','派工日期'],records:[]},
  {name:'CSD資料庫_客戶設備',sheet:'客戶設備',headers:['廠區','設備','客戶名稱','SN'],records:[]},
  {name:'CSD資料庫_設備類型',sheet:'設備類型',headers:['設備','型號'],records:[]},
- {name:'CSD資料庫_通訊錄',sheet:'通訊錄',headers:['工號','姓名','部門名稱','分機/電話'],records:[]},
+ {name:'CSD資料庫_通訊錄',sheet:'通訊錄',headers:['工號','姓名','部門/團隊','分機/電話','英文名','職稱','公司信箱'],records:[]},
+];
+const directoryRows=[
+ {id:1,employee_number:'101008570',name:'黃思翰明',department_team:'其他部門'},
+ {id:2,employee_number:'10100857',name:'黃思翰',department_team:'測試部門',extension_phone:'0123'},
+ {id:3,name:'蔡哲明',extension_phone:'999'},
+ {id:4,name:'蔡哲',extension_phone:'321',department_team:'軟體組',english_name:'Test Name'},
+ {id:5,name:'周怡君',extension_phone:'570',department_team:'軟體組',english_name:'Candy',job_title:'助理工程師',work_email:'example@example.test'},
+ {id:6,name:'王宏睿',extension_phone:'206',department_team:'軟體一',english_name:'Louis Wang',job_title:'資深經理'},
+ {id:7,name:'測試人員',extension_phone:'222',department_team:'IT Support',english_name:'Louis Wang Jr'},
+ {id:8,name:'邱建忠',extension_phone:'289',department_team:'軟體一',english_name:'Chung Chiu(PM)',job_title:'副理'},
+ {id:9,name:'陳奕萍',extension_phone:'619',department_team:'人資',english_name:'Eva Chen',job_title:'經理',work_email:'hr@example.test'},
 ];
 const resource={ready:true,tables:['dispatch-table','equipment-table','types-table','directory-table'].map(id=>({id}))};
 let item='更換風扇';
@@ -59,13 +71,12 @@ const manager=createScenarioManager({knowledgeUrl:'http://knowledge.test',withAp
    ]};
   }
   if(route==='/data-tables/types-table/rows?limit=100'){
-   return {data:[{id:1,equipment:'EF',model:'測試型號'}]};
+   return {data:[{id:1,equipment:'EF',model:'測試型號'},
+    {id:2,equipment:'變頻器',model:'20BD148AOANNANCO'},
+    {id:3,equipment:'不相符',model:'20BD148AOANNANCO2'}]};
   }
   assert.equal(route,'/data-tables/directory-table/rows?limit=100');
-  return {data:[
-   {id:1,employee_number:'101008570',name:'黃思翰明',department_name:'其他部門'},
-   {id:2,employee_number:'10100857',name:'黃思翰',department_name:'測試部門',extension_phone:'0123'},
-  ]};
+  return {data:directoryRows};
  });
 }});
 
@@ -136,7 +147,7 @@ try{
  assert.equal(foundPerson.records[0].fields.姓名,'黃思翰');
  assert.equal(foundPerson.records[1].fields.派工日期,'202602/30','invalid dates are preserved');
  assert.equal(foundPerson.matched_rows,2);
- assert.match(reply({scenario_lookup:person},foundPerson),/黃思翰.*通訊錄.*測試部門.*0123/);
+ assert.equal(reply({scenario_lookup:person},foundPerson),'黃思翰，分機 0123，部門 測試部門。');
  assert.equal((await lookup({lookup:{...person,kind:'person'}})).matched_rows,1);
  const unknown={kind:'site',term:'F90P9'};
  assert.equal(reply({scenario_lookup:unknown},await lookup({lookup:unknown})),'沒有查到 F90P9 的資料。');
@@ -144,14 +155,63 @@ try{
  const decisions=[
   [{kind:'serial',term:'14778788'},/SN 14778788.*客戶設備.*測試設備/],
   [{kind:'customer_site',term:'F20P1',customer:'台積電'},/台積電 F20P1.*客戶設備.*測試設備/],
-  [{kind:'employee',term:'10100857'},/員工編號 10100857.*通訊錄.*黃思翰/],
+  [{kind:'employee',term:'10100857'},/^黃思翰，分機 0123，部門 測試部門。$/],
   [{kind:'keyword',term:'EF',sheet:'設備類型'},/EF.*設備類型.*測試型號/],
+  [{kind:'model',term:'20BD148AOANNANCO'},/20BD148AOANNANCO.*設備類型.*變頻器/],
  ];
  for(const [query,answer] of decisions){
   const matches=await lookup({lookup:query});
   assert.equal(matches.matched_rows,1);
   assert.match(reply({scenario_lookup:query},matches),answer);
  }
+ const shortName={kind:'person',term:'蔡哲',fallback:true};
+ const match=await lookup({lookup:shortName});
+ assert.equal(match.matched_rows,1);
+ assert.equal(reply({scenario_lookup:shortName},match),'蔡哲，分機 321，英文名 Test Name，部門 軟體組。');
+ assert.equal((await lookup({lookup:{...shortName,term:'保固'}})).matched_rows,0);
+ const candy={kind:'keyword',term:'周怡君'};
+ assert.equal(reply({scenario_lookup:candy},await lookup({lookup:candy})),
+  '周怡君，分機 570，英文名 Candy，部門 軟體組，職稱 助理工程師。');
+ const louis={kind:'person',term:'louis wang',fallback:true};
+ const englishMatch=await lookup({lookup:louis});
+ const englishReply='王宏睿，分機 206，英文名 Louis Wang，部門 軟體一，職稱 資深經理。';
+ assert.equal(englishMatch.matched_rows,1);
+ assert.equal(reply({scenario_lookup:louis},englishMatch),englishReply);
+ const chung={kind:'keyword',term:'Chung'};
+ const chungReply='邱建忠，分機 289，英文名 Chung Chiu(PM)，部門 軟體一，職稱 副理。';
+ const chungMatch=await lookup({lookup:chung});
+ assert.equal(chungMatch.matched_rows,1);
+ assert.equal(reply({scenario_lookup:chung},chungMatch),chungReply);
+ assert.equal((await lookup({lookup:{...chung,term:'Chun'}})).matched_rows,0);
+ const hr={kind:'keyword',term:'hr'};
+ const hrReply='陳奕萍，分機 619，英文名 Eva Chen，部門 人資，職稱 經理。';
+ const hrMatch=await lookup({lookup:hr});
+ assert.equal(hrMatch.matched_rows,1);
+ assert.equal(reply({scenario_lookup:hr},hrMatch),hrReply);
+
+ const directory=compileScenarioWorkflow({id:'directory',name:'通訊錄',files:[{name:'directory.csv'}],dataset:{template:[]}},[
+  {...tables[3],id:'directory-table',columns:tableColumns(tables[3].headers)},
+ ]);
+ const directoryNode=directory.nodes.find(node=>node.id==='scenario-result');
+ const directoryCode=directoryNode.parameters.jsCode;
+ directoryNode.parameters.jsCode=directoryCode.replace('function lookupScenario(input,tables,template,source) {','function lookupScenario(input,tables,template,source) { /* old generated code */');
+ assert.equal(refreshScenarioLookup(directory),true);
+ assert.equal(directoryNode.parameters.jsCode,directoryCode);
+ assert.equal(refreshScenarioLookup(directory),false);
+ const directoryToolResult=query=>runInNewContext(`(function(){${directoryCode}})()`,{
+  $:name=>name==='Scenario request'?{first:()=>({json:{query}})}
+   :{all:()=>directoryRows.map(json=>({json}))},
+ })[0].json;
+ const cai=directoryToolResult('我要查詢 蔡哲');
+ assert.equal(cai.matched_rows,1);
+ assert.equal(cai.records[0].directory_reply,'蔡哲，分機 321，英文名 Test Name，部門 軟體組。');
+ const english=directoryToolResult('我要查詢 LOUIS  WANG');
+ assert.equal(english.matched_rows,1);
+ assert.equal(english.records[0].directory_reply,englishReply);
+ assert.equal(directoryToolResult('我要查詢 Chung').records[0].directory_reply,chungReply);
+ assert.equal(directoryToolResult('我要查詢 hr').records[0].directory_reply,hrReply);
+ assert.equal(directoryToolResult('我要找HR').records[0].directory_reply,hrReply);
+ assert.equal(directoryToolResult('IT Support').records[0].fields['部門/團隊'],'IT Support');
  assert.match(workOrderReply('YCS-16862',await lookup({reference:'YCS-16862'})),/YCS-16862.*五年一維/);
  const catalog={kind:'catalog',term:'CSD'};
  const readsBefore=readRoutes.length;

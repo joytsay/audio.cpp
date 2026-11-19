@@ -91,7 +91,7 @@ const saved=output({output:'很長的回覆。',intermediateSteps:[{action:{tool
 assert.equal(saved.reply,'工單 GV-TEST 已新增。');
 const prepCode=nodes.get('Prepare guidance').parameters.jsCode;
 const docs=[{source:'情境模擬_20261105.docx',section:'情境 2',format:'qa',question:'如何回報？',answer:'請提供實際設備。',text:'Q: 如何回報？\nA: 請提供實際設備。'}];
-const runPrep=documents=>vm.runInNewContext(`(function(){${prepCode}})()`,{$:()=>({first:()=>({json:{query:'流程'}})}),$input:{first:()=>({json:{documents}})}})[0].json;
+const runPrep=documents=>vm.runInNewContext(`(function(){${prepCode}})()`,{$:name=>({first:()=>({json:name==='Load knowledge files'?{documents}:{query:'流程'}})})})[0].json;
 assert.equal(runPrep(docs).knowledge[0],docs[0].text);
 assert.throws(()=>runPrep([{text:'Raw paragraph'}]),/grounded Q.A/);
 assert.equal(nodes.get('Recursive Text Splitter').parameters.chunkOverlap,0);

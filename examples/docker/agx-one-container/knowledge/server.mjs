@@ -175,7 +175,7 @@ export function createKnowledgeStore({root=process.env.KNOWLEDGE_ROOT,pdf=extrac
     async documents(query='',tableRecords=[]){
       if(!Array.isArray(tableRecords)||tableRecords.some(r=>!r||typeof r.id!=='string'||!r.fields||typeof r.fields!=='object'))throw Object.assign(Error('Invalid Data Table records'),{status:400});
       const scenarioLookup=scenarioLookupIntent(query);
-      if(scenarioLookup&&!lookupIntent(query))return {documents:[],format:'qa',scenario_lookup:scenarioLookup};
+      if(scenarioLookup&&!scenarioLookup.fallback&&!lookupIntent(query))return {documents:[],format:'qa',scenario_lookup:scenarioLookup};
       // Work-order questions need actual dispatch records, not reporting rules.
       const excel=await workbook();
       const local=[...new Map([...(await orders.list()),...tableRecords].map(r=>[r.id,r])).values()];
@@ -195,7 +195,7 @@ export function createKnowledgeStore({root=process.env.KNOWLEDGE_ROOT,pdf=extrac
       const documents=[...(word?sourceQa(word):[]),...excel.sheets.filter(sheet=>sheet.rows.length).flatMap(sheet=>workbookQa(workbookDocument(excel,sheet),sheet.rows)),...local.flatMap((record,index)=>workbookQa({source:record.source,sheet:'派工',kind:'workbook_records',extraction:record.source?.includes('n8n Data Table')?'n8n_data_table':'legacy_json'},[{row:100000+index,fields:record.fields}])),...(pdfDoc?sourceQa(pdfDoc):[]),...uploaded];
       if(!documents.length&&query.trim())documents.push(qaDocument({source:'知識庫狀態'},'目前有可查詢的情境文件嗎？','目前尚未上傳情境文件。'));
       for(const d of documents){if(!d.text.trim())throw new Error(`No text extracted from ${d.source}${d.sheet?' / '+d.sheet:''}`);if(d.text.length>500000)throw new Error(`Extracted text too large: ${d.source}`);}
-      return {documents,format:'qa'};
+      return {documents,format:'qa',...(scenarioLookup?.fallback?{scenario_lookup:scenarioLookup}:{})};
     },
 
   };

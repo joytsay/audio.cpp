@@ -191,6 +191,20 @@ function toolNode(record,tables,workflowId,name,position){
 }
 function workflowBody({name,nodes,connections,settings}){return {name,nodes,connections,settings};}
 
+export function refreshScenarioLookup(workflow) {
+  const node=workflow.nodes.find(item=>item.id==='scenario-result'&&item.type==='n8n-nodes-base.code');
+  const script=node?.parameters.jsCode;
+  if(typeof script!=='string')return false;
+  const marker='\nreturn [{json:(';
+  const start=script.indexOf(marker);
+  const end=script.indexOf(')(input,tables,',start+marker.length);
+  if(start<0||end<=start||!script.startsWith(marker+'function lookupScenario(',start))return false;
+  const next=script.slice(0,start+marker.length)+lookupScenario.toString()+script.slice(end);
+  if(next===script)return false;
+  node.parameters.jsCode=next;
+  return true;
+}
+
 async function deleteScenarioWorkflow(api,workflowId){
   const route=`/workflows/${encodeURIComponent(workflowId)}`;
   const workflow=await missing(api(route));
@@ -257,7 +271,7 @@ export function createScenarioManager({withApi=withN8nApi,knowledgeUrl='http://k
         const id=record.resources.tables[index]?.id;
         if(!id)return;
         tables.push({
-          id,scenario:name,name:table.name,sheet:table.sheet,columns:tableColumns(table.headers),
+          id,workflowId:record.resources.workflowId,scenario:name,name:table.name,sheet:table.sheet,columns:tableColumns(table.headers),
           ocr:table.records.some(row=>row.extraction==='ocr'),
         });
       });
@@ -265,6 +279,23 @@ export function createScenarioManager({withApi=withN8nApi,knowledgeUrl='http://k
     return tables;
   };
   return {
+    async refreshDirectoryWorkflows(){
+      const tables=await registeredTables();
+      const ids=new Set(tables.filter(({columns})=>
+        columns.some(({header})=>/姓名|中文名|聯絡人|^(?:chinese[ _]|employee[ _]|full[ _])?name$/i.test(header))&&
+        columns.some(({header})=>/分[機机]|部門|\bext(?:ension)?\b|department/i.test(header))
+      ).map(table=>table.workflowId).filter(Boolean));
+      if(!ids.size)return;
+      return withApi(['workflow:read','workflow:update','workflow:activate'],async api=>{
+        for(const id of ids){
+          const route=`/workflows/${encodeURIComponent(id)}`;
+          const workflow=await missing(api(route));
+          if(!workflow||!refreshScenarioLookup(workflow))continue;
+          await api(route,workflowBody(workflow),'PUT');
+          if(workflow.active)await ensureWorkflowPublished(api,id);
+        }
+      },{expiresIn:600});
+    },
     async repairDispatchDates(){
       const tables=(await registeredTables()).filter(table=>table.columns.some(isDispatchDate));
       if(!tables.length)return;
@@ -275,8 +306,8 @@ export function createScenarioManager({withApi=withN8nApi,knowledgeUrl='http://k
     async lookupRecords({reference,lookup}={}){
       const valid=reference
         ? typeof reference==='string'&&reference.length<=100&&/^[A-Za-z]{1,6}-?\d[A-Za-z0-9_/-]*$/.test(reference)
-        : ['site','person','keyword','employee','serial','customer_site','catalog'].includes(lookup?.kind)&&
-          typeof lookup.term==='string'&&lookup.term.trim()&&lookup.term.length<=100&&
+        : ['site','person','keyword','employee','serial','model','customer_site','catalog'].includes(lookup?.kind)&&
+          typeof lookup.term==='string'&&lookup.term.trim()&&lookup.term.length<=(lookup.kind==='catalog'?128:100)&&
           (lookup.sheet===undefined||typeof lookup.sheet==='string')&&
           (lookup.kind!=='customer_site'||(typeof lookup.customer==='string'&&lookup.customer.trim()));
       if(!valid){

@@ -4,6 +4,7 @@ export type KnowledgeScenario = {
   createdAt: string;
   qaCount: number;
   tool?: string;
+  examples?: string[];
   tables?: {name: string; sheet: string; rowCount: number}[];
   files: {name: string; size: number; sha256: string}[];
 };

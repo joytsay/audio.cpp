@@ -593,6 +593,7 @@
   $: sipOnline = useSip && sipLive.live && !!sipLive.status?.registered;
   $: sipConnected = useSip && sipLive.live && !!sipLive.status?.active;
   $: sipCanSend = sipConnected && sipSettings?.mode !== "tts" && sipLive.status?.stage === "Listening";
+  $: canSendText = (useSip ? sipCanSend : connected) && !busy && !detecting && !scenarioRunning;
   $: scenarioConnected = useSip ? sipConnected : connected;
   $: scenarioCanCall = useSip ? sipCanSend : connected || canCall;
   $: displayMessages = (useSip ? sipLive.status?.messages || [] : messages) as DemoMessage[];
@@ -2180,9 +2181,15 @@
     }
     throw new Error("SIP text turn timed out");
   }
+  let messageInput: HTMLTextAreaElement;
+  async function draftScenarioQuestion(question: string) {
+    input = question;
+    await tick();
+    if (messageInput && !messageInput.disabled) messageInput.focus();
+  }
   function send() {
     const text = input.trim();
-    if (!text || busy || detecting || scenarioRunning || !(useSip ? sipCanSend : connected)) return;
+    if (!text || !canSendText) return;
     input = "";
     void respond(text, undefined, epoch);
   }
@@ -3134,6 +3141,7 @@
               rows="2"
               aria-label="Message"
               placeholder="Type something…"
+              bind:this={messageInput}
               bind:value={input}
               disabled={(useSip ? !sipCanSend : !connected) || scenarioRunning}
               on:keydown={(e) => {
@@ -3143,11 +3151,7 @@
                 }
               }}></textarea><button
               aria-label="Send message"
-              disabled={(useSip ? !sipCanSend : !connected) ||
-                busy ||
-                detecting ||
-                scenarioRunning ||
-                !input.trim()}><Send size={18} /></button
+              disabled={!canSendText || !input.trim()}><Send size={18} /></button
             >
           </form>
           <div class="controls">
@@ -3382,7 +3386,19 @@
             <p><strong>{selectedKnowledgeScenario.name}</strong>{selectedKnowledgeScenario.tool ? " · Scenario MCP" : ` · ${selectedKnowledgeScenario.qaCount} Q/A pairs`}</p>
             {#each selectedKnowledgeScenario.files as file}<p>{file.name}</p>{/each}
             {#each selectedKnowledgeScenario.tables ?? [] as table}<p>{table.name} · {table.rowCount} rows</p>{/each}
-            <small>Speak or type a question during a call.</small>
+            {#if selectedKnowledgeScenario.examples?.length}
+              <div class="scenario-examples" role="group" aria-labelledby="scenario-examples-title">
+                <h3 id="scenario-examples-title">Mockup questions:</h3>
+                {#each selectedKnowledgeScenario.examples as question, index}
+                  <button type="button" disabled={knowledgeDeleting} on:click={() => draftScenarioQuestion(question)}>
+                    <strong>Q{index + 1}:</strong> <span>{question}</span>
+                  </button>
+                {/each}
+              </div>
+              {#if !scenarioConnected}<small>Connect a call to send your question.</small>{/if}
+            {:else}
+              <small>Speak or type a question during a call.</small>
+            {/if}
             <button title="Remove this scenario and its imported data" disabled={knowledgeDeleting || knowledgeUploading} on:click={removeSelectedKnowledgeScenario}><Trash2 size={14} /> {knowledgeDeleting ? "Removing scenario…" : "Remove scenario"}</button>
             <p role="status">{knowledgeStatus}</p>
           {:else if isAudioScenario}
@@ -3984,6 +4000,26 @@
   .scenario-panel > small {
     display: block;
     margin-top: 6px;
+  }
+  .scenario-examples {
+    display: grid;
+    gap: 5px;
+    margin-top: 10px;
+    padding-top: 8px;
+    border-top: 1px solid var(--line);
+  }
+  .scenario-examples h3 {
+    margin: 0 0 2px;
+    font-size: inherit;
+  }
+  .demo .scenario-examples button {
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr);
+    justify-content: start;
+    align-items: start;
+    text-align: left;
+    white-space: normal;
+    overflow-wrap: anywhere;
   }
   .scenario-upload {
     display: flex;

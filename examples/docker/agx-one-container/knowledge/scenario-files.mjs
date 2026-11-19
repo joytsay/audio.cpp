@@ -15,6 +15,48 @@ export function scenarioFileName(filename) {
   return path.parse(filename).name.trim();
 }
 
+export function scenarioExamples(name, dataset, documents) {
+  const fields = [
+    [/^(?:派工單號|工單編號|dispatch[ _]number)/i, /^[a-z]{1,6}-\d[a-z0-9_/-]{0,48}$/i, value => `我要查詢${value}`],
+    [/^(?:設備型號|型號|model)/i, /^[a-z0-9][a-z0-9 ._/-]{0,63}$/i, value => `我要查詢型號${value}`],
+    [/^(?:姓名|中文姓名|name)/i, /^(?:\p{Script=Han}{2,6}|[a-z][a-z .'-]{1,48})$/iu,
+      value => /^\p{Script=Han}{3,4}$/u.test(value) ? `我要查詢 ${value}` : `我要查詢姓名${value}`],
+    [/^(?:設備序號|機身序號|序號|s\/?n|serial)/i, /^[a-z0-9][a-z0-9._/-]{0,63}$/i, value => `我要查詢 SN ${value}`],
+    [/^(?:員工編號|工號|employee[ _](?:number|id))/i, /^[a-z0-9][a-z0-9_-]{0,47}$/i, value => `我要查詢員工編號${value}`],
+  ];
+  const samples = fields.map(() => new Set());
+  for (const table of dataset?.tables ?? []) {
+    const columns = fields.map(([header]) => table.headers.filter(column => header.test(column.normalize('NFKC'))));
+    for (const {fields: row} of table.records) {
+      for (const [index, [, valid, question]] of fields.entries()) {
+        if (samples[index].size === 3) continue;
+        for (const column of columns[index]) {
+          const value = String(row[column] ?? '').trim();
+          if (valid.test(value.normalize('NFKC'))) samples[index].add(question(value));
+          if (samples[index].size === 3) break;
+        }
+      }
+    }
+  }
+  const examples = new Set();
+  const collected = samples.map(sample => [...sample]);
+  for (let index = 0; index < 3 && examples.size < 3; index++) {
+    for (const sample of collected) if (sample[index]) examples.add(sample[index]);
+  }
+  const questions = (dataset?.template ?? []).flatMap(section => section.turns.filter(turn => turn.role === 'caller').map(turn => turn.text));
+  for (const raw of [...questions, ...documents.map(document => document.question)]) {
+    if (examples.size >= 3) break;
+    const question = raw?.replace(/\s+/g, ' ').trim();
+    if (question && question.length <= 150 && /[？?]$/.test(question) &&
+        !/(?:我要|幫我|請你)(?:回報|新增|刪除|更新|儲存)/.test(question)) examples.add(question);
+  }
+  return [...new Set([...examples,
+    `「${name}」可以查詢什麼？`,
+    `請摘要「${name}」的主要內容。`,
+    `「${name}」有哪些需要留意的事項？`,
+  ])].slice(0, 3);
+}
+
 export function dialogueTemplate(text) {
   const sections = [{title:'通話開場', turns:[]}];
   let turn;

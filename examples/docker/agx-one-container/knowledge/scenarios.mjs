@@ -3,7 +3,7 @@ import path from 'node:path';
 import {createHash,randomUUID} from 'node:crypto';
 import {inflateRawSync} from 'node:zlib';
 import {qaDocument} from './qa.mjs';
-import {fileDataset,scenarioFileName} from './scenario-files.mjs';
+import {fileDataset,scenarioExamples,scenarioFileName} from './scenario-files.mjs';
 
 const maxBytes=10*1024*1024;
 const extensions=new Set(['.pdf','.docx','.xlsx','.csv','.txt','.md']);
@@ -92,7 +92,7 @@ export function createScenarioStore({root=path.join(process.env.KNOWLEDGE_DATA_R
   return items.sort((a,b)=>a.createdAt.localeCompare(b.createdAt));
  }
  const metadata=({documents,dataset,resources,...record})=>({
-  ...record,qaCount:documents.length,
+  ...record,qaCount:documents.length,examples:scenarioExamples(record.name,dataset,documents),
   ...(dataset?{tables:dataset.tables.map(({name,sheet,records})=>({name,sheet,rowCount:records.length})),tool:resources?.toolName}:{}),
  });
  async function get(id){
