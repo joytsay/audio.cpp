@@ -1,6 +1,7 @@
 import {publishWorkflow} from './publish-workflow.mjs';
 import {unpublishWorkflow,upgradeResultsColumn} from './unpublish-workflow.mjs';
 import {createScenarioManager} from './scenario-workflows.mjs';
+import {managedWorkflowIds, removeLegacyScenarioUpload, scenarioAdminId, splitManagedWorkflow, workflowLayoutRevision} from './workflow-layout.mjs';
 import { spawn } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
@@ -39,15 +40,16 @@ export async function exists(kind, id, { run = runCli, files = fs } = {}) {
   }
 }
 
-async function readWorkflow(id, { run, files }) {
+async function readWorkflowIndex({ run, files }) {
   const dir = await files.mkdtemp(path.join(os.tmpdir(), 'ivr-n8n-workflow-'));
   try {
-    const output = path.join(dir, 'workflow.json');
-    await run(['export:workflow', `--id=${id}`, `--output=${output}`]);
+    const output = path.join(dir, 'workflows.json');
+    await run(['export:workflow', '--all', `--output=${output}`]);
     const data = JSON.parse(await files.readFile(output, 'utf8'));
-    const workflow = (Array.isArray(data) ? data : [data]).find(item => item.id === id);
-    if (!workflow) throw new Error('Cannot read the existing knowledge workflow for migration');
-    return workflow;
+    return new Map(data.map(workflow=>[workflow.id,workflow]));
+  } catch (error) {
+    if (error.code === 'ENOENT' || /No workflows found/i.test(error.message)) return new Map();
+    throw error;
   } finally { await files.rm(dir, { recursive: true, force: true }); }
 }
 
@@ -144,10 +146,20 @@ export function resultWorkflowMigration(existing,template){
 // retrieval tuning, and replace the bundled behavior/layout/tool set together.
 export function mergedWorkflowMigration(existing, rag, template) {
   if (!existing || existing.meta?.ivrWorkflowRevision>=(template.meta?.ivrWorkflowRevision??12)) return null;
-  if ([19,20,21].includes(existing.meta?.ivrWorkflowRevision) && template.meta?.ivrWorkflowRevision===22) {
+  if (existing.meta?.ivrWorkflowRevision===23 && template.meta?.ivrWorkflowRevision===24) {
+    const next=structuredClone(existing);
+    for (const node of next.nodes) {
+      const url=node.parameters?.url;
+      if (node.id.startsWith('document-rag-') && typeof url==='string') {
+        node.parameters.url=url.replace('http://qdrant:6333/', 'http://knowledge:6333/');
+      }
+    }
+    next.meta.ivrWorkflowRevision=template.meta.ivrWorkflowRevision;
+    return next;
+  }
+  if ([19,20,21,22].includes(existing.meta?.ivrWorkflowRevision) && template.meta?.ivrWorkflowRevision===24) {
     const next=structuredClone(existing);
     const changes={
-      'prepare-scenario-upload':'jsCode',
       'prepare-ivr-input':'jsCode',
       'register-ivr-turn':'jsonBody',
       'ivr-return-fixed-reply':'jsCode',
@@ -156,7 +168,6 @@ export function mergedWorkflowMigration(existing, rag, template) {
       'load-knowledge-files':'jsonBody',
     };
     for(const [id,key] of Object.entries(changes)){
-      if(id==='prepare-scenario-upload'&&existing.meta.ivrWorkflowRevision>=20)continue;
       const node=next.nodes.find(candidate=>candidate.id===id);
       const source=template.nodes.find(candidate=>candidate.id===id);
       if(node&&source)node.parameters[key]=structuredClone(source.parameters[key]);
@@ -164,7 +175,7 @@ export function mergedWorkflowMigration(existing, rag, template) {
     const webhook=template.nodes.find(node=>node.id==='scenario-report-input');
     if(!next.nodes.some(node=>node.id===webhook.id))next.nodes.push(structuredClone(webhook));
     next.connections[webhook.name]=structuredClone(template.connections[webhook.name]);
-    const replaced=['prepare-guidance','retrieve-guidance','return-guidance','index-scenario-qa','workflow-group-3'];
+    const replaced=['prepare-guidance','retrieve-guidance','return-guidance','workflow-group-3'];
     const obsolete=['seed-simple-vector-store','default-document-loader','recursive-text-splitter','local-embeddings'];
     const removedNames=next.nodes.filter(node=>obsolete.includes(node.id)).map(node=>node.name);
     next.nodes=next.nodes.filter(node=>![...replaced,...obsolete].includes(node.id));
@@ -174,10 +185,14 @@ export function mergedWorkflowMigration(existing, rag, template) {
       const name=template.nodes.find(node=>node.id===id).name;
       if(template.connections[name])next.connections[name]=structuredClone(template.connections[name]);
     }
+    for(const node of template.nodes.filter(node=>node.id.startsWith('document-rag-'))){
+      if(!next.nodes.some(existing=>existing.id===node.id))next.nodes.push(structuredClone(node));
+      if(template.connections[node.name])next.connections[node.name]=structuredClone(template.connections[node.name]);
+    }
     for(const value of Object.values(next.connections))for(const groups of Object.values(value)){
       for(const edges of groups)for(let index=edges.length-1;index>=0;index--)if(removedNames.includes(edges[index].node))edges.splice(index,1);
     }
-    next.meta.ivrWorkflowRevision=22;
+    next.meta.ivrWorkflowRevision=template.meta.ivrWorkflowRevision;
     return next;
   }
   const next={...structuredClone(existing),...structuredClone(template),id:existing.id,active:existing.active};
@@ -245,10 +260,9 @@ export async function repairLocalCredentialUrls({credentials,run,files=fs,backup
   } finally { await files.rm(dir, {recursive:true,force:true}); }
 }
 
-export async function importMissing({ templates = '/templates', run = runCli, has = exists, files = fs, log = console.log, read = readWorkflow, backupDir = '/home/node/.n8n/ivr-backups', repairCredentials = repairLocalCredentialUrls, retireWorkflow = unpublishWorkflow } = {}) {
+export async function importMissing({ templates = '/templates', run = runCli, has = exists, files = fs, log = console.log, listWorkflows = readWorkflowIndex, backupDir = '/home/node/.n8n/ivr-backups', repairCredentials = repairLocalCredentialUrls, retireWorkflow = unpublishWorkflow } = {}) {
   const credentials = JSON.parse(await files.readFile(path.join(templates, 'local-credentials.json'), 'utf8'));
-  const file = path.join(templates, 'workflow.json');
-  const workflows = [{ file, data: JSON.parse(await files.readFile(file, 'utf8')) }];
+  const template = JSON.parse(await files.readFile(path.join(templates, 'workflow.json'), 'utf8'));
   const missing = [];
   for (const credential of credentials) {
     if (!await has('credentials', credential.id, { run, files })) missing.push(credential);
@@ -264,58 +278,66 @@ export async function importMissing({ templates = '/templates', run = runCli, ha
       await files.rm(dir, { recursive: true, force: true });
     }
   }
-  for (const workflow of workflows) {
-    const targetExists=await has('workflow',workflow.data.id,{run,files});
-    const legacyId='ivrMaintenanceMcp';
-    const legacyExists=workflow.data.id!==legacyId&&await has('workflow',legacyId,{run,files});
-    const legacy=legacyExists?await read(legacyId,{run,files}):null;
-    const existing=targetExists?await read(workflow.data.id,{run,files}):legacy;
-    let backedUpLegacy=false;
-    if (!existing) {
-      log(`[ivr-n8n] Importing workflow: ${workflow.data.name} (${workflow.data.id}).`);
-      await run(['import:workflow', `--input=${workflow.file}`]);
-    } else {
-      const legacyRag = !existing.nodes.some(n=>n.name==='AI Agent') &&
-        await has('workflow', 'ivrMaintenanceKnowledge', {run, files})
-        ? await read('ivrMaintenanceKnowledge', {run, files}) : null;
-      let next = mergedWorkflowMigration(existing, legacyRag, workflow.data);
-      if(existing.id!==workflow.data.id)next=workflowIdMigration(next??existing,workflow.data.id);
-      if(next){
-        await files.mkdir(backupDir, {recursive:true});
-        const backup = path.join(backupDir, `merged-workflow-${Date.now()}.json`);
-        await files.writeFile(backup, JSON.stringify({mcp:existing,rag:legacyRag}), {mode:0o600});
-        backedUpLegacy=existing.id===legacyId;
-        await repairCredentials({credentials,run,files,backupDir,log});
-        const dir = await files.mkdtemp(path.join(os.tmpdir(), 'ivr-workflow-upgrade-'));
-        try {
-          const input = path.join(dir, 'workflow.json');
-          await files.writeFile(input, JSON.stringify(next), {mode:0o600});
-          await run(['import:workflow', `--input=${input}`]);
-        } finally { await files.rm(dir, {recursive:true,force:true}); }
-        const installed = await read(workflow.data.id, {run, files});
-        if (installed?.id!==workflow.data.id || !installed.nodes.some(n=>n.id==='retrieve-ivr-turn') || mergedWorkflowMigration(installed, null, workflow.data))
-          throw new Error('Unified workflow migration did not complete');
-        log(`[ivr-n8n] Updated GeoVision · Workflow. Backup: ${backup}. Workflow: /workflow/${workflow.data.id}.`);
-      }
-    }
-    // Verify the new workflow before retiring its predecessor. Retrying after
-    // an interrupted migration preserves edits to the already imported target.
-    if(legacy&&(legacy.active||legacy.activeVersionId)){
-      if(!await has('workflow',workflow.data.id,{run,files}))throw new Error('Cannot retire the legacy workflow before the new workflow exists');
-      if(!backedUpLegacy){
-        await files.mkdir(backupDir,{recursive:true});
-        await files.writeFile(path.join(backupDir,`legacy-workflow-id-${Date.now()}.json`),JSON.stringify(legacy),{mode:0o600});
-      }
-      await retireWorkflow(legacyId);
-      log(`[ivr-n8n] Unpublished ${legacyId} to release its MCP/webhook routes. Workflow: /workflow/${workflow.data.id}.`);
-    }
+  let installed = await listWorkflows({run, files});
+  const legacyId = 'ivrMaintenanceMcp';
+  const legacy = installed.get(legacyId);
+  const existing = installed.get(template.id) ?? legacy;
+  const needsSplit = existing && !(existing.meta?.ivrWorkflowRevision >= workflowLayoutRevision);
+  let backup;
+  let workflows = [];
+  if (needsSplit) {
+    const legacyRag = !existing.nodes.some(n=>n.name==='AI Agent') ? installed.get('ivrMaintenanceKnowledge') ?? null : null;
+    await files.mkdir(backupDir, {recursive:true});
+    backup = path.join(backupDir, `merged-workflow-${Date.now()}.json`);
+    await files.writeFile(backup, JSON.stringify({mcp:existing,rag:legacyRag}), {mode:0o600});
+    let source = mergedWorkflowMigration(existing, legacyRag, template) ?? existing;
+    if (source.id !== template.id) source = workflowIdMigration(source, template.id);
+    workflows = splitManagedWorkflow(source).filter(workflow=>workflow.id===template.id || !installed.has(workflow.id));
+    await repairCredentials({credentials,run,files,backupDir,log});
+  } else if (managedWorkflowIds.some(id=>!installed.has(id))) {
+    const source = existing && existing.id !== template.id ? workflowIdMigration(existing, template.id) : null;
+    workflows = splitManagedWorkflow(template).filter(workflow=>!installed.has(workflow.id));
+    if (source) workflows = workflows.map(workflow=>workflow.id===template.id ? source : workflow);
   }
 
+  const scenarioAdmin = installed.get(scenarioAdminId);
+  const updatedAdmin = scenarioAdmin && removeLegacyScenarioUpload(scenarioAdmin);
+  if (updatedAdmin) {
+    await files.mkdir(backupDir, {recursive:true});
+    const adminBackup = path.join(backupDir, `scenario-admin-${Date.now()}.json`);
+    await files.writeFile(adminBackup, JSON.stringify(scenarioAdmin), {mode:0o600});
+    workflows.push(updatedAdmin);
+    log(`[ivr-n8n] Backed up Scenario Admin before removing the legacy upload: ${adminBackup}`);
+  }
+
+  if (workflows.length) {
+    // Import the main workflow last so an interrupted import can resume safely.
+    const ordered = [...workflows.filter(workflow=>workflow.id!==template.id), ...workflows.filter(workflow=>workflow.id===template.id)];
+    const dir = await files.mkdtemp(path.join(os.tmpdir(), 'ivr-workflow-import-'));
+    try {
+      const input = path.join(dir, 'workflows.json');
+      await files.writeFile(input, JSON.stringify(ordered), {mode:0o600});
+      await run(['import:workflow', `--input=${input}`]);
+    } finally { await files.rm(dir, {recursive:true,force:true}); }
+    installed = await listWorkflows({run, files});
+    for (const workflow of workflows) {
+      if (installed.get(workflow.id)?.meta?.ivrWorkflowRevision !== workflow.meta.ivrWorkflowRevision)
+        throw new Error(`Workflow import incomplete: ${workflow.name}`);
+    }
+    log(`[ivr-n8n] Imported ${workflows.map(workflow=>workflow.name).join(', ')}.${backup ? ' Backup: '+backup : ''}`);
+  }
+
+  if (legacy && (legacy.active || legacy.activeVersionId)) {
+    if (!installed.has(template.id)) throw new Error('Cannot retire the legacy workflow before the new workflow exists');
+    if (!backup || existing.id !== legacyId) {
+      await files.mkdir(backupDir,{recursive:true});
+      await files.writeFile(path.join(backupDir,`legacy-workflow-id-${Date.now()}.json`),JSON.stringify(legacy),{mode:0o600});
+    }
+    await retireWorkflow(legacyId);
+    log(`[ivr-n8n] Unpublished ${legacyId} to release its MCP and webhook routes.`);
+  }
   for (const credential of credentials) {
     if (!await has('credentials', credential.id, { run, files })) throw new Error(`Credential import incomplete: ${credential.name}`);
-  }
-  for (const workflow of workflows) {
-    if (!await has('workflow', workflow.data.id, { run, files })) throw new Error(`Workflow import incomplete: ${workflow.data.name}`);
   }
 }
 
@@ -334,9 +356,10 @@ export async function prepareStartupWorkflow({
   await install();
   await upgradeTables();
   if(autoPublish){
-    const changed=await publish('ivrWorkflow');
-    log(changed?'[ivr-n8n] Published GeoVision · Workflow automatically.':'[ivr-n8n] GeoVision · Workflow is already published at its current version.');
-  }else log('[ivr-n8n] Automatic publishing disabled. Publish GeoVision · Workflow manually.');
+    for (const id of managedWorkflowIds) {
+      if (await publish(id)) log(`[ivr-n8n] Published /workflow/${id}.`);
+    }
+  }else log('[ivr-n8n] Automatic publishing disabled. Publish the main IVR workflow first, then Knowledge Tools, Scenario Admin, and Document RAG.');
 }
 
 export async function bootstrap({

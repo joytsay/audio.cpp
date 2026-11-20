@@ -79,8 +79,8 @@ try:
         ]:
             with urllib.request.urlopen(base + path, timeout=5) as response:
                 assert json.load(response) == {'backend': backend, 'path': upstream}
-        upload = {'name': 'CSV scenario', 'files': [{'name': 'service.csv', 'data': base64.b64encode(b'Question,Answer\nWhen?,Today\n').decode()}]}
-        for path, payload in [('ivr-add-scenario', upload), ('ivr-agent', {'sessionId': 'test-call', 'text': 'query', 'model': 'test'})]:
+        upload = {'name': 'service.csv', 'data': base64.b64encode(b'Question,Answer\nWhen?,Today\n').decode()}
+        for path, payload in [('ivr-import-scenario', upload), ('ivr-agent', {'sessionId': 'test-call', 'text': 'query', 'model': 'test'})]:
             raw = json.dumps(payload).encode()
             request = urllib.request.Request(base + '/n8n/webhook/' + path, data=raw, headers={'Content-Type': 'application/json'})
             with urllib.request.urlopen(request, timeout=5) as response:

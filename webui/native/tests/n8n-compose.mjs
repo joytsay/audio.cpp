@@ -15,12 +15,12 @@ assert.equal(config.services.sip.environment.SIP_DIALOGUE_URL,'http://127.0.0.1:
 assert.equal(config.services.sip.depends_on.n8n.condition,'service_healthy');
 assert.ok(!n8n.depends_on?.knowledge,'the editor must start even if knowledge files are missing');
 const documents=config.services.knowledge.volumes.filter(v=>v.target.startsWith('/files/'));
-assert.ok(config.services.knowledge.volumes.some(v=>v.target==='/data'&&v.type==='volume'&&v.source==='audiocpp-knowledge-data'&&!v.read_only),'new orders need a separate persistent volume');
-assert.equal(documents.length,4);
-assert.equal(new Set(documents.map(v=>v.target)).size,4);
-for(const mount of documents){assert.equal(mount.read_only,true);assert.equal(mount.bind.create_host_path,false);assert.ok(mount.target.startsWith('/files/'));}
+assert.ok(config.services.knowledge.volumes.some(v=>v.target==='/data'&&v.type==='volume'&&v.source==='audiocpp-knowledge-data'&&!v.read_only),'scenario uploads need a persistent volume');
+assert.equal(documents.length,0,'uploads provide the knowledge corpus');
+assert.equal(config.services.qdrant,undefined);
+assert.ok(config.services.knowledge.volumes.some(v=>v.target==='/qdrant/storage'&&v.type==='volume'&&v.source==='ivr-qdrant-data'),'bundled Qdrant needs persistent vector storage');
 assert.ok(!('DATABASE_FILE' in config.services.knowledge.environment));
-console.log('PASS Compose: separate persistent work-order volume, all original knowledge files read-only');
+console.log('PASS Compose: persistent n8n, scenario uploads, and vector storage');
 
 assert.ok(!config.services['voice-ai'].ports?.length,'the native worker must not bypass the gateway');
 for(const [published,target] of [[8081,8081],[8082,443],[8083,8083],[8084,444]])

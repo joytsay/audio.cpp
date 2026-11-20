@@ -33,7 +33,7 @@ def knowledge_api(path,body=None):
  request=urllib.request.Request(knowledge_url+path,data=json.dumps(body,ensure_ascii=False).encode() if body is not None else None,headers={'Content-Type':'application/json'})
  with urllib.request.urlopen(request,timeout=30) as response:return json.load(response)
 
-calls=[];embedding=[];embedding_fail=False;scenario_removed=False
+calls=[];embedding=[];scenario_removed=False
 class Mock(http.server.BaseHTTPRequestHandler):
  def log_message(self,*a):pass
  def send(self,data,status=200):
@@ -42,7 +42,6 @@ class Mock(http.server.BaseHTTPRequestHandler):
  def do_POST(self):
   body=json.loads(self.rfile.read(int(self.headers['Content-Length'])))
   if self.path=='/v1/embeddings':
-   if embedding_fail:return self.send({'error':{'message':'Synthetic indexing failure'}},400)
    embedding.append(body);inputs=body['input'];inputs=inputs if isinstance(inputs,list) else [inputs]
    return self.send({'object':'list','model':'fixture-embedding','data':[{'object':'embedding','index':i,'embedding':([0.0,1.0,0.0] if 'LAB-ZETA' in str(inputs[i]) else [1.0,0.25,0.5])} for i in range(len(inputs))],'usage':{'prompt_tokens':10,'total_tokens':10}})
   if self.path=='/v1/chat/completions':
@@ -124,7 +123,7 @@ if __name__=='__main__':
    if 'credentials' in n:n['credentials']={'openAiApi':{'id':cred['id'],'name':cred['name']}}
    if n['name']=='Local Embeddings':n['parameters']['options']['baseURL']=mock+'/v1'
    if n['name'] in ['KnowledgeMCP','Retrieve current turn']:n['parameters']['endpointUrl']=base+'/mcp/ivr-maintenance'
-   if n['name'] in ['Create scenario Q/A','Read saved scenarios']:n['parameters']['url']=knowledge_url+'/scenarios'
+   if n['name']=='Read saved scenarios':n['parameters']['url']=knowledge_url+'/scenarios'
    if n['name']=='Load knowledge files':n['parameters']['url']=knowledge_url+'/documents'
    if n['name']=='Delete scenario files and Q/A':n['parameters']['url']="={{ '"+knowledge_url+"/scenarios/' + $json.id }}"
    if n['name']=='Register caller turn':n['parameters']['url']=knowledge_url+'/call-turn'
@@ -270,18 +269,12 @@ if __name__=='__main__':
   assert api('/webhook/ivr-scenarios')['scenarios']==[]
   content='\ufeffQuestion,Answer\r\nLAB-ZETA 包材何時回收？,"LAB-ZETA 每週三回收，聯絡分機 7654。"\r\n'
   scenarioUpload={'name':'LAB-ZETA 上傳測試','files':[{'name':'服務.csv','data':base64.b64encode(content.encode()).decode()}]}
-  embedding_fail=True
-  savedOnly=api('/webhook/ivr-add-scenario',scenarioUpload)
-  assert savedOnly['indexed'] is False and savedOnly['scenario']['qaCount']>=1,savedOnly
-  embedding_fail=False
-  added=api('/webhook/ivr-add-scenario',scenarioUpload)
-  assert added['indexed'] is True and added['scenario']['qaCount']>=1,added
+  # Seed a record in the format saved by the retired webhook.
+  added=knowledge_api('/scenarios',scenarioUpload)
+  assert added['scenario']['qaCount']>=1,added
   assert api('/webhook/ivr-scenarios')['scenarios'][0]['id']==added['scenario']['id']
-  again=api('/webhook/ivr-add-scenario',scenarioUpload)
-  assert again['duplicate'] is True and len(api('/webhook/ivr-scenarios')['scenarios'])==1
   knowledgeAnswer=turn('uploaded-scenario-call','LAB-ZETA 包材何時回收？')
   assert '7654' in knowledgeAnswer['reply'] and '每週三' in knowledgeAnswer['reply']
-  assert any('LAB-ZETA' in str(batch['input']) for batch in embedding),'upload did not trigger embedding'
   removed=api('/webhook/ivr-delete-scenario',{'id':added['scenario']['id']})
   assert removed['removed'] is True and api('/webhook/ivr-scenarios')['scenarios']==[]
   assert api('/webhook/ivr-delete-scenario',{'id':added['scenario']['id']})['alreadyRemoved'] is True

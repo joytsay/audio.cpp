@@ -16,6 +16,7 @@ import {createHash} from 'node:crypto';
 import {sourceQa,workbookQa,qaDocument} from './qa.mjs';
 import {dispatchDate,identifiers,lookupIntent,scenarioLookupIntent} from './conversation.mjs';
 import {createWorkOrderStore} from './work-orders.mjs';
+import {createRagBridge} from './rag-embeddings.mjs';
 import {belongsToSection,extractRagAssets,ragItems} from './rag-assets.mjs';
 const execFile=promisify(execFileCallback);
 export const filenames={prompt:'prompt.csv',word:'情境模擬_20261105.docx',excel:'CSD資料庫.xlsx',pdf:'(備品維修)PY252-0059-工單-20260602-2工-CL、JC.pdf'};
@@ -139,7 +140,7 @@ export function workOrderSelection(query,sheets,{now=new Date()}={}){
 }
 function workbookDocument(excel,sheet){return {source:excel.source,sheet:sheet.name,modified:excel.modified,kind:'workbook_records',extraction:'xlsx',rowCount:sheet.rows.length,text:sheet.rows.length?sheet.rows.map(row=>`來源：${excel.source}；工作表：${sheet.name}；列：${row.row}\n${JSON.stringify(row.fields)}`).join('\n\n'):'此資料表目前沒有記錄。'};}
 export function createKnowledgeStore({root=process.env.KNOWLEDGE_ROOT,pdf=extractPdf,ocrImage=readScenarioImage,orders=createWorkOrderStore(),scenarioRoot,
-  ragUrl=process.env.IVR_RAG_URL||'http://rag:8086',fetchImpl=fetch}={}){
+  ragUrl,fetchImpl=fetch}={}){
   const scenarios=createScenarioStore({root:scenarioRoot,extract:async(file,upload)=>{
     if(upload.extension==='.pdf')return [{...await pdf(file)}];
     if(upload.fileMode&&upload.extension==='.docx')return extractScenarioWord(file,ocrImage);
@@ -176,14 +177,7 @@ export function createKnowledgeStore({root=process.env.KNOWLEDGE_ROOT,pdf=extrac
     }
     return assets;
   };
-  const callRag=async(endpoint,body)=>{
-    const response=await fetchImpl(ragUrl+endpoint,{
-      method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body),signal:AbortSignal.timeout(240000),
-    });
-    const data=await response.json();
-    if(!response.ok)throw Object.assign(Error(data.error||'Multimodal RAG unavailable'),{status:502});
-    return data;
-  };
+  const rag=createRagBridge({workflowUrl:ragUrl,fetchImpl});
   async function read(kind,extract){
     if(!root)return;
     const file=path.join(root,filenames[kind]);
@@ -198,6 +192,8 @@ export function createKnowledgeStore({root=process.env.KNOWLEDGE_ROOT,pdf=extrac
   const workbook=async()=>await read('excel',async file=>({sheets:await readWorkbook(file)}))||{source:'已儲存工單',sheets:[{name:'派工',rows:[]}]};
   const store = {
     addScenario:input=>scenarios.add(input),
+    embeddingInputs:args=>rag.embeddingInputs(args),
+    evidence:args=>rag.evidence(args),
     async simulation({id,text,number,language,previous=''}={}){
       if(typeof text!=='string'||!text.trim()||text.length>20000)throw Object.assign(Error('Invalid simulation request'),{status:400});
       const record=await scenarios.get(id);
@@ -209,7 +205,7 @@ export function createKnowledgeStore({root=process.env.KNOWLEDGE_ROOT,pdf=extrac
           throw Object.assign(Error('Invalid scenario lookup'),{status:400});
         const records=await scenarios.corpus(id);
         const docs=record.documents.filter(document=>belongsToSection(document.section,number));
-        return callRag('/answer',{query:text,previous,language,items:ragItems(docs,await visualAssets(records,number))});
+        return rag.run({query:text,previous,language,items:ragItems(docs,await visualAssets(records,number))});
       }
       const section=chooseSimulationSection(sections,text);
       return {scenario:section?simulationGuidance(section):null};
@@ -229,12 +225,12 @@ export function createKnowledgeStore({root=process.env.KNOWLEDGE_ROOT,pdf=extrac
       const imported=uploads.flatMap(upload=>upload.documents.filter(document=>!document.sheet));
       const docs=[...new Map([...documents,...imported].map(document=>[JSON.stringify([document.source,document.text]),document])).values()];
       const language=/\p{Script=Han}/u.test(query)?'zh':'en';
-      return callRag('/answer',{query,language,items:ragItems(docs,await visualAssets(uploads))});
+      return rag.run({query,language,items:ragItems(docs,await visualAssets(uploads))});
     },
     async indexScenario(id){
       if(typeof id!=='string')throw Object.assign(Error('A scenario ID is required'),{status:400});
       const uploads=await scenarios.corpus(id);
-      return callRag('/index',{items:ragItems(uploads.flatMap(upload=>upload.documents),await visualAssets(uploads,undefined,false))});
+      return rag.run({index:true,items:ragItems(uploads.flatMap(upload=>upload.documents),await visualAssets(uploads,undefined,false))});
     },
     async health(){const saved=await scenarios.list();return {status:'ok',scenarios:saved.length,files:saved.flatMap(scenario=>scenario.files.map(file=>file.name))};},
     async documents(query='',tableRecords=[],routeOnly=false){
@@ -279,11 +275,13 @@ export function createKnowledgeServer(store=createKnowledgeStore()){
         let raw='';for await(const chunk of req){raw+=chunk;if(raw.length>256*1024)throw Object.assign(Error('Request too large'),{status:413});}
         data=await store.saveScenarioImport(importId,JSON.parse(raw));
       }
-      else if(req.method==='POST'&&['/call-turn','/work-order-draft','/documents','/scenarios','/ivr-simulation','/rag','/rag/index'].includes(url.pathname)){
+      else if(req.method==='POST'&&['/call-turn','/work-order-draft','/documents','/scenarios','/ivr-simulation','/rag','/rag/index','/rag/evidence','/rag/embedding-inputs'].includes(url.pathname)){
         req.setEncoding('utf8');
         let raw='';for await(const chunk of req){raw+=chunk;if(Buffer.byteLength(raw)>(url.pathname==='/scenarios'?16*1024*1024:256*1024))throw Object.assign(Error('Request too large'),{status:413});}
         let body;try{body=JSON.parse(raw);}catch{throw Object.assign(Error('Invalid JSON'),{status:400});}
-        if(url.pathname==='/rag')data=await store.retrieve(body||{});
+        if(url.pathname==='/rag/embedding-inputs')data=store.embeddingInputs(body||{});
+        else if(url.pathname==='/rag/evidence')data=store.evidence(body||{});
+        else if(url.pathname==='/rag')data=await store.retrieve(body||{});
         else if(url.pathname==='/rag/index')data=await store.indexScenario(body?.id);
         else data=url.pathname==='/scenarios'?await store.addScenario(body):url.pathname==='/call-turn'?await store.registerTurn(body):url.pathname==='/work-order-draft'?await store.prepareWorkOrder(body.sessionId):url.pathname==='/ivr-simulation'?await store.simulation(body||{}):await store.documents(body.query||'',body.records??[],body.routeOnly===true);
       }

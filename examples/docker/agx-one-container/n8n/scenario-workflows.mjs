@@ -4,10 +4,11 @@ import {pathToFileURL} from 'node:url';
 import {isDeepStrictEqual} from 'node:util';
 import {withN8nApi} from './unpublish-workflow.mjs';
 import {ensureWorkflowPublished} from './publish-workflow.mjs';
+import {knowledgeToolsId,scenarioToolPosition} from './workflow-layout.mjs';
 import {lookupScenario} from './scenario-lookup.mjs';
 import {dispatchDate} from '../knowledge/conversation.mjs';
 
-const workflowRoute='/workflows/ivrWorkflow';
+const workflowRoute='/workflows/'+knowledgeToolsId;
 const importRoute=id=>`/scenario-imports/${id}`;
 const tableRoute=id=>`/data-tables/${encodeURIComponent(id)}`;
 const toolId=id=>`scenario-file-${id}`;
@@ -174,7 +175,7 @@ function toolNode(record,tables,workflowId,name,position){
   const headings=tables.map(table=>`${table.name} (${table.columns.map(column=>column.header).join('、')})`).join('；');
   const topics=record.dataset.template.map(section=>section.title).join('、');
   return {
-    id:toolId(record.id),name,type:'@n8n/n8n-nodes-langchain.toolWorkflow',typeVersion:2.1,position:[position,690],
+    id:toolId(record.id),name,type:'@n8n/n8n-nodes-langchain.toolWorkflow',typeVersion:2.1,position,
     notes:record.name,notesInFlow:name!==record.name,
     parameters:{
       name,source:'database',workflowId:{__rl:true,mode:'id',value:workflowId},
@@ -226,13 +227,13 @@ async function deleteScenarioWorkflow(api,workflowId){
 async function registerTool(api,record,tables,state){
   const parent=await api(workflowRoute);
   const trigger=parent.nodes.find(node=>node.id==='maintenance-mcp-trigger');
-  if(!trigger)throw new Error('Scenario MCP Server is missing from the IVR workflow');
+  if(!trigger)throw new Error('Scenario MCP Server is missing from Knowledge Tools');
   const id=toolId(record.id);
   const existing=parent.nodes.find(node=>node.id===id);
   const count=parent.nodes.filter(node=>node.id.startsWith('scenario-file-')).length;
   const isWireName=/^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(record.name);
   const name=existing?.name||state.toolName||(isWireName&&!parent.nodes.some(node=>node.name===record.name)?record.name:`scenario_${record.id}`);
-  const node=toolNode(record,tables,state.workflowId,name,existing?.position[0]??(1390+260*count));
+  const node=toolNode(record,tables,state.workflowId,name,existing?.position??scenarioToolPosition(count));
   const connection={ai_tool:[[edge(trigger.name,'ai_tool')]]};
   if(!isDeepStrictEqual(existing,node)||!isDeepStrictEqual(parent.connections[name],connection)){
     parent.nodes=parent.nodes.filter(node=>node.id!==id);
@@ -240,7 +241,7 @@ async function registerTool(api,record,tables,state){
     parent.connections[name]=connection;
     await api(workflowRoute,workflowBody(parent),'PUT');
   }
-  await ensureWorkflowPublished(api);
+  await ensureWorkflowPublished(api,knowledgeToolsId);
   return name;
 }
 
@@ -393,7 +394,7 @@ export function createScenarioManager({withApi=withN8nApi,knowledgeUrl='http://k
               delete parent.connections[node.name];
               await api(workflowRoute,workflowBody(parent),'PUT');
             }
-            await ensureWorkflowPublished(api);
+            await ensureWorkflowPublished(api,knowledgeToolsId);
             if(state.workflowId)await deleteScenarioWorkflow(api,state.workflowId);
             for(const row of state.tables){
               if(row.id)await missing(api(tableRoute(row.id),undefined,'DELETE'));

@@ -91,8 +91,23 @@ try{
  let ragRequest;
  const scenarioStore=createKnowledgeStore({root:dir,orders,scenarioRoot,pdf:async()=>({text:'測試 PDF 的服務時間為星期三。',extraction:'pdf_text'}),
   fetchImpl:async(url,options)=>{
-   assert.equal(url,'http://rag:8086/answer');
+   assert.equal(url,'http://n8n:5678/webhook/ivr-document-rag');
    ragRequest=JSON.parse(options.body);
+   const {scope,documents}=ragRequest;
+   ragRequest.items=scenarioStore.evidence({scope,ids:documents.map(item=>item.id)}).items;
+   for(const {id,kind} of documents){
+    const batch=scenarioStore.embeddingInputs({scope,ids:[id]});
+    assert.equal(typeof batch.content[0],kind==='image'?'object':'string');
+    if(kind==='image'){
+     const item=ragRequest.items.find(item=>item.kind===kind&&item.locator===batch.payloads[0].locator);
+     const parts=batch.content[0].content;
+     assert.deepEqual(parts.map(part=>part.type),['text','image_url','text']);
+     assert.equal(parts[1].image_url.url,item.image);
+     assert.match(parts[0].text,/<\|im_start\|>user\n$/);
+     assert.match(parts[2].text,/<\|im_start\|>assistant\n$/);
+     assert.ok(parts.every(part=>!part.text?.includes('<__media__>')));
+    }
+   }
    return Response.json({answer:'庫存 2 個。',passages:[],sources:[]});
   }});
  const encoded=(name,text)=>({name,data:Buffer.from(text).toString('base64')});

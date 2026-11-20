@@ -171,33 +171,24 @@ services:
       context: ./knowledge
     image: ivr-knowledge:local
     container_name: ivr-knowledge
+    init: true
     restart: unless-stopped
     environment:
       PORT: 8085
       KNOWLEDGE_DATA_ROOT: /data
       OCR_LANGUAGES: chi_tra+eng
-      IVR_RAG_URL: http://rag:8086
+      IVR_RAG_URL: http://n8n:5678/webhook/ivr-document-rag
+      IVR_RAG_EMBED_MODEL: ${IVR_RAG_EMBED_MODEL:-gorse-io/Qwen3-VL-Embedding-2B-GGUF:Q4_K_M}
+      IVR_RAG_EMBED_DIMENSIONS: ${IVR_RAG_EMBED_DIMENSIONS:-2048}
+      QDRANT__TELEMETRY_DISABLED: "true"
     volumes:
       - audiocpp-knowledge-data:/data
+      - ivr-qdrant-data:/qdrant/storage
     healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8085/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      test: ["CMD", "node", "-e", "Promise.all([fetch('http://127.0.0.1:8085/health'),fetch('http://127.0.0.1:6333/readyz')]).then(rs=>process.exit(rs.every(r=>r.ok)?0:1)).catch(()=>process.exit(1))"]
       interval: 20s
       timeout: 5s
       retries: 5
-
-  rag:
-    build:
-      context: ../../..
-      dockerfile: examples/docker/agx-one-container/rag/Dockerfile
-    image: ivr-rag:local
-    container_name: ivr-rag
-    restart: unless-stopped
-    environment:
-      RAG_EMBED_URL: http://voice-ai:8088
-      RAG_VISION_URL: http://voice-ai:8087
-      RAG_EMBEDDING_MODEL: ${IVR_RAG_EMBED_MODEL:-gorse-io/Qwen3-VL-Embedding-2B-GGUF:Q4_K_M}
-    volumes:
-      - audiocpp-rag-vectors:/vector-cache
 
   # Setup uses the CPU-only SIP image. No host C++ installation is necessary.
   sip-setup:
@@ -314,4 +305,4 @@ volumes:
   audiocpp-https-config:
   audiocpp-n8n-data:
   audiocpp-knowledge-data:
-  audiocpp-rag-vectors:
+  ivr-qdrant-data:
