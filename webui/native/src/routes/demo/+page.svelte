@@ -38,6 +38,7 @@
   import { browserDecodeToWav, encodePcm16Wav } from "$lib/audio";
   import { readGreetingCsv, writeGreetingCsv } from "$lib/greetings";
   import { recognitionContext } from "$lib/asr-context";
+  import { correctAsrTranscript, DEFAULT_ASR_POSTPROCESS_LABEL, DEFAULT_ASR_POSTPROCESS_MODEL } from "$lib/asr-postprocess";
   import { reportedRtf, rtfLabel } from "$lib/response-timing";
   import { normalizeTranscript } from "$lib/transcript";
   import { uploadWav, pathStatus } from "$lib/api";
@@ -186,6 +187,12 @@
     ttsKey = resolve("tts");
     if (typeof saved.vad_enabled === "boolean") useVad = saved.vad_enabled;
     if (typeof saved.asr_enabled === "boolean") useAsr = saved.asr_enabled;
+    if (typeof saved.asr_postprocess_enabled === "boolean") useAsrPostprocess = saved.asr_postprocess_enabled;
+    if (saved.asr_postprocess_model && saved.asr_postprocess_model !== DEFAULT_ASR_POSTPROCESS_MODEL) {
+      if (llmModels.some(model => model.id === saved.asr_postprocess_model && !model.requiresDownload))
+        asrPostprocessModel = saved.asr_postprocess_model;
+      else warnings.push("ASR post-processing model unavailable, using S1-mini");
+    }
     if (typeof saved.llm_enabled === "boolean") useLlm = saved.llm_enabled;
     if (typeof saved.tts_enabled === "boolean") useTts = saved.tts_enabled;
     if (typeof saved.vad_threshold === "number")
@@ -290,6 +297,8 @@
         schema_version: 1,
         vad_enabled: useVad,
         asr_enabled: useAsr,
+        asr_postprocess_enabled: useAsrPostprocess,
+        asr_postprocess_model: asrPostprocessModel,
         llm_enabled: useLlm,
         tts_enabled: useTts,
         ...audioModelSettings("vad", selectedVad),
@@ -630,6 +639,8 @@
     useAsr = true,
     useLlm = true,
     useTts = true;
+  let useAsrPostprocess = true;
+  let asrPostprocessModel = DEFAULT_ASR_POSTPROCESS_MODEL;
   let manualRecording = false,
     manualParts: Float32Array[] = [];
   let llmDownloading = false,
@@ -643,6 +654,7 @@
     modelError = "";
   $: vadModels = audioModels.filter((m) => m.task === "vad");
   $: asrModels = audioModels.filter((m) => ["asr", "stt"].includes(m.task));
+  $: asrPostprocessModels = llmModels.filter((m) => !m.requiresDownload && m.id !== DEFAULT_ASR_POSTPROCESS_MODEL);
   $: ttsModels = audioModels.filter((m) => ["tts", "clon"].includes(m.task));
   $: selectedVad = audioModels.find((m) => m.key === vadKey);
   $: selectedAsr = audioModels.find((m) => m.key === asrKey);
@@ -716,6 +728,9 @@
     }
     if (result[1].status === "fulfilled") {
       llmModels = result[1].value;
+      if (asrPostprocessModel !== DEFAULT_ASR_POSTPROCESS_MODEL &&
+          !llmModels.some(model => model.id === asrPostprocessModel && !model.requiresDownload))
+        asrPostprocessModel = DEFAULT_ASR_POSTPROCESS_MODEL;
       if (!llmModels.some((m) => m.id === llm))
         llm =
           llmModels.find((m) => !m.requiresDownload && isDemoLfmModel(m.id))
@@ -1401,6 +1416,18 @@
           performance.now() - operationStarted,
           reportedRtf(result),
         );
+        if (useAsrPostprocess && [...text].length >= 3) {
+          const correctionStarted = performance.now();
+          status = "Correcting transcript";
+          try {
+            text = await correctAsrTranscript(text, asrPostprocessModel, hotwords, llmBase(), signal);
+            if (signal.aborted || generation !== epoch) return;
+            record("ASR_POSTPROCESS_COMPLETED", text, performance.now() - correctionStarted);
+          } catch {
+            if (signal.aborted || generation !== epoch) return;
+            record("ASR_POSTPROCESS_FALLBACK", "Using original transcription", performance.now() - correctionStarted);
+          }
+        }
       }
       if (generation !== epoch) return;
       if (useSip) { await sendSipText(normalizeTranscript(text, hotwords), signal); return; }
@@ -2783,6 +2810,23 @@
               >{/each}</select
           ></label
         >
+        <label class="stage-switch postprocess-switch">
+          <span class="postprocess-label">Transcript post-processing</span>
+          <span class="postprocess-control">
+            <input type="checkbox" role="switch" aria-label="Enable transcript post-processing" bind:checked={useAsrPostprocess} />
+            <span>{useAsrPostprocess ? "On" : "Off"}</span>
+          </span>
+        </label>
+        {#if useAsrPostprocess}
+          <label>Post-processing model
+            <select aria-label="Post-processing model" bind:value={asrPostprocessModel}>
+              <option value={DEFAULT_ASR_POSTPROCESS_MODEL}>{DEFAULT_ASR_POSTPROCESS_LABEL}</option>
+              {#each asrPostprocessModels as model}
+                <option value={model.id}>{model.label}</option>
+              {/each}
+            </select>
+          </label>
+        {/if}
         <label
           >ASR hotwords / context<textarea
             rows="3"
@@ -3769,6 +3813,15 @@
   .stage-switch span {
     font-size: 11px;
     min-width: 17px;
+  }
+  .demo label.postprocess-switch {
+    justify-content: space-between;
+    margin: 12px 0;
+  }
+  .postprocess-control {
+    display: flex;
+    align-items: center;
+    gap: 6px;
   }
   .tts-playback-options {
     display: flex;

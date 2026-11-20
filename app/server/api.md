@@ -411,6 +411,8 @@ content verbatim; CSV validation happens in the demo editor.
 `GET /v1/ui/demo-settings` reads global demo settings; `POST` accepts
 `{ "settings": { "schema_version": 1, ... } }` and saves them to
 `ui-settings/demo-settings.yaml` when UI management is enabled. The optional
+`asr_postprocess_enabled` boolean and `asr_postprocess_model` string store the
+Demo's transcript correction settings. The optional
 `dialogue_source` string accepts `prompt.csv` (the default) or `n8n`. In n8n
 mode, the WebUI connects to `/n8n/mcp/ivr-maintenance` using MCP Streamable HTTP,
 discovers the tools exposed by n8n, and passes their schemas to the selected

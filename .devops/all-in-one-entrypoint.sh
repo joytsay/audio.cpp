@@ -6,12 +6,13 @@ llama_pid=""
 embedding_pid=""
 ivr_embed_pid=""
 ivr_vision_pid=""
+asr_postprocess_pid=""
 rag_pid=""
 bootstrap_pid=""
 
 shutdown() {
     trap - EXIT INT TERM
-    for pid in "$bootstrap_pid" "$rag_pid" "$embedding_pid" "$ivr_embed_pid" "$ivr_vision_pid" "$llama_pid" "$audio_pid"; do
+    for pid in "$bootstrap_pid" "$rag_pid" "$embedding_pid" "$ivr_embed_pid" "$ivr_vision_pid" "$asr_postprocess_pid" "$llama_pid" "$audio_pid"; do
         if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
             kill -TERM "$pid" 2>/dev/null || true
         fi
@@ -99,6 +100,20 @@ LD_LIBRARY_PATH="/opt/llama.cpp${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" \
     --ctx-size "${LLAMA_CTX_SIZE:-4096}" \
     --n-gpu-layers "${LLAMA_GPU_LAYERS:-99}" &
 llama_pid=$!
+
+asr_postprocess_model="${ASR_POSTPROCESS_MODEL_FILE:-}"
+if [[ -n "$asr_postprocess_model" ]]; then
+    if [[ -r "$asr_postprocess_model" ]]; then
+        LD_LIBRARY_PATH="/opt/llama.cpp${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" \
+        /opt/llama.cpp/llama-server --host 0.0.0.0 --port 8089 --no-webui \
+            --model "$asr_postprocess_model" --alias s1-mini-chinese-1106-bf16 \
+            --jinja --parallel 1 --ctx-size 4096 --sleep-idle-seconds 120 \
+            --n-gpu-layers "${ASR_POSTPROCESS_GPU_LAYERS:-99}" &
+        asr_postprocess_pid=$!
+    else
+        echo "[all-in-one] ASR post-processing model is unavailable: $asr_postprocess_model" >&2
+    fi
+fi
 
 if [[ "${IVR_MULTIMODAL_ENABLED:-false}" == "true" ]]; then
     ivr_llama() {

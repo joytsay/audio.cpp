@@ -233,6 +233,15 @@ controls the caller/assistant waveforms and phone call status.
 
 The sidebar groups controls into **VAD**, **ASR**, **LLM**, and **TTS** sections,
 each with an On/Off switch. System prompt and its save button are in **LLM**.
+
+In **ASR**, **Transcript post-processing** defaults to On with **S1-mini-Chinese-1106 · BF16**. It cleans browser microphone and audio-file transcriptions before dialogue. Use **Save model settings** to keep the switch and model selection. Other installed text models appear in the dropdown.
+
+The default model runs in a dedicated llama.cpp worker. Put the BF16 GGUF in
+`llama-models/.asr-postprocess/s1-mini/S1-mini-Chinese-1106-BF16.gguf`
+at the repository root. The [Hugging Face checkpoint](https://huggingface.co/WIlfLin/S1-mini-Chinese-1106-BF16)
+was converted from revision `9cae6f63f97b5f154a5b25ba7beda53f4b7b9dff`
+using the pinned llama.cpp `convert_hf_to_gguf.py --outtype bf16`. Keep its LICENSE and NOTICE with the GGUF.
+If correction fails or changes an existing numeric identifier, the turn uses the original ASR transcript.
 Turn stages off before starting a call:
 
 - **VAD off:** use **Record voice turn** / **Send voice turn** for manual turns.

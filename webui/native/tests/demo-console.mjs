@@ -92,6 +92,12 @@ const { chromium } = require("playwright");
         ? route.request().postDataJSON()
         : {};
     requests.push({ path: url.pathname, body });
+    if (url.pathname === "/asr-postprocess/v1/chat/completions") {
+      assert.equal(body.model, "s1-mini-chinese-1106-bf16");
+      assert.equal(body.chat_template_kwargs.enable_thinking, false);
+      const utterance = body.messages.at(-1).content.split("\n").slice(1).join("\n");
+      return route.fulfill({json:{choices:[{finish_reason:"stop",message:{content:utterance}}]}});
+    }
     if (
       checkingAudioHighlights &&
       url.pathname.endsWith("/audio/transcriptions/details")
@@ -392,6 +398,8 @@ const { chromium } = require("playwright");
   await page.getByRole("button", { name: "Start call" }).waitFor();
   assert.equal(await page.title(), "GeoVision · IVR");
   assert.ok(await page.locator('link[rel="icon"]').getAttribute("href"));
+  assert.equal(await page.getByRole("switch",{name:"Enable transcript post-processing"}).isChecked(),true);
+  assert.equal(await page.getByLabel("Post-processing model").inputValue(),"s1-mini-chinese-1106-bf16");
 
   await page.getByLabel("LLM", { exact: true }).selectOption(llmId);
   if (process.env.UI_MCP_ONLY === "1") {
@@ -667,6 +675,7 @@ const { chromium } = require("playwright");
   for (const type of [
     "VAD_COMPLETED",
     "ASR_COMPLETED",
+    "ASR_POSTPROCESS_COMPLETED",
     "LLM_COMPLETED",
     "TTS_COMPLETED",
     "PLAYBACK_COMPLETED",
@@ -1144,6 +1153,8 @@ const { chromium } = require("playwright");
     .getByText("Model settings saved on server", { exact: true })
     .waitFor();
   assert.equal(sharedSettings.vad_enabled, false);
+  assert.equal(sharedSettings.asr_postprocess_enabled, true);
+  assert.equal(sharedSettings.asr_postprocess_model, "s1-mini-chinese-1106-bf16");
   assert.equal(sharedSettings.llm_enabled, false);
   assert.equal(sharedSettings.vad_threshold, 0.7);
   assert.equal(sharedSettings.vad_window_ms, 1000);

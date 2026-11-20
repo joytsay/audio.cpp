@@ -4,6 +4,8 @@ export interface DemoSettings {
   schema_version: 1;
   vad_enabled?: boolean;
   asr_enabled?: boolean;
+  asr_postprocess_enabled?: boolean;
+  asr_postprocess_model?: string;
   llm_enabled?: boolean;
   tts_enabled?: boolean;
   vad_model_task?: string;

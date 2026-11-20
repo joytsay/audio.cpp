@@ -39,6 +39,11 @@
 		reverse_proxy voice-ai:8082
 	}
 
+	handle /asr-postprocess/v1/chat/completions {
+		uri strip_prefix /asr-postprocess
+		reverse_proxy voice-ai:8089
+	}
+
 	@webui {
 		method GET HEAD
 		path / /index.html /_app/* /logo_cloud.svg
