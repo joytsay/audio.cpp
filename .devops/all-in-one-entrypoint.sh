@@ -4,12 +4,14 @@ set -Eeuo pipefail
 audio_pid=""
 llama_pid=""
 embedding_pid=""
+ivr_embed_pid=""
+ivr_vision_pid=""
 rag_pid=""
 bootstrap_pid=""
 
 shutdown() {
     trap - EXIT INT TERM
-    for pid in "$bootstrap_pid" "$rag_pid" "$embedding_pid" "$llama_pid" "$audio_pid"; do
+    for pid in "$bootstrap_pid" "$rag_pid" "$embedding_pid" "$ivr_embed_pid" "$ivr_vision_pid" "$llama_pid" "$audio_pid"; do
         if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
             kill -TERM "$pid" 2>/dev/null || true
         fi
@@ -98,6 +100,20 @@ LD_LIBRARY_PATH="/opt/llama.cpp${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" \
     --n-gpu-layers "${LLAMA_GPU_LAYERS:-99}" &
 llama_pid=$!
 
+if [[ "${IVR_MULTIMODAL_ENABLED:-false}" == "true" ]]; then
+    ivr_llama() {
+        LD_LIBRARY_PATH="/opt/llama.cpp${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" \
+        exec /opt/llama.cpp/llama-server --host 0.0.0.0 --no-webui \
+            --ctx-size 8192 --parallel 1 --n-gpu-layers "${IVR_RAG_GPU_LAYERS:-99}" "$@"
+    }
+    ivr_llama --port 8088 -hf "${IVR_RAG_EMBED_MODEL:-gorse-io/Qwen3-VL-Embedding-2B-GGUF:Q4_K_M}" \
+        --embedding --pooling last --batch-size 8192 --ubatch-size 8192 &
+    ivr_embed_pid=$!
+    ivr_llama --port 8087 -hf "${IVR_RAG_VISION_MODEL:-Qwen/Qwen3-VL-4B-Instruct-GGUF:Q4_K_M}" \
+        --alias ivr-vision --jinja &
+    ivr_vision_pid=$!
+fi
+
 # Bootstrap weights without delaying the WebUI. The ASR and ZipVoice installs use the
 # native C++ manager. Set either variable to an empty string to disable downloads.
 bootstrap_models() {
@@ -152,7 +168,9 @@ echo "[all-in-one] llama.cpp embedding worker: http://127.0.0.1:${rag_embedding_
 echo "[all-in-one] rag-cpp RAG/GraphRAG worker: http://127.0.0.1:8083/rcp"
 
 set +e
-wait -n "$audio_pid" "$llama_pid" "$embedding_pid" "$rag_pid"
+worker_pids=("$audio_pid" "$llama_pid" "$embedding_pid" "$rag_pid")
+if [[ -n "$ivr_embed_pid" ]]; then worker_pids+=("$ivr_embed_pid" "$ivr_vision_pid"); fi
+wait -n "${worker_pids[@]}"
 status=$?
 set -e
 echo "[all-in-one] a required worker exited with status $status" >&2

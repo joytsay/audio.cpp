@@ -21,7 +21,7 @@ for (( attempt=1; attempt<=attempts; attempt++ )); do
     sleep 1
     started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "External SIP verification attempt $attempt/$attempts: 520 -> 521, #1 then #2"
-    caller_container="sip-received-$(id -u)-$$-$attempt-$(date +%s)"
+    caller_container="ivr-sip-test-caller-$(id -u)-$$-$attempt-$(date +%s)"
     call_status=0
     docker compose --profile verify run --name "$caller_container" --no-deps caller 2>&1 | tee "evidence/caller-$attempt.log" || call_status=$?
     recording="evidence/received-520-attempt-$attempt.wav"

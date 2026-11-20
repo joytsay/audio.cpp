@@ -60,6 +60,9 @@ examples/docker/coturn/**
 !examples/docker/coturn/CMakeLists.txt
 !examples/docker/coturn/setupEnv.cpp
 
+# The AGX RAG image compiles this worker from the repository root context.
+!examples/docker/agx-one-container/rag/main.cpp
+
 # Private runtime settings must never enter an image build context.
 **/.env
 **/.env.*

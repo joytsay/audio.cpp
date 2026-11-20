@@ -25,6 +25,15 @@ try {
  assert.deepEqual(events,[['workflow','started'],['lookup_maintenance_guidance','completed'],['workflow','completed']]);
  globalThis.fetch=async url=>{assert.equal(url,'http://n8n.test/webhook/ivr-agent');return Response.json({reply:'SIP 回覆'});};
  assert.equal(await n8nDialogue(input,signal,{workflowUrl:'http://n8n.test/webhook/ivr-agent'}),'SIP 回覆');
+ const scenarioInput={...input,text:'正確',scenarioReport:{number:3,language:'zh'}};
+ let savedId;
+ globalThis.fetch=async(url,options)=>{
+  assert.equal(url,'/n8n/webhook/ivr-scenario-report');
+  assert.deepEqual(JSON.parse(options.body),scenarioInput);
+  return Response.json({reply:'工單 GV-TEST 已儲存。',scenario_report:true,work_order_id:'GV-TEST',tools:['add_work_order']});
+ };
+ assert.equal(await n8nDialogue(scenarioInput,signal,{onWorkOrderSaved:id=>{savedId=id;}}),'工單 GV-TEST 已儲存。');
+ assert.equal(savedId,'GV-TEST');
  globalThis.fetch=async()=>Response.json({message:'Webhook is not registered'},{status:404});
  await assert.rejects(n8nDialogue(input,signal),/404.*Publish「GeoVision · Workflow」/);
  globalThis.fetch=async()=>Response.json({message:'RAG unavailable'},{status:500});
@@ -56,6 +65,8 @@ for(let i=0;i<main.length-1;i++)assert.equal(workflow.connections[main[i]].main[
 assert.equal(workflow.connections['Scenario lookup result?'].main[0][0].node,'Prepare IVR output');
 assert.equal(workflow.connections['Fixed reply?'].main[0][0].node,'Return fixed reply');
 assert.equal(workflow.connections['Return fixed reply'].main[0][0].node,'IVR Output');
+assert.equal(nodes.get('Scenario Report Input').parameters.path,'ivr-scenario-report');
+assert.equal(workflow.connections['Scenario Report Input'].main[0][0].node,'Prepare IVR input');
 const fixed=vm.runInNewContext(`(function(){${nodes.get('Return fixed reply').parameters.jsCode}})()`,{$input:{first:()=>({json:{report_reply:'工單日期、工單或設備編號、維修項目與數量是什麼？'}})}})[0].json;
 assert.equal(fixed.reply,'工單日期、工單或設備編號、維修項目與數量是什麼？');assert.equal(fixed.tools.length,0);
 assert.ok(nodes.get('Retrieve current turn').parameters.tool.value.includes('$json.tool'));
@@ -89,13 +100,12 @@ assert.equal(output({output:'我找到相關工作單，包含以下信息：'},
 const guarded=output({output:'工單已儲存。'},{passages:[]});assert.ok(!guarded.reply.includes('已儲存'));
 const saved=output({output:'很長的回覆。',intermediateSteps:[{action:{tool:'KnowledgeMCP_add_work_order'},observation:JSON.stringify({persisted:true,work_order:{id:'GV-TEST'}})}]},{passages:[]});
 assert.equal(saved.reply,'工單 GV-TEST 已新增。');
-const prepCode=nodes.get('Prepare guidance').parameters.jsCode;
-const docs=[{source:'情境模擬_20261105.docx',section:'情境 2',format:'qa',question:'如何回報？',answer:'請提供實際設備。',text:'Q: 如何回報？\nA: 請提供實際設備。'}];
-const runPrep=documents=>vm.runInNewContext(`(function(){${prepCode}})()`,{$:name=>({first:()=>({json:name==='Load knowledge files'?{documents}:{query:'流程'}})})})[0].json;
-assert.equal(runPrep(docs).knowledge[0],docs[0].text);
-assert.throws(()=>runPrep([{text:'Raw paragraph'}]),/grounded Q.A/);
-assert.equal(nodes.get('Recursive Text Splitter').parameters.chunkOverlap,0);
-assert.equal(nodes.get('Seed Simple Vector Store').parameters.memoryKey.value,nodes.get('Retrieve guidance').parameters.memoryKey.value);
+const retrieval=nodes.get('Retrieve guidance');
+assert.equal(retrieval.parameters.url,'http://knowledge:8085/rag');
+assert.ok(!nodes.has('Seed Simple Vector Store'));
+const visualFacts={answer:'圖表顯示庫存 2 個。',passages:[],sources:[{source:'inventory.html',kind:'image'}]};
+assert.equal(prepareAgent(visualFacts,{tool:'retrieve_knowledge'}).facts.answer,visualFacts.answer);
+assert.equal(output({},visualFacts).reply,visualFacts.answer);
 const group1=workflow.nodes.find(n=>n.id==='workflow-group-1'),group2=workflow.nodes.find(n=>n.id==='workflow-group-2'),group3=workflow.nodes.find(n=>n.id==='workflow-group-3');
 assert.equal(group1.position[1],group2.position[1]);assert.ok(group2.position[0]>group1.position[0]);assert.ok(group3.position[1]>group1.position[1]);
 console.log('PASS required fresh MCP retrieval, latest→oldest stale-answer regression, short replies, real-save acknowledgment, two-tool set, Q/A validation and compact 1/2-over-3 layout');
@@ -106,6 +116,10 @@ const directSave=prepareAgent({content:[{text:JSON.stringify({persisted:true,wor
 const directReply=output({output:'確認維修內容後，您已完成回報。'},{},directSave);
 assert.equal(directReply.reply,'工單 GV-DIRECT 已新增。');
 assert.deepEqual([...directReply.tools],['add_work_order']);
+const reportReply=output({},{},{...directSave,scenarioReport:{number:3,language:'zh'}});
+assert.equal(reportReply.reply,'工單 GV-DIRECT 已儲存。');
+assert.equal(reportReply.work_order_id,'GV-DIRECT');
+assert.equal(reportReply.scenario_report,true);
 const fakeComplete=output({output:'確認維修內容後，您已完成回報。'},{passages:[]});
 assert.equal(fakeComplete.reply,'工單尚未儲存。');
 const monthly=output({output:'請提供工單詳細資料。'},{...orderFacts,period:'2026-11',work_orders:[]});

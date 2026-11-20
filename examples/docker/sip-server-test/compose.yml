@@ -1,6 +1,7 @@
 services:
   sip-test:
-    image: audio.cpp-sip-greetings:local
+    image: ivr-server-sip-test:local
+    container_name: ivr-server-sip-test
     build:
       context: ../../..
       dockerfile: .devops/cuda.Dockerfile
@@ -51,7 +52,8 @@ services:
   # Explicit opt-in automated caller; uses account 520 only during verification.
   caller:
     profiles: [verify]
-    image: audio.cpp-sip-greetings:local
+    image: ivr-server-sip-test:local
+    container_name: ivr-sip-test-caller
     network_mode: host
     init: true
     entrypoint: ["/opt/sip/bin/exampleSIP"]

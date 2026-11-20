@@ -88,7 +88,13 @@ try{
  assert.equal(ocrCalls,1,'fresh structured lookups do not invoke PDF OCR');
  assert.ok(!latest.documents.some(d=>d.source!==filenames.excel));
  const scenarioRoot=path.join(dir,'uploaded-scenarios');
- const scenarioStore=createKnowledgeStore({root:dir,orders,scenarioRoot,pdf:async()=>({text:'測試 PDF 的服務時間為星期三。',extraction:'pdf_text'})});
+ let ragRequest;
+ const scenarioStore=createKnowledgeStore({root:dir,orders,scenarioRoot,pdf:async()=>({text:'測試 PDF 的服務時間為星期三。',extraction:'pdf_text'}),
+  fetchImpl:async(url,options)=>{
+   assert.equal(url,'http://rag:8086/answer');
+   ragRequest=JSON.parse(options.body);
+   return Response.json({answer:'庫存 2 個。',passages:[],sources:[]});
+  }});
  const encoded=(name,text)=>({name,data:Buffer.from(text).toString('base64')});
  const scenarioFile=encoded('可查詢情境.csv','派工單號,型號,姓名\nYCS-16866,20BD148AOANNANCO,陳俞境\n');
  const imported=await scenarioStore.addScenario({fileMode:true,files:[scenarioFile]});
@@ -97,6 +103,90 @@ try{
  await scenarioStore.saveScenarioImport(imported.scenario.id,{ready:true,toolName:'test_tool'});
  assert.deepEqual((await scenarioStore.listScenarios()).find(item=>item.id===imported.scenario.id).examples,examples);
  await scenarioStore.removeScenario(imported.scenario.id);
+ const html=encoded('情境範例.HTML',`
+  <head><title>Metadata</title><style>p { color: red }</style></head>
+  <body><p>AI：請先選語言</p><p>維修人員：中文</p>
+  <p>情境 <b>1</b>：Call Out 系統主動通知派工</p><p>AI：請確認派工。</p>
+  <p>情境 <b>2</b>：工單回報</p><p>維修人員：例行保養。</p><p>AI：以上是否正確？</p>
+  <p>情境 <b>3</b>：現場查修</p><p>維修人員：查修過載。</p><p>AI：請提供馬達銘牌。</p>
+  <p>情境 <b>4</b>：庫存查詢</p><p>維修人員：查庫存 A01</p><p>AI：庫存&nbsp;2 個。<!-- hidden note --></p><img src="inventory%20figure.png">
+  <p>情境 <b>5</b>：維修 SOP 查詢</p><p>維修人員：風扇 SOP</p><p>AI：請參照規格。</p>
+  <p>情境 <b>6</b>：打電話給公司同事</p><p>維修人員：請轉接。</p><p>AI：請提供員工編號。</p>
+  <p>情境 <b>7</b>：查詢變頻器 Fault Code</p><p>維修人員：PF753 Fault Code 007</p><p>AI：馬達過載。</p>
+  <p>情境 <b>8</b>：客戶滿意度調查</p><p>AI：請評分。</p>
+  <script>external();</script></body>`);
+ const htmlImport=await scenarioStore.addScenario({fileMode:true,files:[html]});
+ const htmlId=htmlImport.scenario.id;
+ assert.equal(htmlImport.scenario.simulation,true);
+ const htmlRecord=await scenarioStore.readScenario(htmlId);
+ assert.deepEqual(htmlRecord.dataset.tables,[]);
+ assert.equal(htmlRecord.documents.length,8);
+ assert.equal(htmlRecord.documents[3].answer,'庫存 2 個。');
+ await assert.rejects(scenarioStore.simulation({id:htmlId,text:'查庫存 A01'}),{status:404});
+ await scenarioStore.saveScenarioImport(htmlId,{ready:true,toolName:'html_test',tables:[]});
+ for(const [index,text] of [
+  '幫我確認派工','我要回報工單，例行保養更換風扇','回報工單，現場查修過載 Fault Code 019',
+  '我要查庫存 A01','更換風扇 SOP','幫我轉接工程部','查詢 PF753 Fault Code 007',
+ ].entries()){
+  const {scenario}=await scenarioStore.simulation({id:htmlId,text});
+  assert.equal(scenario.number,index+1,text);
+  if(index===3){
+   assert.equal(scenario.retrieval,true);
+   assert.equal(scenario.reference,undefined);
+  }
+ }
+ for(const text of ['工單回報','情境 8'])assert.deepEqual(await scenarioStore.simulation({id:htmlId,text}),{scenario:null});
+ const imageData='iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jrJ0AAAAASUVORK5CYII=';
+ const reimported=await scenarioStore.addScenario({fileMode:true,files:[html],attachments:[{name:'inventory figure.png',data:imageData}]});
+ assert.equal(reimported.scenario.id,htmlId);
+ assert.equal((await scenarioStore.simulation({id:htmlId,number:4,language:'zh',text:'A01庫存？'})).answer,'庫存 2 個。');
+ assert.equal(ragRequest.items.find(item=>item.kind==='image').image,`data:image/png;base64,${imageData}`);
+ assert.ok(ragRequest.items.some(item=>item.text.includes('庫存 2 個')));
+ assert.ok(!ragRequest.items.some(item=>/銘牌|請評分/.test(item.text)));
+ await scenarioStore.simulation({id:htmlId,number:5,language:'zh',text:'維修 SOP'});
+ assert.ok(ragRequest.items.every(item=>item.kind!=='image'));
+ await scenarioStore.removeScenario(htmlId);
+ const reportTurns=[
+  '我要回報工單 ，2026年11月20日上午9:21美光MTB-QWE查修。',
+  'C1-VFD-12CC04 查修變頻器PF753過載361A',
+  'Fault Code：010，過載時電流60.10HZ、284rmp',
+  '480V、60HZ、185KW、265A、1786rpm',
+  '正確',
+ ];
+ const reportSession='scenario-3-regression';
+ const reportMessages=[];
+ let reportDecision;
+ for(const [index,text] of reportTurns.entries()){
+  reportMessages.push({role:'user',content:text});
+  reportDecision=scenarioStore.registerTurn({sessionId:reportSession,text,user_transcripts:reportTurns.slice(0,index+1),
+   scenarioReport:{number:3,language:'zh'},report_messages:reportMessages});
+  if(index===reportTurns.length-1)break;
+  assert.equal(reportDecision.tool,undefined);
+  await assert.rejects(scenarioStore.prepareWorkOrder(reportSession));
+  reportMessages.push({role:'assistant',content:reportDecision.report_reply});
+ }
+ assert.equal(reportDecision.tool,'add_work_order');
+ assert.match(reportMessages[5].content,/變頻器型號 PF753.*故障碼 010.*361A、60\.10HZ、284rmp.*馬達銘牌/);
+ assert.match(reportMessages[7].content,/電壓 480V.*頻率 60HZ.*功率 185KW.*轉速 1786rpm.*以上是否正確/);
+ const reportRow=await scenarioStore.prepareWorkOrder(reportSession);
+ assert.equal(reportRow.dispatch_date,'2026-11-20');
+ assert.equal(reportRow.equipment_number,'C1-VFD-12CC04');
+ assert.equal(reportRow.report_key,(await scenarioStore.prepareWorkOrder(reportSession)).report_key);
+ const reportResult=JSON.parse(reportRow.results);
+ assert.deepEqual(reportResult.dialogue,reportMessages);
+ assert.deepEqual(reportResult.transcripts,reportTurns);
+ assert.equal(reportResult.fields.故障碼,'010');
+ assert.equal(reportResult.fields.現場讀值,'361A、60.10HZ、284rmp');
+ assert.equal(reportResult.fields.馬達銘牌.電流,'265A');
+ const maintenanceTurns=['我要回報工單，2026年11月20日設備編號 E12-99，更換強排 FAN 2 個。','正確','起機測試正常。'];
+ const scenarioMaintenanceSession='scenario-2-regression';
+ const maintenanceReport={number:2,language:'zh'};
+ for(const [index,text] of maintenanceTurns.entries()){
+  const decision=scenarioStore.registerTurn({sessionId:scenarioMaintenanceSession,text,scenarioReport:maintenanceReport,user_transcripts:maintenanceTurns.slice(0,index+1)});
+  if(index<2)assert.equal(decision.tool,undefined);
+  else assert.equal(decision.tool,'add_work_order');
+ }
+ assert.equal((await scenarioStore.prepareWorkOrder(scenarioMaintenanceSession)).test_result,'正常');
  const upload={name:'LAB-ZETA 服務',files:[encoded('服務.txt','Q: LAB-ZETA 包材何時回收？\nA: LAB-ZETA 每週三回收，聯絡分機 7654。'),encoded('保固.md','# LAB-ZETA 保固\nLAB-ZETA 維修保固為十二個月。')]};
  const scenario=await scenarioStore.addScenario(upload);
  assert.ok(scenario.scenario.qaCount>=2);assert.equal(scenario.duplicate,false);

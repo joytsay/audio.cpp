@@ -1,5 +1,6 @@
 import {createScenarioStore} from './scenarios.mjs';
-import {uniqueHeaders} from './scenario-files.mjs';
+import {htmlScenarioText,uniqueHeaders} from './scenario-files.mjs';
+import {chooseSimulationSection,simulationGuidance,simulationSections} from './scenario-simulation.mjs';
 import {readScenarioImage} from './scenario-image.mjs';
 import {createServer} from 'node:http';
 import {promises as fs} from 'node:fs';
@@ -15,6 +16,7 @@ import {createHash} from 'node:crypto';
 import {sourceQa,workbookQa,qaDocument} from './qa.mjs';
 import {dispatchDate,identifiers,lookupIntent,scenarioLookupIntent} from './conversation.mjs';
 import {createWorkOrderStore} from './work-orders.mjs';
+import {belongsToSection,extractRagAssets,ragItems} from './rag-assets.mjs';
 const execFile=promisify(execFileCallback);
 export const filenames={prompt:'prompt.csv',word:'情境模擬_20261105.docx',excel:'CSD資料庫.xlsx',pdf:'(備品維修)PY252-0059-工單-20260602-2工-CL、JC.pdf'};
 function cellText(cell){const v=cell.result??cell.value;if(v instanceof Date)return v.toISOString().slice(0,10);if(typeof v==='number'&&/^0+$/.test(cell.numFmt||''))return String(v).padStart(cell.numFmt.length,'0');return cell.text?.trim()||'';}
@@ -113,7 +115,6 @@ export async function extractPdf(file,{languages=process.env.OCR_LANGUAGES||'chi
       const prefix=path.join(dir,`page-${page}`);
       await run('pdftoppm',['-f',String(page),'-l',String(page),'-singlefile','-r','300','-png',file,prefix],{timeout:90000,maxBuffer:1024*1024});
       const {stdout}=await run('tesseract',[prefix+'.png','stdout','-l',languages,'--psm','3'],{timeout:120000,maxBuffer:4*1024*1024});
-      if(!stdout.trim())throw new Error(`OCR found no text on PDF page ${page}`);
       chunks.push(`【第 ${page} 頁；OCR 辨識，代碼及數值需核對原件】\n${stdout.trim()}`);
     }return {text:chunks.join('\n\n'),extraction:'ocr',pages,languages,notice:'OCR output is not authoritative; verify codes, quantities and dates against the PDF image.'};
   }finally{await fs.rm(dir,{recursive:true,force:true});}
@@ -137,7 +138,8 @@ export function workOrderSelection(query,sheets,{now=new Date()}={}){
   return {source:filenames.excel,sheet:'派工',selection:mode,period,reference:intent.reference,view:intent.view,total_count:candidates.length,selected_count:rows.length,undated_count:candidates.length-dated.length,work_orders:rows};
 }
 function workbookDocument(excel,sheet){return {source:excel.source,sheet:sheet.name,modified:excel.modified,kind:'workbook_records',extraction:'xlsx',rowCount:sheet.rows.length,text:sheet.rows.length?sheet.rows.map(row=>`來源：${excel.source}；工作表：${sheet.name}；列：${row.row}\n${JSON.stringify(row.fields)}`).join('\n\n'):'此資料表目前沒有記錄。'};}
-export function createKnowledgeStore({root=process.env.KNOWLEDGE_ROOT,pdf=extractPdf,ocrImage=readScenarioImage,orders=createWorkOrderStore(),scenarioRoot}={}){
+export function createKnowledgeStore({root=process.env.KNOWLEDGE_ROOT,pdf=extractPdf,ocrImage=readScenarioImage,orders=createWorkOrderStore(),scenarioRoot,
+  ragUrl=process.env.IVR_RAG_URL||'http://rag:8086',fetchImpl=fetch}={}){
   const scenarios=createScenarioStore({root:scenarioRoot,extract:async(file,upload)=>{
     if(upload.extension==='.pdf')return [{...await pdf(file)}];
     if(upload.fileMode&&upload.extension==='.docx')return extractScenarioWord(file,ocrImage);
@@ -146,10 +148,42 @@ export function createKnowledgeStore({root=process.env.KNOWLEDGE_ROOT,pdf=extrac
     if(upload.extension==='.docx'){const result=await mammoth.extractRawText({path:file});return [{text:result.value,extraction:'docx',kind:/情境\s*\d/.test(result.value)?'scenario_examples':'uploaded_reference'}];}
     if(upload.extension==='.csv'){const sheet=await readCsv(file);return sheet.rows.map(row=>({text:referenceRow(row),row:row.row,topic:`第 ${row.row} 列`,extraction:'csv'}));}
     if(upload.extension==='.xlsx')return (await readWorkbook(file)).flatMap(sheet=>sheet.rows.map(row=>({text:Object.entries(row.fields).filter(([,value])=>value).map(([key,value])=>`${key}：${value}`).join('；'),sheet:sheet.name,row:row.row,topic:`${sheet.name} 第 ${row.row} 列`,extraction:'xlsx'})));
-    const bytes=await fs.readFile(file);const text=new TextDecoder('utf-8',{fatal:true}).decode(bytes);return [{text,extraction:'text'}];
+    const bytes=await fs.readFile(file);
+    const text=new TextDecoder('utf-8',{fatal:true}).decode(bytes);
+    if(/\.html?$/.test(upload.extension))return [{text:htmlScenarioText(text),extraction:'html'}];
+    return [{text,extraction:'text'}];
   }});
   // File-only cache; concurrent requests share OCR. User queries are never cached.
   const cache=new Map();
+  const assetCache=new Map();
+  const visualAssets=async(records,section,includeRoot=true)=>{
+    const assets=[];
+    const rootFiles=includeRoot&&!section&&root?[{name:filenames.pdf,path:path.join(root,filenames.pdf)},{name:filenames.word,path:path.join(root,filenames.word)}]:[];
+    for(const {files,attachments} of [...records,{files:rootFiles,attachments:[]}]){
+      for(const file of files){
+        let stat;
+        try{stat=await fs.stat(file.path);}catch(error){if(error.code==='ENOENT')continue;throw error;}
+        const key=JSON.stringify([file.path,stat.mtimeMs,stat.size,section,attachments.map(item=>[item.name,item.sha256])]);
+        if(!assetCache.has(key)){
+          if(assetCache.size>=8)assetCache.delete(assetCache.keys().next().value);
+          assetCache.set(key,extractRagAssets(file,attachments,section).catch(error=>{
+            assetCache.delete(key);
+            throw error;
+          }));
+        }
+        assets.push(...await assetCache.get(key));
+      }
+    }
+    return assets;
+  };
+  const callRag=async(endpoint,body)=>{
+    const response=await fetchImpl(ragUrl+endpoint,{
+      method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body),signal:AbortSignal.timeout(240000),
+    });
+    const data=await response.json();
+    if(!response.ok)throw Object.assign(Error(data.error||'Multimodal RAG unavailable'),{status:502});
+    return data;
+  };
   async function read(kind,extract){
     if(!root)return;
     const file=path.join(root,filenames[kind]);
@@ -162,8 +196,24 @@ export function createKnowledgeStore({root=process.env.KNOWLEDGE_ROOT,pdf=extrac
     try{return await promise;}catch(e){cache.delete(kind);throw e;}
   }
   const workbook=async()=>await read('excel',async file=>({sheets:await readWorkbook(file)}))||{source:'已儲存工單',sheets:[{name:'派工',rows:[]}]};
-  return {
+  const store = {
     addScenario:input=>scenarios.add(input),
+    async simulation({id,text,number,language,previous=''}={}){
+      if(typeof text!=='string'||!text.trim()||text.length>20000)throw Object.assign(Error('Invalid simulation request'),{status:400});
+      const record=await scenarios.get(id);
+      const sections=simulationSections(record.files,record.dataset);
+      if(!record.resources?.ready||!sections.length)throw Object.assign(Error('Scenario simulation not found'),{status:404});
+      if(number!==undefined){
+        if(![4,5,7].includes(number)||!sections.some(section=>section.number===number)||!['zh','en'].includes(language)||
+          typeof previous!=='string'||previous.length>1000||text.length>8000)
+          throw Object.assign(Error('Invalid scenario lookup'),{status:400});
+        const records=await scenarios.corpus(id);
+        const docs=record.documents.filter(document=>belongsToSection(document.section,number));
+        return callRag('/answer',{query:text,previous,language,items:ragItems(docs,await visualAssets(records,number))});
+      }
+      const section=chooseSimulationSection(sections,text);
+      return {scenario:section?simulationGuidance(section):null};
+    },
     readScenario:id=>scenarios.get(id),
     saveScenarioImport:(id,state)=>scenarios.saveImport(id,state),
     listScenarios:()=>scenarios.list(),
@@ -171,8 +221,23 @@ export function createKnowledgeStore({root=process.env.KNOWLEDGE_ROOT,pdf=extrac
     registerTurn:input=>orders.register(input),
     prepareWorkOrder:sessionId=>orders.prepare(sessionId),
     listWorkOrders:()=>orders.list(),
+    async retrieve({query,records=[]}={}){
+      if(typeof query!=='string'||!query.trim()||query.length>10000)throw Object.assign(Error('Invalid RAG query'),{status:400});
+      const {documents,result}=await store.documents(query,records);
+      if(result)return {...result,sources:[...new Set(documents.map(document=>document.source))].map(source=>({source}))};
+      const uploads=await scenarios.corpus();
+      const imported=uploads.flatMap(upload=>upload.documents.filter(document=>!document.sheet));
+      const docs=[...new Map([...documents,...imported].map(document=>[JSON.stringify([document.source,document.text]),document])).values()];
+      const language=/\p{Script=Han}/u.test(query)?'zh':'en';
+      return callRag('/answer',{query,language,items:ragItems(docs,await visualAssets(uploads))});
+    },
+    async indexScenario(id){
+      if(typeof id!=='string')throw Object.assign(Error('A scenario ID is required'),{status:400});
+      const uploads=await scenarios.corpus(id);
+      return callRag('/index',{items:ragItems(uploads.flatMap(upload=>upload.documents),await visualAssets(uploads,undefined,false))});
+    },
     async health(){const saved=await scenarios.list();return {status:'ok',scenarios:saved.length,files:saved.flatMap(scenario=>scenario.files.map(file=>file.name))};},
-    async documents(query='',tableRecords=[]){
+    async documents(query='',tableRecords=[],routeOnly=false){
       if(!Array.isArray(tableRecords)||tableRecords.some(r=>!r||typeof r.id!=='string'||!r.fields||typeof r.fields!=='object'))throw Object.assign(Error('Invalid Data Table records'),{status:400});
       const scenarioLookup=scenarioLookupIntent(query);
       if(scenarioLookup&&!scenarioLookup.fallback&&!lookupIntent(query))return {documents:[],format:'qa',scenario_lookup:scenarioLookup};
@@ -184,12 +249,15 @@ export function createKnowledgeStore({root=process.env.KNOWLEDGE_ROOT,pdf=extrac
       const result=workOrderSelection(query,sheets);
       if(result&&(result.reference||sheets.some(sheet=>sheet.rows.length)||!uploaded.length)){
         result.source=[...(excel.source==='已儲存工單'?[]:[excel.source]),...new Set(local.map(r=>r.source||'舊版 JSON 工單'))].join(' + ')||'已儲存工單';
-        const document=workbookDocument(excel,{name:'派工',rows:result.work_orders});
-        const documents=result.work_orders.length?result.work_orders.flatMap(row=>workbookQa({...document,source:row.source||excel.source},[row])):workbookQa(document,[]);
         const scenarioReference=result.selection==='details'&&result.view==='details'&&!result.period&&!result.selected_count
           ?result.reference:null;
-        return {documents,result,format:'qa',...(scenarioReference?{scenario_reference:scenarioReference}:{})};
+        const route={result,format:'qa',...(scenarioReference?{scenario_reference:scenarioReference}:{})};
+        if(routeOnly)return route;
+        const document=workbookDocument(excel,{name:'派工',rows:result.work_orders});
+        const documents=result.work_orders.length?result.work_orders.flatMap(row=>workbookQa({...document,source:row.source||excel.source},[row])):workbookQa(document,[]);
+        return {...route,documents};
       }
+      if(routeOnly)return scenarioLookup?.fallback?{scenario_lookup:scenarioLookup}:{};
       const word=await read('word',async file=>{const r=await mammoth.extractRawText({path:file});return {text:r.value,kind:'scenario_examples',extraction:'docx',warnings:r.messages.map(m=>m.message)};});
       const pdfDoc=await read('pdf',async file=>({...await pdf(file),kind:'work_order_document',sha256:createHash('sha256').update(await fs.readFile(file)).digest('hex')}));
       const documents=[...(word?sourceQa(word):[]),...excel.sheets.filter(sheet=>sheet.rows.length).flatMap(sheet=>workbookQa(workbookDocument(excel,sheet),sheet.rows)),...local.flatMap((record,index)=>workbookQa({source:record.source,sheet:'派工',kind:'workbook_records',extraction:record.source?.includes('n8n Data Table')?'n8n_data_table':'legacy_json'},[{row:100000+index,fields:record.fields}])),...(pdfDoc?sourceQa(pdfDoc):[]),...uploaded];
@@ -199,6 +267,7 @@ export function createKnowledgeStore({root=process.env.KNOWLEDGE_ROOT,pdf=extrac
     },
 
   };
+  return store;
 }
 export function createKnowledgeServer(store=createKnowledgeStore()){
   return createServer(async(req,res)=>{
@@ -210,11 +279,13 @@ export function createKnowledgeServer(store=createKnowledgeStore()){
         let raw='';for await(const chunk of req){raw+=chunk;if(raw.length>256*1024)throw Object.assign(Error('Request too large'),{status:413});}
         data=await store.saveScenarioImport(importId,JSON.parse(raw));
       }
-      else if(req.method==='POST'&&['/call-turn','/work-order-draft','/documents','/scenarios'].includes(url.pathname)){
+      else if(req.method==='POST'&&['/call-turn','/work-order-draft','/documents','/scenarios','/ivr-simulation','/rag','/rag/index'].includes(url.pathname)){
         req.setEncoding('utf8');
         let raw='';for await(const chunk of req){raw+=chunk;if(Buffer.byteLength(raw)>(url.pathname==='/scenarios'?16*1024*1024:256*1024))throw Object.assign(Error('Request too large'),{status:413});}
         let body;try{body=JSON.parse(raw);}catch{throw Object.assign(Error('Invalid JSON'),{status:400});}
-        data=url.pathname==='/scenarios'?await store.addScenario(body):url.pathname==='/call-turn'?await store.registerTurn(body):url.pathname==='/work-order-draft'?await store.prepareWorkOrder(body.sessionId):await store.documents(body.query||'',body.records??[]);
+        if(url.pathname==='/rag')data=await store.retrieve(body||{});
+        else if(url.pathname==='/rag/index')data=await store.indexScenario(body?.id);
+        else data=url.pathname==='/scenarios'?await store.addScenario(body):url.pathname==='/call-turn'?await store.registerTurn(body):url.pathname==='/work-order-draft'?await store.prepareWorkOrder(body.sessionId):url.pathname==='/ivr-simulation'?await store.simulation(body||{}):await store.documents(body.query||'',body.records??[],body.routeOnly===true);
       }
       else if(req.method==='DELETE'&&url.pathname.startsWith('/scenarios/'))data=await store.removeScenario(url.pathname.slice('/scenarios/'.length));
       else if(req.method!=='GET'){res.writeHead(405);res.end(JSON.stringify({error:'Method not allowed'}));return;}

@@ -2,6 +2,7 @@ import {promises as fs} from 'node:fs';
 import path from 'node:path';
 import {createHash} from 'node:crypto';
 import {isReport,confirmsStartup,reportDate,reportDraft,callDecision} from './conversation.mjs';
+import {scenarioReportProgress} from './scenario-report.mjs';
 export {isReport,confirmsStartup,reportDate} from './conversation.mjs';
 const failure=(message,status=400)=>Object.assign(new Error(message),{status});
 
@@ -12,33 +13,51 @@ export function createWorkOrderStore({root=process.env.KNOWLEDGE_DATA_ROOT||'/da
  async function list(){try{const data=JSON.parse(await fs.readFile(path.join(root,'work-orders.json'),'utf8'));if(!Array.isArray(data))throw Error('Invalid legacy work-order store');return data;}catch(e){if(e.code==='ENOENT')return [];throw e;}}
  return {
   list,
-  register({sessionId,text,user_transcripts=[]}){
+  register({sessionId,text,user_transcripts=[],scenarioReport,report_messages=[]}){
    if(typeof sessionId!=='string'||!sessionId.trim()||sessionId.length>200||typeof text!=='string'||!text.trim()||text.length>20000||!Array.isArray(user_transcripts)||user_transcripts.length>100||user_transcripts.some(t=>typeof t!=='string'||t.length>20000))throw failure('Invalid call transcript');
+   if(scenarioReport!==undefined&&(![2,3].includes(scenarioReport?.number)||!['zh','en'].includes(scenarioReport.language)||
+    !Array.isArray(report_messages)||report_messages.length>100||report_messages.some(m=>!['user','assistant'].includes(m?.role)||typeof m.content!=='string'||m.content.length>20000)))throw failure('Invalid scenario report');
    const history=[...(user_transcripts.length?user_transcripts:contexts.get(sessionId)?.history??[])];if(history.at(-1)!==text)history.push(text);
+   const transcript=history.slice(-100);
    for(const [key,value]of contexts)if(Date.now()-value.seen>3600000)contexts.delete(key);
    if(!contexts.has(sessionId)&&contexts.size>=128)contexts.delete(contexts.keys().next().value);
-   contexts.set(sessionId,{history:history.slice(-100),seen:Date.now()});
+   const report=scenarioReport&&scenarioReportProgress(transcript,scenarioReport.number,scenarioReport.language,now());
+   contexts.set(sessionId,{history:transcript,seen:Date.now(),scenarioReport,report_messages});
+   if(report)return {sessionId,registered:true,intent:'report',scenarioReport,
+    ...(report.draft?{tool:'add_work_order'}:{report_reply:report.reply})};
    return {sessionId,registered:true,...callDecision(history,now())};
   },
   async prepare(sessionId){
    const context=contexts.get(sessionId);
    if(!context||Date.now()-context.seen>3600000)throw failure('找不到本通話的原始回報。');
-   const {history}=context,draft=reportDraft(history,now());
+   const {history,scenarioReport,report_messages}=context;
+   const report=scenarioReport&&scenarioReportProgress(history,scenarioReport.number,scenarioReport.language,now());
+   if(report&&!report.draft)throw failure(report.reply);
+   const draft=report?.draft??reportDraft(history,now());
    if(!draft)throw failure('尚未開始工單回報。');
    if(draft.cancelled)throw failure('本次工單回報已取消。');
-   if(callDecision(history,now()).tool!=='add_work_order')throw failure('尚未收到單次追問後的回覆。');
+   if(!report&&callDecision(history,now()).tool!=='add_work_order')throw failure('尚未收到單次追問後的回覆。');
    const rawKey=JSON.stringify([sessionId,history.slice(0,draft.start).filter(isReport).length,draft.turns[0]]);
    const report_key=createHash('sha256').update(rawKey).digest('hex');
    const legacy=(await list()).find(r=>r.reportKey===rawKey||r.reportKeys?.includes(rawKey));
    const order_id=legacy?.id??`GV-${report_key.slice(0,12).toUpperCase()}`;
    const lastTest=[...draft.turns].reverse().find(t=>/測試|测试|試機|起機/.test(t));
-   const test_result=lastTest&&confirmsStartup(lastTest)?'正常':lastTest&&/不正常|異常|异常|失敗|失败/.test(lastTest)?'異常':'';
+   const test_result=report?.testResult??(lastTest&&confirmsStartup(lastTest)?'正常':lastTest&&/不正常|異常|异常|失敗|失败/.test(lastTest)?'異常':'');
+   const reference=report?(report.order||report.equipment):draft.fields.工單編號;
+   const notes=draft.turns.filter(t=>/備註|备注/.test(t)).join('\n');
+   const maintenance=draft.fields.維修項目||(report||/維修|更換|保養|修理/.test(draft.details)?draft.details:'');
    return {
-    order_id,report_key,session_id:sessionId,dispatch_date:draft.date||'',reference_number:draft.fields.工單編號||'',
-    title:draft.fields.工單名稱||'',equipment_number:draft.fields.設備編號||'',maintenance_items:draft.fields.維修項目||(/維修|更換|保養|修理/.test(draft.details)?draft.details:''),
-    quantity:draft.fields.數量||'',fan_quantity:draft.fanQuantity||'',notes:draft.turns.filter(t=>/備註|备注/.test(t)).join('\n'),test_result,
+    order_id,report_key,session_id:sessionId,dispatch_date:draft.date||'',reference_number:reference||'',
+    title:draft.fields.工單名稱||'',equipment_number:(report?report.equipment:draft.fields.設備編號)||'',maintenance_items:maintenance,
+    quantity:draft.fields.數量||'',fan_quantity:draft.fanQuantity||'',notes,test_result,
     transcripts:JSON.stringify(draft.turns),
-    results:JSON.stringify({transcripts:draft.turns,fields:{派工單號:draft.fields.工單編號||order_id,派工日期:(draft.date||'').replaceAll('-','/'),維修內容:draft.fields.維修項目||'',FAN數量:draft.fanQuantity?Number(draft.fanQuantity):'',備註:draft.turns.filter(t=>/備註|备注/.test(t)).join('\n'),起機測試:test_result,...(draft.fanItems.length>1?{FAN明細:draft.fanItems}:{})}}),
+    results:JSON.stringify({
+     transcripts:draft.turns,
+     ...(report?{scenario:scenarioReport.number,dialogue:report_messages}:{}),
+     fields:{派工單號:reference||order_id,派工日期:(draft.date||'').replaceAll('-','/'),維修內容:report?maintenance:draft.fields.維修項目||'',
+      FAN數量:draft.fanQuantity?Number(draft.fanQuantity):'',備註:notes,起機測試:test_result,
+      ...(draft.fanItems.length>1?{FAN明細:draft.fanItems}:{}),...report?.details},
+    }),
    };
   }
  };

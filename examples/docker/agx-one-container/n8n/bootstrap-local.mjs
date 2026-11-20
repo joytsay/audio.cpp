@@ -144,6 +144,42 @@ export function resultWorkflowMigration(existing,template){
 // retrieval tuning, and replace the bundled behavior/layout/tool set together.
 export function mergedWorkflowMigration(existing, rag, template) {
   if (!existing || existing.meta?.ivrWorkflowRevision>=(template.meta?.ivrWorkflowRevision??12)) return null;
+  if ([19,20,21].includes(existing.meta?.ivrWorkflowRevision) && template.meta?.ivrWorkflowRevision===22) {
+    const next=structuredClone(existing);
+    const changes={
+      'prepare-scenario-upload':'jsCode',
+      'prepare-ivr-input':'jsCode',
+      'register-ivr-turn':'jsonBody',
+      'ivr-return-fixed-reply':'jsCode',
+      'prepare-ivr-output':'jsCode',
+      'ivr-route-scenario-result':'conditions',
+      'load-knowledge-files':'jsonBody',
+    };
+    for(const [id,key] of Object.entries(changes)){
+      if(id==='prepare-scenario-upload'&&existing.meta.ivrWorkflowRevision>=20)continue;
+      const node=next.nodes.find(candidate=>candidate.id===id);
+      const source=template.nodes.find(candidate=>candidate.id===id);
+      if(node&&source)node.parameters[key]=structuredClone(source.parameters[key]);
+    }
+    const webhook=template.nodes.find(node=>node.id==='scenario-report-input');
+    if(!next.nodes.some(node=>node.id===webhook.id))next.nodes.push(structuredClone(webhook));
+    next.connections[webhook.name]=structuredClone(template.connections[webhook.name]);
+    const replaced=['prepare-guidance','retrieve-guidance','return-guidance','index-scenario-qa','workflow-group-3'];
+    const obsolete=['seed-simple-vector-store','default-document-loader','recursive-text-splitter','local-embeddings'];
+    const removedNames=next.nodes.filter(node=>obsolete.includes(node.id)).map(node=>node.name);
+    next.nodes=next.nodes.filter(node=>![...replaced,...obsolete].includes(node.id));
+    next.nodes.push(...template.nodes.filter(node=>replaced.includes(node.id)).map(node=>structuredClone(node)));
+    for(const name of removedNames)delete next.connections[name];
+    for(const id of replaced){
+      const name=template.nodes.find(node=>node.id===id).name;
+      if(template.connections[name])next.connections[name]=structuredClone(template.connections[name]);
+    }
+    for(const value of Object.values(next.connections))for(const groups of Object.values(value)){
+      for(const edges of groups)for(let index=edges.length-1;index>=0;index--)if(removedNames.includes(edges[index].node))edges.splice(index,1);
+    }
+    next.meta.ivrWorkflowRevision=22;
+    return next;
+  }
   const next={...structuredClone(existing),...structuredClone(template),id:existing.id,active:existing.active};
   next.meta={...existing.meta,...template.meta};
   next.settings={...existing.settings,...template.settings};
@@ -161,7 +197,7 @@ export function mergedWorkflowMigration(existing, rag, template) {
     if(old.credentials)node.credentials=structuredClone(old.credentials);
     if(node.name==='Local Embeddings')node.parameters=structuredClone(old.parameters);
     if(node.name==='Local Chat Model')node.parameters.options={...old.parameters.options,...node.parameters.options};
-    if(node.name==='Retrieve guidance'){
+    if(node.name==='Retrieve guidance'&&old.type===node.type){
       node.parameters.topK=old.parameters.topK??node.parameters.topK;
       node.parameters.options={...old.parameters.options};
     }

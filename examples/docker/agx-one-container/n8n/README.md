@@ -42,7 +42,7 @@ Both tools invoke **RAG tool input → Prepare tool request → Ensure work_orde
 
 Latest/oldest/all queries use fresh facts on every turn. Month-only follow-ups inherit the query, “this month” uses Asia/Taipei time, and month filtering happens before date ranking. Unambiguous spreadsheet dates such as `202611/06` normalize to `2026-11-06` for sorting with the original value retained. Replies are one line and do not ask for lookup details or confirmation. Missing dates are not fabricated for ranking.
 
-The knowledge store starts empty. Upload your own DOCX, XLSX, CSV, PDF, TXT or Markdown through **Add New Scenario**. Uploaded source text and Q/A stay attributed; spreadsheet rows preserve their source values. Each Q/A pair stays together in embedding input. Per-execution vector-store keys keep simultaneous queries separate. `prompt.csv` remains the system prompt and is not indexed as work-order facts.
+The knowledge store starts empty. Upload your own DOCX, XLSX, CSV, PDF, TXT or Markdown through **Add New Scenario**. Uploaded source text and Q/A stay attributed; spreadsheet rows preserve their source values. The C++ multimodal worker reuses content-addressed vectors and ranks only the current corpus. `prompt.csv` remains the system prompt and is not indexed as work-order facts.
 
 ## Browser, SIP and deployment
 
@@ -50,9 +50,9 @@ Browser and SIP turns use `POST /webhook/ivr-agent` (browser proxy `/n8n/webhook
 
 The Call greeting section provides an automatically saved wait-notice delay of 1–60 seconds (default 3), shared by browser and SIP. When a lookup remains pending for that duration (including model preparation), the shared client announces `查詢中，請稍後。` once while the workflow continues. Faster lookups stay silent. Browser and SIP audio play the notice before the final reply; the notice is excluded from dialogue history. Report saves do not announce a lookup. Browser and SIP transcripts use the same local Traditional Chinese and spoken-number normalization. Typed turns and scenarios can be sent during an active SIP IVR call; replies play back on the phone.
 
-This is **workflow revision 10**. On your next deployment, rebuild the knowledge service for the new modules and recreate services as you normally do. Startup backs up the installed workflow, upgrades prior revisions, and preserves embedding credentials/model and top-K tuning. Startup automatically publishes the installed **GeoVision · Workflow** at `http://127.0.0.1:5678/workflow/ivrWorkflow`. On a fresh instance, complete owner account setup once; import and publishing then continue automatically. Set `N8N_AUTO_PUBLISH_WORKFLOW=false` in `.env` to keep publishing manual. Startup publishes the current installed draft, including saved local edits, and skips unchanged published versions. Old `ivrMaintenanceMcp` installations migrate to this ID; the old workflow is unpublished to release its webhook routes and retained for recovery.
+This is **workflow revision 22**. On your next deployment, rebuild the knowledge service for the new modules and recreate services as you normally do. Startup backs up the installed workflow, upgrades prior revisions, and preserves the existing chat model settings and registered scenario tools. Startup automatically publishes the installed **GeoVision · Workflow** at `http://127.0.0.1:5678/workflow/ivrWorkflow`. On a fresh instance, complete owner account setup once; import and publishing then continue automatically. Set `N8N_AUTO_PUBLISH_WORKFLOW=false` in `.env` to keep publishing manual. Startup publishes the current installed draft, including saved local edits, and skips unchanged published versions. Old `ivrMaintenanceMcp` installations migrate to this ID; the old workflow is unpublished to release its webhook routes and retained for recovery.
 
-Local Chat Model uses **IVR local LLM**, Base URL `http://voice-ai:8082/v1`. Embeddings remain `Qwen/Qwen3-Embedding-0.6B-GGUF:Q8_0` (1024 dimensions) at `http://voice-ai:8084/v1`. Known old bundled LAN URLs are backed up and repaired; custom URLs/API keys are preserved.
+Local Chat Model uses **IVR local LLM**, Base URL `http://voice-ai:8082/v1`. Document retrieval uses the [multimodal models](../knowledge/README.md#visual-document-retrieval) configured in Compose.
 
 ## Local checks
 
@@ -77,11 +77,17 @@ VAD now waits for 2000 ms of silence by default. The demo VAD section exposes `E
 
 ## Add a scenario from documents
 
-In the demo **Scenarios** dropdown, choose **Add New Scenario**, select PDF, DOCX, XLSX, CSV, TXT or Markdown files, and press **Add scenario**. Up to eight files and 10 MiB total are accepted. Each file creates an n8n subworkflow and a tool in **Scenario MCP**. The filename stem becomes the subworkflow and table name. Excel tables append the worksheet name, such as `CSD資料庫_派工`.
+In the demo **Scenarios** dropdown, choose **Add New Scenario**, select PDF, DOCX, XLSX, CSV, TXT, Markdown, or HTML files, and press **Add scenario**. Up to eight files and 10 MiB total are accepted. Each file creates an n8n subworkflow and a tool in **Scenario MCP**. The filename stem becomes the subworkflow and table name. HTML imports keep their file extension so they can coexist with Word copies. Excel tables append the worksheet name, such as `CSD資料庫_派工`.
 
 The production webhook `/webhook/ivr-import-scenario` imports one file at a time. Generated subworkflows read the live Data Tables and return original column labels. Word question-and-answer conversations become voice templates, and recognizable tables become rows. The tool flags tables that contain OCR results. The legacy reference upload at `/webhook/ivr-add-scenario` still produces indexed Q/A.
 
-Original uploads and import metadata persist at `/data/scenarios/<id>/` in `audiocpp-knowledge-data`. Retrying the same upload resumes its import. `/webhook/ivr-scenarios` lists completed imports for the dropdown. Selecting an uploaded scenario enables the n8n dialogue source.
+Original uploads and import metadata persist at `/data/scenarios/<id>/` in `audiocpp-knowledge-data`. Retrying the same upload resumes its import. `/webhook/ivr-scenarios` lists completed imports for the dropdown. Selecting a reference upload enables the n8n dialogue source.
+
+Select an imported IVR simulation HTML and start a browser call with LLM enabled. After the saved greeting, the assistant asks for language, phone holder name, the last three digits of the employee number, the direct supervisor, and the reason for the call. It selects one of the seven supported flows from the caller's request. A generic work-order request prompts for details to distinguish maintenance from troubleshooting.
+
+Maintenance and troubleshooting reports go through `/webhook/ivr-scenario-report`. The workflow reads back caller values as supplied and acknowledges saving after the native `work_orders` upsert succeeds. The row stores the report dialogue through confirmation and the structured report fields. The shared verification prompts and answers are excluded.
+
+Dispatch and transfer are simulated. The local chat model handles those conversations. Inventory, SOP and fault-code questions retrieve evidence from the selected HTML section through the C++ multimodal RAG service. The standard n8n document route uses the same service across uploaded documents. See [visual document retrieval](../knowledge/README.md#visual-document-retrieval) for the models and upload formats.
 
 Local upload/client checks: `node webui/native/tests/knowledge-scenarios.mjs`; the isolated n8n workflow runtime check also verifies upload, indexing retry, listing and a later caller question grounded in the uploaded file.
 

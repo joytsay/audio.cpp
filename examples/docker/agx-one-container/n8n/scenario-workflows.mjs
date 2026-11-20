@@ -333,7 +333,8 @@ export function createScenarioManager({withApi=withN8nApi,knowledgeUrl='http://k
     },
     import(file){
       return enqueue(async()=>{
-        const added=await knowledge('/scenarios','POST',{files:[file],fileMode:true});
+        const {attachments,...document}=file;
+        const added=await knowledge('/scenarios','POST',{files:[document],attachments,fileMode:true});
         const record=await knowledge(importRoute(added.scenario.id));
         const state=record.resources||{tables:[]};
         const save=()=>knowledge(importRoute(record.id),'PUT',state);
@@ -369,6 +370,12 @@ export function createScenarioManager({withApi=withN8nApi,knowledgeUrl='http://k
           state.ready=true;
           return save();
         },{expiresIn:600});
+        if (process.env.IVR_RAG_INDEX_UPLOADS === 'true' && !/\.(?:csv|xlsx)$/i.test(document.name)) {
+          // Allow the first query to retry indexing if the inference workers are still warming up.
+          void knowledge('/rag/index','POST',{id:scenario.id}).catch(error=>{
+            console.error('Scenario indexing deferred:',error.message);
+          });
+        }
         return {scenario,duplicate:added.duplicate};
       });
     },

@@ -103,10 +103,14 @@ export function lookupScenario(input,tables,template,source) {
   const matching = bestName
     ? records.filter(record=>record.nameScore===bestName)
     : query||reference||lookup ? records.filter(record=>record.score>0) : records;
+  const scenarioNumber = Number(query.match(/^(?:情境|scenario)\s*(\d+)(?=$|[^\d])/i)?.[1]);
+  const exactScenario = template.find(section=>section.number===scenarioNumber);
   const ranked = template.filter(section=>section.title!=='通話開場').map(section=>{
     const title = normalize(section.title);
     const caller = normalize(section.turns.filter(turn=>turn.role==='caller').map(turn=>turn.text).join(' '));
-    const score = terms.reduce((sum,term)=>sum+(title.includes(term)?3:caller.includes(term)?1:0),0);
+    const score = exactScenario
+      ? Number(section===exactScenario)
+      : terms.reduce((sum,term)=>sum+(title.includes(term)?3:caller.includes(term)?1:0),0);
     return {section,score};
   }).sort((a,b)=>b.score-a.score);
   return {

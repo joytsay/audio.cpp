@@ -16,7 +16,7 @@ def free_port():
   return sock.getsockname()[1]
 
 port, broker_port, knowledge_port = free_port(), free_port(), free_port()
-subprocess.run(['docker', 'image', 'inspect', IMAGE, 'audio.cpp-ivr-knowledge:local'], check=True, stdout=subprocess.DEVNULL)
+subprocess.run(['docker', 'image', 'inspect', IMAGE, 'ivr-knowledge:local'], check=True, stdout=subprocess.DEVNULL)
 subprocess.run(['docker', 'run', '--pull=never', '--rm', '-d', '--name', CONTAINER,
  '--network', 'host', '-v', str(ROOT/'examples/docker/agx-one-container/knowledge')+':/knowledge:ro', '-e', 'N8N_LISTEN_ADDRESS=127.0.0.1',
  '-e', f'N8N_PORT={port}', '-e', f'N8N_RUNNERS_BROKER_PORT={broker_port}',
@@ -26,7 +26,7 @@ knowledge_url=f'http://127.0.0.1:{knowledge_port}'
 knowledge_code="import{createKnowledgeServer,createKnowledgeStore}from './server.mjs';import{createWorkOrderStore}from './work-orders.mjs';const orders=createWorkOrderStore({root:'/tmp/ivr-workflow-orders',now:()=>new Date('2026-11-12T04:00:00Z')});createKnowledgeServer(createKnowledgeStore({root:'/workspace',orders,pdf:async()=>({text:'Synthetic OCR excerpt; verify source handwriting.',extraction:'ocr'})})).listen("+str(knowledge_port)+",'127.0.0.1');"
 subprocess.run(['docker','run','--pull=never','--rm','-d','--name',KNOWLEDGE_CONTAINER,'--network','host',
  '-v',str(ROOT)+':/workspace:ro','-v',str(ROOT/'examples/docker/agx-one-container/knowledge')+':/app/code:ro',
- '-w','/app/code','audio.cpp-ivr-knowledge:local','node','--input-type=module','-e',knowledge_code],check=True,stdout=subprocess.DEVNULL)
+ '-w','/app/code','ivr-knowledge:local','node','--input-type=module','-e',knowledge_code],check=True,stdout=subprocess.DEVNULL)
 
 def knowledge_api(path,body=None):
  from urllib.parse import quote
@@ -74,6 +74,38 @@ def api(path,body=None,method=None):
   with opener.open(req,timeout=100) as r:
    raw=r.read().decode();return json.loads(raw) if raw else None
  except urllib.error.HTTPError as e:raise RuntimeError(str(e.code)+' '+e.read().decode())
+def check_scenario_report(table):
+  scenario_turns=[
+   '我要回報工單，2026年11月20日上午9:21美光MTB-QWE查修。',
+   'C1-VFD-12CC04 查修變頻器PF753過載361A',
+   'Fault Code：010，過載時電流60.10HZ、284rmp',
+   '480V、60HZ、185KW、265A、1786rpm',
+   '正確',
+  ]
+  scenario_session='html-scenario-3'
+  report_payload={'sessionId':scenario_session,'model':'fixture-model','scenarioReport':{'number':3,'language':'zh'}}
+  rows_path='/api/v1/data-tables/'+table['id']+'/rows'
+  report_history=[]
+  inference_before_report=(len(calls),len(embedding))
+  for index,text in enumerate(scenario_turns):
+   result=api('/webhook/ivr-scenario-report',{**report_payload,'text':text,'messages':report_history})
+   assert result['scenario_report']
+   if index<4:
+    assert result['tools']==[] and 'work_order_id' not in result
+    report_history.extend([{'role':'user','content':text},{'role':'assistant','content':result['reply']}])
+   if index==2:assert '361A、60.10HZ、284rmp' in result['reply']
+   if index==3:
+    assert '電流 265A' in result['reply'] and '以上是否正確' in result['reply']
+    assert not any(row['session_id']==scenario_session for row in api(rows_path)['data'])
+  saved_report=api('/webhook/ivr-scenario-report',{**report_payload,'text':scenario_turns[-1],'messages':report_history})
+  assert result['work_order_id']==saved_report['work_order_id'] and result['tools']==['add_work_order']
+  scenario_rows=[row for row in api(rows_path)['data'] if row['session_id']==scenario_session]
+  assert len(scenario_rows)==1 and scenario_rows[0]['equipment_number']=='C1-VFD-12CC04'
+  scenario_fields=json.loads(scenario_rows[0]['results'])['fields']
+  assert scenario_fields['故障碼']=='010' and scenario_fields['馬達銘牌']['轉速']=='1786rpm'
+  assert (len(calls),len(embedding))==inference_before_report
+  print('PASS HTML troubleshooting confirmation, exact readings, native Data Table write, and idempotent retry without inference')
+
 if __name__=='__main__':
  try:
   for attempt in range(120):
@@ -162,6 +194,9 @@ if __name__=='__main__':
   assert json.loads(repaired['results'])['fields']['派工單號']=='A12345'
   renamed=api('/api/v1/data-tables/'+oldTable['id']+'/columns')
   assert 'reference_number' in [c['name'] for c in renamed]
+  if os.environ.get('N8N_SCENARIO_REPORT_ONLY')=='1':
+   check_scenario_report(oldTable)
+   raise SystemExit(0)
   utterances=['我增加工单。','二零二六年十一月十二号，名称是台积电，工单名称，呃设备编号是一二三四，维修项目五六七八，数量八个。','测试正常。']
   before_intake=(len(calls),len(embedding));intake_started=time.monotonic()
   initial=turn('report-call',utterances[0],None)
@@ -255,6 +290,7 @@ if __name__=='__main__':
   removedAnswer=turn('deleted-scenario-call','LAB-ZETA 包材何時回收？')
   assert '7654' not in removedAnswer['reply'] and '沒有查到' in removedAnswer['reply']
   print('PASS native n8n removal webhook: persisted list, source documents and fresh RAG retrieval exclude deleted scenario; retries are safe')
+  check_scenario_report(table)
   print('PASS workflow ID migration and isolated n8n with real knowledge service: split spoken-number report, one follow-up question then native Data Table upsert even with missing fields, table-backed retrieval and enrichment despite model refusing tools, persisted record/retry, simplified Chinese lookups, month filtering/date follow-ups, direct one-line answers and isolated call memory (synthetic LLM/embeddings/PDF OCR).')
 
  except Exception:

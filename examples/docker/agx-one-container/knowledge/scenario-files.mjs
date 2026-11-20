@@ -1,4 +1,5 @@
 import path from 'node:path';
+import {parseDocument} from 'htmlparser2';
 
 export function uniqueHeaders(labels) {
   const used = new Set();
@@ -12,7 +13,37 @@ export function uniqueHeaders(labels) {
 }
 
 export function scenarioFileName(filename) {
-  return path.parse(filename).name.trim();
+  return (/\.html?$/i.test(filename) ? path.basename(filename) : path.parse(filename).name).trim();
+}
+
+export function htmlScenarioText(html, images) {
+  const lines = [];
+  const parts = [];
+  const flush = () => {
+    const line = parts.join('').replace(/\s+/g, ' ').trim();
+    if (line) lines.push(line);
+    parts.length = 0;
+  };
+  const blocks = /^(?:address|article|blockquote|br|dd|div|dl|dt|h[1-6]|hr|li|main|ol|p|pre|section|table|td|th|tr|ul)$/;
+  const ignored = /^(?:head|script|style|template|noscript|iframe|svg|canvas)$/;
+  const nodes = [...parseDocument(html).children].reverse();
+  let section = '';
+  while (nodes.length) {
+    const node = nodes.pop();
+    if (!node) { flush(); continue; }
+    if (node.type === 'text') { parts.push(node.data); continue; }
+    if (!node.children || ignored.test(node.name) || Object.hasOwn(node.attribs ?? {}, 'hidden')) continue;
+    if (node.name === 'img' && images && node.attribs.src) {
+      flush();
+      section = lines.findLast(line => /^(?:情境|scenario)\s*\d+/i.test(line)) ?? section;
+      images.push({src:node.attribs.src, text:(node.attribs.alt || node.attribs.name || '').slice(0,200), section});
+    }
+    const block = blocks.test(node.name);
+    if (block) { flush(); nodes.push(null); }
+    for (let index = node.children.length - 1; index >= 0; index--) nodes.push(node.children[index]);
+  }
+  flush();
+  return lines.join('\n');
 }
 
 export function scenarioExamples(name, dataset, documents) {
@@ -61,9 +92,9 @@ export function dialogueTemplate(text) {
   const sections = [{title:'通話開場', turns:[]}];
   let turn;
   for (const line of text.split(/\r?\n/).map(line => line.trim()).filter(Boolean)) {
-    const heading = /^(?:情境|Scenario)\s*\d+\s*[:：.、-]?\s*(.+)/i.exec(line);
+    const heading = /^(?:情境|Scenario)\s*(\d+)\s*[:：.、-]?\s*(.+)/i.exec(line);
     if (heading) {
-      sections.push({title:heading[1], turns:[]});
+      sections.push({number:Number(heading[1]), title:heading[2], turns:[]});
       turn = undefined;
       continue;
     }
@@ -84,9 +115,11 @@ export function dialogueTemplate(text) {
 export function fileDataset(filename, sources) {
   const name = scenarioFileName(filename);
   const workbook = /\.xlsx$/i.test(filename);
+  const html = /\.html?$/i.test(filename);
   const grouped = new Map();
   if (!workbook) grouped.set('', {headers:new Set(), records:[]});
-  const template = dialogueTemplate(sources.filter(source => !source.fields && !source.sheet && !source.image).map(source => source.text).join('\n'));
+  const dialogue = dialogueTemplate(sources.filter(source => !source.fields && !source.sheet && !source.image).map(source => source.text).join('\n'));
+  const template = html && !dialogue.some(section => section.number) ? [] : dialogue;
   for (const source of sources) {
     const sheet = workbook ? source.sheet : '';
     if (!grouped.has(sheet)) grouped.set(sheet, {headers:new Set(), records:[]});
@@ -101,7 +134,7 @@ export function fileDataset(filename, sources) {
       }
     }
   }
-  const tables=[...grouped].map(([sheet,{headers,records}])=>({
+  const tables=[...grouped].filter(([, {headers}]) => !html || headers.size).map(([sheet,{headers,records}])=>({
     name:workbook?`${name}_${sheet}`:name,
     sheet,headers:[...headers],records,
   }));

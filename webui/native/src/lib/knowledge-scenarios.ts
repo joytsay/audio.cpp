@@ -4,9 +4,11 @@ export type KnowledgeScenario = {
   createdAt: string;
   qaCount: number;
   tool?: string;
+  simulation?: boolean;
   examples?: string[];
   tables?: {name: string; sheet: string; rowCount: number}[];
   files: {name: string; size: number; sha256: string}[];
+  attachments?: {name: string; size: number; sha256: string}[];
 };
 export type ScenarioUploadResult = {scenario: KnowledgeScenario; duplicate: boolean; indexed: boolean; index_error?: string};
 
@@ -33,9 +35,10 @@ export async function addKnowledgeScenario(name: string, files: File[], signal: 
   return result;
 }
 
-async function encodeScenarioFiles(files: File[],signal: AbortSignal) {
+const companionImage = /\.(?:png|jpe?g|gif|webp)$/i;
+async function encodeScenarioFiles(files: File[],signal: AbortSignal,allowImages = false) {
   if(!files.length||files.length>8)throw new Error('Choose 1–8 files.');
-  if(files.some(file=>!file.size||!/\.(pdf|docx|xlsx|csv|txt|md)$/i.test(file.name)))throw new Error('Choose PDF, DOCX, XLSX, CSV, TXT or Markdown files.');
+  if(files.some(file=>!file.size||(!/\.(pdf|docx|xlsx|csv|txt|md|html?)$/i.test(file.name)&&!(allowImages&&companionImage.test(file.name)))))throw new Error('Choose PDF, DOCX, XLSX, CSV, TXT, Markdown or HTML files.');
   if(files.reduce((sum,file)=>sum+file.size,0)>10*1024*1024)throw new Error('Files must total 10 MiB or less.');
   const encoded=[];
   for(const file of files){
@@ -49,13 +52,38 @@ async function encodeScenarioFiles(files: File[],signal: AbortSignal) {
 }
 
 export async function importScenarioFiles(files: File[],signal: AbortSignal,onImport: (scenario: KnowledgeScenario)=>void) {
-  for(const file of await encodeScenarioFiles(files,signal)){
+  const encoded=await encodeScenarioFiles(files,signal,true);
+  const attachments=encoded.filter(file=>companionImage.test(file.name));
+  const documents=encoded.filter(file=>!companionImage.test(file.name));
+  const html=documents.filter(file=>/\.html?$/i.test(file.name));
+  if(attachments.length&&html.length!==1)throw new Error('Select exactly one HTML document when attaching companion images.');
+  for(const file of documents){
+    const input=attachments.length&&file===html[0]?{...file,attachments}:file;
     const {scenario}=await request<{scenario: KnowledgeScenario}>('/n8n/webhook/ivr-import-scenario',{
-      method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(file),signal,
+      method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(input),signal,
     });
-    if(!scenario?.id||!scenario.tool||!scenario.tables?.length)throw new Error(`Import did not complete for ${file.name}.`);
+    if(!scenario?.id||!scenario.tool||!Array.isArray(scenario.tables))throw new Error(`Import did not complete for ${file.name}.`);
     onImport(scenario);
   }
+}
+
+export type SimulationScenario = {number: number; title: string; steps: string; retrieval?: boolean};
+
+export async function matchSimulation(id: string,text: string,signal: AbortSignal) {
+  const result = await request<{scenario: SimulationScenario | null}>('/ivr-simulation', {
+    method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id,text}),signal,
+  });
+  return result.scenario;
+}
+
+export async function answerSimulationRag(
+  id: string, number: number, language: "zh" | "en", text: string, previous: string, signal: AbortSignal,
+) {
+  const result = await request<{answer: string}>('/ivr-simulation',{
+    method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id,number,language,text,previous}),signal,
+  });
+  if(typeof result.answer!=='string'||!result.answer.trim())throw new Error('Multimodal RAG returned no answer.');
+  return result.answer.trim();
 }
 
 export async function removeKnowledgeScenario(id: string): Promise<void> {

@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onMount, onDestroy, tick } from "svelte";
   import { n8nDialogue, type DialogueSource } from "$lib/n8n-dialogue";
-  import {importScenarioFiles,listKnowledgeScenarios,removeKnowledgeScenario,type KnowledgeScenario} from "$lib/knowledge-scenarios";
+  import {answerSimulationRag,importScenarioFiles,listKnowledgeScenarios,matchSimulation,removeKnowledgeScenario,type KnowledgeScenario} from "$lib/knowledge-scenarios";
+  import {advanceSimulationOpening,createSimulation,languagePrompt,simulationClarification,simulationPrompt} from "$lib/scenario-simulation";
   import SipSidebar from "$lib/SipSidebar.svelte";
   import type { SipSettings, SipLive } from "$lib/sip";
   import PanelDivider from "$lib/PanelDivider.svelte";
@@ -487,6 +488,7 @@
   let knowledgeScenarios: KnowledgeScenario[] = [];
   let newScenarioFiles: File[] = [], knowledgeUploading = false, knowledgeDeleting = false, knowledgeStatus = "";
   let knowledgeAborter: AbortController | null = null;
+  let simulation: ReturnType<typeof createSimulation> | null = null;
   $: selectedKnowledgeScenario = knowledgeScenarios.find(scenario => scenarioMode === `scenario:${scenario.id}`);
   async function refreshKnowledgeScenarios() {
     try { knowledgeScenarios = await listKnowledgeScenarios(); }
@@ -526,8 +528,10 @@
       if(!scenario)return;
       knowledgeStatus = `Imported ${imported.length} ${imported.length===1?"file":"files"} into Scenario MCP.`;
       scenarioMode = `scenario:${scenario.id}`;
-      dialogueSource = "n8n";
-      await saveCallOption({dialogue_source:"n8n"});
+      if (!scenario.simulation) {
+        dialogueSource = "n8n";
+        await saveCallOption({dialogue_source:"n8n"});
+      }
       newScenarioFiles = [];
     } catch (cause) {
       if (!knowledgeAborter.signal.aborted) knowledgeStatus = cause instanceof Error ? cause.message : String(cause);
@@ -562,7 +566,10 @@
     if (scenarioUploadInput) scenarioUploadInput.value = "";
     scenarioStatus = "";
     if (scenarioMode === "add-scenario") void refreshKnowledgeScenarios();
-    if (scenarioMode.startsWith("scenario:")) { dialogueSource = "n8n"; void saveCallOption({dialogue_source:"n8n"}); }
+    if (knowledgeScenarios.some(scenario => scenarioMode === `scenario:${scenario.id}` && !scenario.simulation)) {
+      dialogueSource = "n8n";
+      void saveCallOption({dialogue_source:"n8n"});
+    }
   }
   let events: Event[] = [],
     messages: DemoMessage[] = [];
@@ -1406,7 +1413,58 @@
       else messages = [...messages, { role: "user", content: text }];
       record("CONVERSATION_ITEM_ADDED", `USER · ${text}`);
       let reply = text;
-      if (useLlm && dialogueSource === "n8n") {
+      if (simulation) {
+        const active = simulation;
+        const openingReply = advanceSimulationOpening(active, text);
+        if (openingReply !== null) {
+          reply = openingReply;
+          if (active.step === 4) active.startIndex = messages.length + 1;
+        } else {
+          status = "Thinking";
+          record("AGENT_STATE_CHANGED", "listening → thinking");
+          operationStarted = performance.now();
+          const scenario = active.scenario || await matchSimulation(active.id, text, signal);
+          if (generation !== epoch || signal.aborted) return;
+          if (active.workOrderId) {
+            reply = active.language === "en" ? `Work order ${active.workOrderId} is saved.` : `工單 ${active.workOrderId} 已儲存。`;
+          } else if (scenario?.number === 2 || scenario?.number === 3) {
+            active.scenario = scenario;
+            reply = await n8nDialogue({
+              sessionId: active.sessionId,
+              text,
+              model: llm,
+              scenarioReport: {number: scenario.number, language: active.language},
+              messages: messages.slice(active.startIndex)
+                .filter(message => !message.progressNotice && message.content.trim())
+                .map(({role, content}) => ({role, content})),
+            }, signal, {
+              onWorkflow: state => record(`N8N_WORKFLOW_${state.toUpperCase()}`, "GeoVision · Workflow"),
+              onTool: (name, state) => record(`MCP_TOOL_${state.toUpperCase()}`, name),
+              onWorkOrderSaved: id => { active.workOrderId = id; },
+            });
+            if (generation !== epoch || signal.aborted) return;
+          } else if (scenario?.retrieval) {
+            active.scenario = scenario;
+            const previous = messages.slice(active.startIndex, -1)
+              .findLast(message => message.role === "user")?.content.slice(0, 1000) || "";
+            reply = await answerSimulationRag(active.id, scenario.number, active.language, text, previous, signal);
+            if (generation !== epoch || signal.aborted) return;
+            record("RAG_COMPLETED", scenario.title, performance.now() - operationStarted);
+          } else if (scenario) {
+            const response = await completeLocalTurn(
+              simulationPrompt(active, scenario),
+              messages.slice(active.startIndex),
+              signal,
+              { max_tokens: 512, temperature: 0.2 },
+            );
+            if (generation !== epoch || signal.aborted) return;
+            reply = chatText(response).trim();
+            if (!reply) throw new Error("The language model returned an empty reply.");
+            active.scenario = scenario;
+            record("LLM_COMPLETED", llm, performance.now() - operationStarted, reportedRtf(response));
+          } else reply = simulationClarification(active);
+        }
+      } else if (useLlm && dialogueSource === "n8n") {
         status = "Thinking · n8n";
         record("AGENT_STATE_CHANGED", "listening → thinking");
         operationStarted = performance.now();
@@ -1455,40 +1513,7 @@
         status = "Thinking";
         record("AGENT_STATE_CHANGED", "listening → thinking");
         operationStarted = performance.now();
-        const readyLlm = await ensureDemoLlmReady(
-          llmBase(),
-          llm,
-          signal,
-          (message) => {
-            status = message;
-          },
-        );
-        if (generation !== epoch || signal.aborted) return;
-        llm = readyLlm;
-        status = "Thinking";
-        const response = await endpointJson<any>(
-          llmBase(),
-          "chat/completions?autoload=true",
-          {
-            method: "POST",
-            body: JSON.stringify({
-              model: llm,
-              messages: [
-                {
-                  role: "system",
-                  content: prompt,
-                },
-                ...messages
-                  .filter((message) => !message.progressNotice && message.content.trim())
-                  .map(({ role, content }) => ({ role, content })),
-              ],
-              max_tokens: 256,
-              temperature: 0.4,
-              stream: false,
-            }),
-          },
-          signal,
-        );
+        const response = await completeLocalTurn(prompt, messages, signal);
         reply = chatText(response).trim();
         if (!reply)
           throw new Error("The language model returned an empty reply.");
@@ -1509,47 +1534,12 @@
         );
         return;
       }
-      reply = normalizeTranscript(reply, hotwords);
+      if (!simulation) reply = normalizeTranscript(reply, hotwords);
       messages = [...messages, { role: "assistant", content: reply }];
       record("CONVERSATION_ITEM_ADDED", `ASSISTANT · ${reply}`);
-      if (useTts) {
-        operationStarted = performance.now();
-        const ttsId = await load(ttsKey, signal, true, ttsRunMode);
-        status = "Synthesizing";
-        const body: Record<string, unknown> = {
-          model: ttsId,
-          input:
-            reply,
-          response_format: "wav",
-        };
-        if (referencePath && supportsReference) {
-          body.voice_ref = referencePath;
-          body.reference_text = referenceText;
-        } else {
-          body.voice = voice;
-        }
-        let playbackMs: number | null;
-        if (streamingTts)
-          playbackMs = (await streamTts(body, generation, signal)).playbackMs;
-        else {
-          const synthesis = await synthesizeSpeech(body, signal);
-          if (generation !== epoch) return;
-          record(
-            "TTS_COMPLETED",
-            selectedTts?.label || "Speech synthesized",
-            performance.now() - operationStarted,
-            synthesis.rtf,
-          );
-          playbackMs = await playAudio(
-            synthesis.audio,
-            generation,
-            "assistant",
-            signal,
-          );
-        }
-        if (generation !== epoch || signal.aborted) return;
-        record("PLAYBACK_COMPLETED", "Assistant reply played", playbackMs);
-      } else record("TTS_SKIPPED", "Text response only");
+      operationStarted = performance.now();
+      await speakReply(reply, generation, signal);
+      if (generation !== epoch || signal.aborted) return;
       record(
         "TURN_COMPLETED",
         audio ? "Voice turn complete" : "Text turn complete",
@@ -1565,6 +1555,48 @@
         if (!error) status = idleStatus();
       }
     }
+  }
+  async function completeLocalTurn(
+    system: string,
+    history: typeof messages,
+    signal: AbortSignal,
+    generationOptions = { max_tokens: 256, temperature: 0.4 },
+  ) {
+    const ready = await ensureDemoLlmReady(llmBase(), llm, signal, (message) => { status = message; });
+    signal.throwIfAborted();
+    llm = ready;
+    status = "Thinking";
+    return endpointJson<any>(llmBase(), "chat/completions?autoload=true", {
+      method: "POST",
+      body: JSON.stringify({
+        model: ready,
+        messages: [{ role: "system", content: system }, ...history
+          .filter(message => !message.progressNotice && message.content.trim())
+          .map(({ role, content }) => ({ role, content }))],
+        ...generationOptions,
+        stream: false,
+      }),
+    }, signal);
+  }
+  async function speakReply(reply: string, generation: number, signal: AbortSignal) {
+    if (!useTts) { record("TTS_SKIPPED", "Text response only"); return; }
+    const started = performance.now();
+    const id = await load(ttsKey, signal, true, ttsRunMode);
+    status = "Synthesizing";
+    const body: Record<string, unknown> = { model: id, input: reply, response_format: "wav" };
+    if (referencePath && supportsReference) {
+      body.voice_ref = referencePath;
+      body.reference_text = referenceText;
+    } else body.voice = voice;
+    let playbackMs: number | null;
+    if (streamingTts) playbackMs = (await streamTts(body, generation, signal)).playbackMs;
+    else {
+      const synthesis = await synthesizeSpeech(body, signal);
+      if (generation !== epoch || signal.aborted) return;
+      record("TTS_COMPLETED", selectedTts?.label || "Speech synthesized", performance.now() - started, synthesis.rtf);
+      playbackMs = await playAudio(synthesis.audio, generation, "assistant", signal);
+    }
+    if (generation === epoch && !signal.aborted) record("PLAYBACK_COMPLETED", "Assistant reply played", playbackMs);
   }
   async function loadCsvFiles() {
     try {
@@ -2206,6 +2238,8 @@
     run = new Date().toLocaleTimeString();
     releaseChatAudio();
     messages = [];
+    simulation = useLlm && selectedKnowledgeScenario?.simulation
+      ? createSimulation(selectedKnowledgeScenario.id) : null;
     controller = new AbortController();
     try {
       if (useAsr && (!window.isSecureContext || !navigator.mediaDevices))
@@ -2259,7 +2293,7 @@
           ? "Microphone connected · echo cancellation enabled"
           : "Text input · ASR skipped",
       );
-      busy = useTts && !!greeting.trim();
+      busy = !!simulation || (useTts && !!greeting.trim());
       if (processor)
         processor.onaudioprocess = (e) => {
           const samples = new Float32Array(e.inputBuffer.getChannelData(0));
@@ -2375,9 +2409,16 @@
         }
         if (generation !== epoch) return;
         record("GREETING_PLAYED", greeting, playbackMs);
-        busy = false;
-        status = idleStatus();
       }
+      if (simulation) {
+        if (!useTts && greeting.trim()) messages = [{ role: "assistant", content: greeting }];
+        messages = [...messages, { role: "assistant", content: languagePrompt }];
+        record("CONVERSATION_ITEM_ADDED", `ASSISTANT · ${languagePrompt}`);
+        await speakReply(languagePrompt, generation, controller.signal);
+        if (generation !== epoch) return;
+      }
+      busy = false;
+      status = idleStatus();
     } catch (cause) {
       if (generation === epoch) {
         fail(cause);
@@ -2388,6 +2429,7 @@
     }
   }
   function hangup(log = true) {
+    simulation = null;
     scenarioToken++;
     scenarioRunning = false;
     scenarioPreviewPlayer?.pause();
@@ -3363,7 +3405,7 @@
             ><select
               aria-label="Scenario"
               bind:value={scenarioMode}
-              disabled={scenarioRunning || knowledgeUploading || knowledgeDeleting}
+              disabled={scenarioRunning || knowledgeUploading || knowledgeDeleting || !!simulation}
               on:change={changeScenario}
               >
               <option value="audio">Audio input</option>
@@ -3373,10 +3415,11 @@
           >
           {#if scenarioMode === "add-scenario"}
             <label class="audio-choice">Choose documents<input
-              class="audio-file-input" aria-label="Scenario documents" type="file" multiple accept=".pdf,.docx,.xlsx,.csv,.txt,.md"
+              class="audio-file-input" aria-label="Scenario documents" type="file" multiple accept=".pdf,.docx,.xlsx,.csv,.txt,.md,.html,.htm,.png,.jpg,.jpeg,.gif,.webp"
               disabled={knowledgeUploading} on:change={(event) => chooseKnowledgeFiles(event.currentTarget.files)}
             /></label>
-            <small>PDF, DOCX, XLSX, CSV, TXT, Markdown · up to 8 files, 10 MiB total</small>
+            <small>PDF, DOCX, XLSX, CSV, TXT, Markdown, HTML · up to 8 files, 10 MiB total</small>
+            <small>Select HTML and its companion images together.</small>
             {#each newScenarioFiles as file}<p>{file.name} · {Math.ceil(file.size / 1024)} KB</p>{/each}
             <button disabled={knowledgeUploading || !newScenarioFiles.length} on:click={uploadKnowledgeScenario}>
               {knowledgeUploading ? "Adding scenario…" : "Add scenario"}
@@ -3384,7 +3427,11 @@
             <p role="status">{knowledgeStatus}</p>
           {:else if selectedKnowledgeScenario}
             <p><strong>{selectedKnowledgeScenario.name}</strong>{selectedKnowledgeScenario.tool ? " · Scenario MCP" : ` · ${selectedKnowledgeScenario.qaCount} Q/A pairs`}</p>
+            {#if selectedKnowledgeScenario.simulation}
+              <small>Start a browser call with LLM enabled to run the scenario simulation.</small>
+            {/if}
             {#each selectedKnowledgeScenario.files as file}<p>{file.name}</p>{/each}
+            {#each selectedKnowledgeScenario.attachments ?? [] as file}<p>{file.name}</p>{/each}
             {#each selectedKnowledgeScenario.tables ?? [] as table}<p>{table.name} · {table.rowCount} rows</p>{/each}
             {#if selectedKnowledgeScenario.examples?.length}
               <div class="scenario-examples" role="group" aria-labelledby="scenario-examples-title">
@@ -3399,7 +3446,7 @@
             {:else}
               <small>Speak or type a question during a call.</small>
             {/if}
-            <button title="Remove this scenario and its imported data" disabled={knowledgeDeleting || knowledgeUploading} on:click={removeSelectedKnowledgeScenario}><Trash2 size={14} /> {knowledgeDeleting ? "Removing scenario…" : "Remove scenario"}</button>
+            <button title="Remove this scenario and its imported data" disabled={knowledgeDeleting || knowledgeUploading || !!simulation} on:click={removeSelectedKnowledgeScenario}><Trash2 size={14} /> {knowledgeDeleting ? "Removing scenario…" : "Remove scenario"}</button>
             <p role="status">{knowledgeStatus}</p>
           {:else if isAudioScenario}
             <div class="scenario-upload">

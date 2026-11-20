@@ -26,3 +26,15 @@ uploaded. Poppler/Tesseract provide local Chinese/English PDF extraction.
 No Python or external generation API is needed.
 
 Run `npm ci --ignore-scripts && TEST_HTTP=1 npm test`. Unit checks use generated temporary fixtures and legacy data. Native persistence and UI-visible table rows are checked by `webui/native/tests/n8n-workflow-runtime.py` in isolated containers.
+
+## Visual document retrieval
+
+The GeoVision document route uses the [multimodal RAG notebook's procedure](https://github.com/debnsuma/fcc-ai-engineering-aws/tree/main/03-multimodal-rag). The upload adapters extract passages and table rows, render PDF pages, and collect supported document figures. For an HTML export with relative image paths, select the HTML and its companion images together. Reimporting the same HTML adds the images to the existing scenario. Inline image data works in a single HTML file.
+
+The C++ `rag` service embeds text and image bytes in the same vector space, keeps a persistent model-specific vector cache, and ranks the current corpus by cosine similarity. Each answer receives up to five ranked items, including up to two source images. It returns source names and page or section locators to callers of the internal RAG API. The vision model sees those retrieved items rather than the full source document.
+
+The AGX Compose defaults use [Qwen3-VL-Embedding-2B Q4_K_M](https://huggingface.co/gorse-io/Qwen3-VL-Embedding-2B-GGUF) on port 8088 for retrieval and [Qwen3-VL-4B-Instruct Q4_K_M](https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct-GGUF) on port 8087 for answers. Each llama.cpp model needs its matching GGUF vision projector. The pinned llama.cpp server can fetch the matching projector with `-hf`. The ports are internal to Compose. `IVR_RAG_EMBED_MODEL`, `IVR_RAG_VISION_MODEL`, and `IVR_RAG_GPU_LAYERS` control the two workers.
+
+Structured part, directory, and work-order queries can still use exact Data Table lookups. Report readback and saving use the caller transcript. The native `/v1/rag` GraphRAG API used by standalone clients has a separate corpus and configuration.
+
+From the Compose directory, follow the worker with `docker compose logs -f rag`. The trace shows indexing and cache counts, a sample document vector, ranked source locators, and vision-model timing. It omits raw passages, questions, answers, and image bytes.

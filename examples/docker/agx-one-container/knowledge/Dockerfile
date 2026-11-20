@@ -4,7 +4,7 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN --mount=type=cache,id=audiocpp-knowledge-npm,target=/root/.npm \
     npm ci --omit=dev --ignore-scripts --prefer-offline
-COPY server.mjs qa.mjs work-orders.mjs conversation.mjs scenarios.mjs scenario-files.mjs scenario-image.mjs ./
+COPY server.mjs qa.mjs work-orders.mjs conversation.mjs scenarios.mjs scenario-files.mjs scenario-image.mjs scenario-simulation.mjs scenario-report.mjs rag-assets.mjs ./
 RUN mkdir /data && chown node:node /data
 ENV NODE_ENV=production PORT=8085 OCR_LANGUAGES=chi_tra+eng
 USER node

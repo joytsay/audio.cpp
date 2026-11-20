@@ -122,8 +122,8 @@ export function reportDate(raw,now=new Date()){
  if(partial){const date=`${localMonth(now).slice(0,4)}-${partial[1].padStart(2,'0')}-${partial[2].padStart(2,'0')}`;if(!Number.isNaN(Date.parse(date))&&new Date(date).toISOString().slice(0,10)===date)return date;}
  return '';
 }
-export function reportDraft(history,now=new Date()){
- let start=history.findLastIndex(isReport);
+export function reportDraft(history,now=new Date(),startAtOpening=false){
+ let start=startAtOpening?0:history.findLastIndex(isReport);
  if(start<0)start=history.findIndex(raw=>{const t=normalizeCallText(raw);return !/[？?]|查詢|請問|如何|怎麼|流程|規則|SOP/.test(t)&&/設備編號|維修項目|數量|更換|保養|維修/.test(t);});
  if(start<0)return null;
  const previous=history.slice(0,start).findLastIndex(isReport);

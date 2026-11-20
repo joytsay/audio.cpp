@@ -1,6 +1,6 @@
 services:
   voice-ai:
-    image: audio.cpp-agx-all-in-one:local
+    image: ivr-server:local
     container_name: ivr-server
     build:
       context: ../../..
@@ -40,6 +40,10 @@ services:
       RAG_EMBEDDING_HOST: 0.0.0.0
       RAG_EMBEDDING_CTX_SIZE: 4096
       RAG_EMBEDDING_GPU_LAYERS: 99
+      IVR_MULTIMODAL_ENABLED: "true"
+      IVR_RAG_EMBED_MODEL: ${IVR_RAG_EMBED_MODEL:-gorse-io/Qwen3-VL-Embedding-2B-GGUF:Q4_K_M}
+      IVR_RAG_VISION_MODEL: ${IVR_RAG_VISION_MODEL:-Qwen/Qwen3-VL-4B-Instruct-GGUF:Q4_K_M}
+      IVR_RAG_GPU_LAYERS: ${IVR_RAG_GPU_LAYERS:-99}
     volumes:
       # Read the Jetson host identity directly; no jtop dependency.
       - type: bind
@@ -86,7 +90,7 @@ services:
       start_period: 30s
 
   https:
-    image: audio.cpp-geovision-web:local
+    image: ivr-https:local
     pull_policy: never
     build:
       context: ../../..
@@ -111,7 +115,7 @@ services:
     restart: unless-stopped
 
   n8n:
-    image: audio.cpp-geovision-n8n:local
+    image: ivr-n8n:local
     pull_policy: never
     build:
       context: ../../..
@@ -131,6 +135,7 @@ services:
       TZ: Asia/Taipei
       GENERIC_TIMEZONE: Asia/Taipei
       N8N_AUTO_PUBLISH_WORKFLOW: ${N8N_AUTO_PUBLISH_WORKFLOW:-true}
+      IVR_RAG_INDEX_UPLOADS: "true"
       SIP_DIALOGUE_AUDIO_URL: http://voice-ai:8081
       SIP_DIALOGUE_LLM_URL: http://voice-ai:8082/v1
       N8N_SECURE_COOKIE: "false"
@@ -164,13 +169,14 @@ services:
   knowledge:
     build:
       context: ./knowledge
-    image: audio.cpp-ivr-knowledge:local
+    image: ivr-knowledge:local
     container_name: ivr-knowledge
     restart: unless-stopped
     environment:
       PORT: 8085
       KNOWLEDGE_DATA_ROOT: /data
       OCR_LANGUAGES: chi_tra+eng
+      IVR_RAG_URL: http://rag:8086
     volumes:
       - audiocpp-knowledge-data:/data
     healthcheck:
@@ -179,10 +185,25 @@ services:
       timeout: 5s
       retries: 5
 
+  rag:
+    build:
+      context: ../../..
+      dockerfile: examples/docker/agx-one-container/rag/Dockerfile
+    image: ivr-rag:local
+    container_name: ivr-rag
+    restart: unless-stopped
+    environment:
+      RAG_EMBED_URL: http://voice-ai:8088
+      RAG_VISION_URL: http://voice-ai:8087
+      RAG_EMBEDDING_MODEL: ${IVR_RAG_EMBED_MODEL:-gorse-io/Qwen3-VL-Embedding-2B-GGUF:Q4_K_M}
+    volumes:
+      - audiocpp-rag-vectors:/vector-cache
+
   # Setup uses the CPU-only SIP image. No host C++ installation is necessary.
   sip-setup:
     profiles: [setup]
-    image: audio.cpp-sip:local
+    image: ivr-sip:local
+    container_name: ivr-sip-setup
     build:
       context: ../../..
       dockerfile: .devops/cuda.Dockerfile
@@ -199,7 +220,7 @@ services:
 
   sip:
     profiles: [sip]
-    image: audio.cpp-sip:local
+    image: ivr-sip:local
     container_name: ivr-sip
     build:
       context: ../../..
@@ -283,9 +304,14 @@ services:
       - /tmp:mode=1777
       - /var/lib/coturn:mode=1777
 
+networks:
+  default:
+    name: ivr-network
+
 volumes:
   audiocpp-sip-data:
   audiocpp-https-data:
   audiocpp-https-config:
   audiocpp-n8n-data:
   audiocpp-knowledge-data:
+  audiocpp-rag-vectors:

@@ -37,6 +37,7 @@ export async function n8nDialogue(
     text: string;
     model: string;
     messages: ReadonlyArray<{ role: string; content: string }>;
+    scenarioReport?: {number: 2 | 3; language: "zh" | "en"};
   },
   signal: AbortSignal,
   options: {
@@ -46,6 +47,7 @@ export async function n8nDialogue(
     prepareModel?: () => Promise<string>;
     onProgress?: (text: string, signal: AbortSignal) => void | Promise<void>;
     onWorkflow?: (state: "started" | "completed" | "failed") => void;
+    onWorkOrderSaved?: (id: string) => void;
   } = {},
 ): Promise<string> {
   signal.throwIfAborted();
@@ -64,7 +66,7 @@ export async function n8nDialogue(
     const model = options.prepareModel && !isN8nIntake(input.text, input.messages)
       ? await options.prepareModel() : input.model;
     signal.throwIfAborted();
-    const request = fetch(options.workflowUrl || "/n8n/webhook/ivr-agent", {
+    const request = fetch(options.workflowUrl || (input.scenarioReport ? "/n8n/webhook/ivr-scenario-report" : "/n8n/webhook/ivr-agent"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({...input, model}),
@@ -81,6 +83,8 @@ export async function n8nDialogue(
     }
     if (typeof result?.reply !== "string" || !result.reply.trim())
       throw new Error("n8n AI Agent returned no reply. Check the GeoVision · Workflow execution for errors.");
+    if (input.scenarioReport && result.scenario_report !== true)
+      throw new Error("Publish the updated GeoVision · Workflow to enable scenario report saving.");
     // Webhook responses include completed intermediate steps. These are reported
     // after execution; they are not a live stream of individual tool starts.
     for (const name of Array.isArray(result.tools) ? result.tools : [])
@@ -88,6 +92,8 @@ export async function n8nDialogue(
     clearTimeout(noticeTimer);
     await notice;
     signal.throwIfAborted();
+    if (typeof result.work_order_id === "string" && result.work_order_id)
+      options.onWorkOrderSaved?.(result.work_order_id);
     options.onWorkflow?.("completed");
     return result.reply.trim();
   } catch (error) {
