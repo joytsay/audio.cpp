@@ -103,11 +103,15 @@ Json rpc(const std::string& url, const std::string& method, json_object* params,
 }
 // The bridge executes the exact shared browser n8n dialogue code. It emits
 // configuration and tool events as NDJSON while the native RTP loop keeps running.
-std::string dialogue_reply(const std::string& url, json_object* body, const std::atomic<bool>& stopping, const std::function<void(const std::string&)>& on_progress = {}) {
+struct SipDialogueReply {
+    std::string text;
+    bool awaiting_language = false;
+};
+SipDialogueReply dialogue_reply(const std::string& url, json_object* body, const std::atomic<bool>& stopping, const std::function<void(const std::string&)>& on_progress = {}) {
     std::unique_ptr<CURL, decltype(&curl_easy_cleanup)> curl(curl_easy_init(), curl_easy_cleanup);
     if (!curl) throw std::runtime_error("cannot allocate SIP dialogue HTTP handle");
     struct State {
-        CURL* curl; std::string pending, answer, error; std::exception_ptr failure;
+        CURL* curl; std::string pending; SipDialogueReply answer; std::string error; std::exception_ptr failure;
         std::function<void(const std::string&)> on_progress; bool announced = false;
     } state{curl.get(), {}, {}, {}, {}, on_progress, false};
     auto receive = +[](char* data, size_t size, size_t count, void* context) noexcept -> size_t {
@@ -133,7 +137,10 @@ std::string dialogue_reply(const std::string& url, json_object* body, const std:
                 else if (type == "progress" && state.on_progress && !state.announced) {
                     state.announced = true; state.on_progress(text(item.get(), "text"));
                 }
-                else if (type == "reply") state.answer = text(item.get(), "reply");
+                else if (type == "reply") {
+                    state.answer = {text(item.get(), "reply"),
+                        json_object_get_boolean(member(item.get(), "awaitingLanguage")) != 0};
+                }
                 else if (type == "error") state.error = text(item.get(), "message");
             }
         } catch (...) { state.failure = std::current_exception(); return 0; }
@@ -155,7 +162,7 @@ std::string dialogue_reply(const std::string& url, json_object* body, const std:
     long code = 0; curl_easy_getinfo(curl.get(), CURLINFO_RESPONSE_CODE, &code);
     if (code < 200 || code >= 300) throw std::runtime_error("SIP dialogue HTTP status " + std::to_string(code) + ": " + state.pending.substr(0, 1024));
     if (!state.error.empty()) throw std::runtime_error("SIP dialogue: " + state.error);
-    if (state.answer.empty()) throw std::runtime_error("SIP dialogue returned no reply");
+    if (state.answer.text.empty()) throw std::runtime_error("SIP dialogue returned no reply");
     return state.answer;
 }
 std::vector<unsigned char> wav(const std::vector<unsigned char>& pcm) {
@@ -189,6 +196,7 @@ SipTtsConfig resolve_sip_tts(const std::string& dialogue_url, const std::string&
     if (const auto selected = text(settings.get(), "model"); !selected.empty()) config.model = selected;
     if (purpose != SipTtsPurpose::Keypad) {
         config.streaming = json_object_get_boolean(member(settings.get(), "streaming"));
+        config.awaiting_language = json_object_get_boolean(member(settings.get(), "awaitingLanguage"));
         if (const auto selected = text(settings.get(), "voice"); !selected.empty()) config.voice = selected;
         config.reference_audio = text(member(settings.get(), "reference"), "audio");
         config.reference_text = text(member(settings.get(), "reference"), "text");
@@ -247,8 +255,23 @@ bool SipPipeline::queue_greeting() {
 }
 bool SipPipeline::submit_text(const std::string& text) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!listening_ || stopping_ || text.empty() || text.size() > 20000) return false;
+    if (!listening_ || stopping_ || pending_language_digit_ || text.empty() || text.size() > 20000) return false;
     listening_ = false; input_.clear(); pending_text_ = text; ready_.notify_all(); return true;
+}
+bool SipPipeline::submit_language_digit(char digit) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (stopping_ || !awaiting_language_ || pending_language_digit_ || !pending_text_.empty() ||
+        (digit != '1' && digit != '2')) return false;
+    // Accept a digit during the greeting and consume it when playback resumes listening.
+    pending_language_digit_ = digit;
+    input_.clear();
+    ready_.notify_all();
+    return true;
+}
+void SipPipeline::set_language_selection(bool awaiting_language) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    awaiting_language_ = awaiting_language;
+    if (!awaiting_language_) pending_language_digit_ = '\0';
 }
 void SipPipeline::feed(const unsigned char* bytes, size_t size) noexcept {
     try {
@@ -301,8 +324,8 @@ void SipPipeline::respond(const std::vector<unsigned char>& pcm) {
     SipMonitor::get().event("ASR_COMPLETED", caller);
     respond_text(std::move(caller));
 }
-void SipPipeline::respond_text(std::string caller) {
-    if (!config_.dialogue_url.empty()) {
+void SipPipeline::respond_text(std::string caller, bool from_keypad) {
+    if (!from_keypad && !config_.dialogue_url.empty()) {
         auto input = object(); add(input.get(), "text", caller); add(input.get(), "context", config_.hotwords);
         json_object_object_add(input.get(), "postprocess", json_object_new_boolean(true));
         const auto path = config_.dialogue_url.rfind("/dialogue");
@@ -353,7 +376,7 @@ void SipPipeline::respond_text(std::string caller) {
         json_object_object_add(input.get(), "messages", history);
         SipMonitor::get().stage("Thinking");
         SipMonitor::get().event("LLM_STARTED", "Applying saved demo dialogue source");
-        answer = dialogue_reply(config_.dialogue_url, input.get(), stopping_, [this](const std::string& notice) {
+        auto result = dialogue_reply(config_.dialogue_url, input.get(), stopping_, [this](const std::string& notice) {
             if (notice.empty() || stopping_) return;
             SipMonitor::get().message("assistant", notice);
             SipMonitor::get().event("RETRIEVAL_NOTICE", notice);
@@ -363,6 +386,8 @@ void SipPipeline::respond_text(std::string caller) {
                 if (!stopping_) SipMonitor::get().event("RETRIEVAL_NOTICE_FAILED", e.what());
             }
         });
+        set_language_selection(result.awaiting_language);
+        answer = std::move(result.text);
     } else {
         SipMonitor::get().stage("Thinking");
         SipMonitor::get().event("LLM_STARTED", config_.llm_model);
@@ -402,6 +427,7 @@ void SipPipeline::synthesize_speech(std::string answer, bool interim, SipTtsPurp
     if (welcome) {
         if (config.greeting.empty()) throw std::runtime_error("Greeting transcript is empty");
         answer = config.greeting;
+        set_language_selection(config.awaiting_language);
     }
     // The spoken form is separate from the original answer/history. Even if
     // the LLM misses the prompt's pronunciation rules, never send ASCII digits
@@ -451,13 +477,20 @@ void SipPipeline::work() {
         std::vector<unsigned char> utterance, previous;
         size_t silent = 0;
         while (!stopping_) {
-            std::vector<unsigned char> window; std::string typed; bool greeting = false;
+            std::vector<unsigned char> window; std::string typed; bool greeting = false, from_keypad = false;
             { std::unique_lock<std::mutex> lock(mutex_);
-              ready_.wait(lock, [&] { return stopping_ || pending_greeting_ || !pending_text_.empty() || (listening_ && input_.size() >= 16000); });
+              ready_.wait(lock, [&] { return stopping_ || pending_greeting_ || !pending_text_.empty() ||
+                  (listening_ && (pending_language_digit_ || input_.size() >= 16000)); });
               if (stopping_) return;
               greeting = std::exchange(pending_greeting_, false);
               if (!greeting) {
                   typed = std::move(pending_text_); pending_text_.clear();
+                  if (listening_ && pending_language_digit_) {
+                      typed.assign(1, std::exchange(pending_language_digit_, '\0'));
+                      from_keypad = true;
+                      listening_ = false;
+                      input_.clear();
+                  }
                   if (typed.empty()) {
                       window.reserve(16000);
                       for (int i = 0; i < 16000; ++i) { window.push_back(input_.front()); input_.pop_front(); }
@@ -468,13 +501,19 @@ void SipPipeline::work() {
                 try { synthesize_speech({}, false, SipTtsPurpose::Welcome); }
                 catch (const std::exception& error) {
                     if (stopping_) return;
+                    set_language_selection(false);
                     SipMonitor::get().event("GREETING_UNAVAILABLE", error.what());
                     std::lock_guard<std::mutex> lock(mutex_);
                     replies_.push_back({{}, false});
                 }
                 continue;
             }
-            if (!typed.empty()) { utterance.clear(); previous.clear(); silent = 0; SipMonitor::get().stage("Thinking"); SipMonitor::get().event("TEXT_INPUT", typed); respond_text(std::move(typed)); continue; }
+            if (!typed.empty()) {
+                utterance.clear(); previous.clear(); silent = 0;
+                SipMonitor::get().stage("Thinking"); SipMonitor::get().event("TEXT_INPUT", typed);
+                respond_text(std::move(typed), from_keypad);
+                continue;
+            }
             bool active = speech(window);
             if (active && utterance.empty()) refresh_settings();
             if (active) {
@@ -488,7 +527,11 @@ void SipPipeline::work() {
             }
             previous = window;
             if (!utterance.empty() && (silent * 500 >= size_t(config_.end_silence_ms) || utterance.size() >= 16000 * 2 * 60)) {
-                { std::lock_guard<std::mutex> lock(mutex_); listening_ = false; input_.clear(); }
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    if (!listening_ || pending_language_digit_) continue;
+                    listening_ = false; input_.clear();
+                }
                 SipMonitor::get().event("VAD_COMPLETED", "Caller utterance ready for ASR");
                 respond(utterance); utterance.clear(); previous.clear(); silent = 0;
             }

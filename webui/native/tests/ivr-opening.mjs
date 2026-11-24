@@ -219,7 +219,7 @@ for (const [language, choice, intentColumn] of [['zh', '1', 0], ['en', '2', 1]])
         log(`Expected: ${expected}\nMatch: ${Math.round(score * 100)}%`);
         assert.ok(score >= minimumMatch, `Opening prompt scored ${Math.round(score * 100)}%: ${reply}`);
       }
-      async function turn(text) {
+      async function turn(text, awaitingLanguage = false) {
         show(`${callerLabel}：${text}`);
         const result = await post('/dialogue', {sessionId, text, model, prompt: '', messages: []});
         const events = result.trim().split('\n').map(line => JSON.parse(line));
@@ -228,6 +228,7 @@ for (const [language, choice, intentColumn] of [['zh', '1', 0], ['en', '2', 1]])
         assert.deepEqual(errors, []);
         const replies = events.filter(event => event.type === 'reply');
         assert.equal(replies.length, 1, result);
+        assert.equal(replies[0].awaitingLanguage === true, awaitingLanguage);
         const reply = replies[0].reply;
         expectedLog.push({role: 'Caller', text}, {role: 'AI', text: reply});
         return reply;
@@ -235,13 +236,14 @@ for (const [language, choice, intentColumn] of [['zh', '1', 0], ['en', '2', 1]])
 
       show(language === 'zh' ? 'AI語音' : 'AI voice');
       const greeting = JSON.parse(await post('/tts-config', {sessionId, model, welcomeGreeting: true}));
+      assert.equal(greeting.awaitingLanguage,true);
       checkPrompt(greeting.greeting, reference.prompts[0]);
       expectedLog.push({role: 'AI', text: greeting.greeting});
       const expected = language === 'zh' ? reference.prompts.slice(1) : englishPrompts;
       const [name, employeeDigits, supervisor, workOrder] = reference.callers;
       const languageAnswer = number === 1 ? language === 'zh'
         ? '中文，就是，嗯，我要選中文。' : 'I would like English.' : choice;
-      if (number === 1) checkPrompt(await turn('中文、英文'), reference.prompts[0]);
+      if (number === 1) checkPrompt(await turn('中文、英文', true), reference.prompts[0]);
       for (const [i, text] of [languageAnswer, name, employeeDigits, supervisor].entries()) {
         const reply = await turn(text);
         if (i === 3) show(language === 'zh' ? '選擇情境' : 'Scenario selection');

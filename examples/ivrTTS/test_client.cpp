@@ -155,7 +155,7 @@ public:
     std::string url, wav, pcm;
     std::filesystem::path player_audio;
     std::atomic<bool> early{false}, bad_catalog{false};
-    std::atomic<bool> custom_reference{false}, greeting_fails{false};
+    std::atomic<bool> custom_reference{false}, greeting_fails{false}, language_menu{false};
     std::atomic<bool> streaming_tts{false}, stream_hold{false}, stream_first{false};
     std::atomic<bool> pipeline_mode{false}, rag_fails{false}, stt_waits{false}, dialogue_fails{false}, dialogue_progress{false};
     Server() {
@@ -246,6 +246,7 @@ private:
                 json_object* welcome = nullptr;
                 if (json_object_object_get_ex(input.get(), "welcomeGreeting", &welcome) && json_object_get_boolean(welcome)) {
                     if (greeting_fails) respond(R"({"error":"greeting unavailable"})", false);
+                    else if (language_menu) respond(R"({"model":"demo-selected-tts","streaming":false,"greeting":"請先選語言：中文 1、英文 2。","awaitingLanguage":true})");
                     else respond(R"({"model":"demo-selected-tts","streaming":false,"greeting":"您好，這裡是 GeoVision IVR。"})");
                     return;
                 }
@@ -268,6 +269,13 @@ private:
             if (route == "/dialogue") {
                 auto input = parse(body);
                 const auto transcript = field(input.get(), "text");
+                if (language_menu) {
+                    check(transcript == "1" || transcript == "2", "Keypad digit was not delivered as literal text");
+                    const auto prompt = transcript == "1" ? "請問此電話持有人名字是？" : "What is your name?";
+                    send_all(fd, "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: application/x-ndjson\r\n\r\n");
+                    send_all(fd, std::string(R"({"type":"reply","reply":")") + prompt + "\"}\n");
+                    return;
+                }
                 check(transcript == "Where is the office?" || transcript == "Where is the main office?" || transcript == "查詢",
                       "SIP transcript missing from shared dialogue request");
                 check(!field(input.get(), "sessionId").empty(), "SIP call session missing from dialogue request");
@@ -438,8 +446,11 @@ public:
     bool have_rtp_timestamp_ = false;
     std::atomic<unsigned> packets{0}, voiced_packets{0}, voiced_before_ready{0}, voiced_before_selection{0};
     std::atomic<bool> ready_sent{false};
-    SipServer(bool reject, bool busy, bool incoming, bool opus = false, bool conversation = false, bool wait_for_ready = false, bool rtp_digits = false, unsigned digit_interval = 100)
-        : reject_(reject), busy_(busy), incoming_(incoming), opus_(opus), conversation_(conversation), wait_for_ready_(wait_for_ready), rtp_digits_(rtp_digits), digit_interval_(digit_interval) {
+    SipServer(bool reject, bool busy, bool incoming, bool opus = false, bool conversation = false,
+              bool wait_for_ready = false, bool rtp_digits = false, unsigned digit_interval = 100,
+              std::string keypad_keys = "#1#2#1#3")
+        : reject_(reject), busy_(busy), incoming_(incoming), opus_(opus), conversation_(conversation), wait_for_ready_(wait_for_ready),
+          rtp_digits_(rtp_digits), digit_interval_(digit_interval), keypad_keys_(std::move(keypad_keys)) {
         auto bind_udp = [](int& fd) {
             fd = socket(AF_INET, SOCK_DGRAM, 0); check(fd >= 0, "cannot open SIP test socket");
             fcntl(fd, F_SETFD, FD_CLOEXEC);
@@ -455,12 +466,11 @@ public:
                 while (!stopped_) {
                     pollfd ready[2]{{sip_, POLLIN, 0}, {rtp_, POLLIN, 0}};
                     poll(ready, 2, 20);
-                    if (wait_for_ready_ && connected_ && greeting_step_ < 8 &&
+                    if (wait_for_ready_ && connected_ && greeting_step_ < keypad_keys_.size() &&
                         Clock::now() >= ready_at_ + std::chrono::milliseconds(digit_interval_ * greeting_step_)) {
-                        const char digits[] = {'#', '1', '#', '2', '#', '1', '#', '3'};
                         if (greeting_step_ == 0) voiced_before_ready = voiced_packets.load();
                         if (greeting_step_ == 1) voiced_before_selection = voiced_packets.load();
-                        const auto digit = digits[greeting_step_++];
+                        const auto digit = keypad_keys_[greeting_step_++];
                         if (rtp_digits_) {
                             // RFC 4733 telephone-event, including repeated end packets.
                             for (unsigned packet_index = 0; packet_index < 4; ++packet_index) {
@@ -622,8 +632,47 @@ private:
     Clock::time_point next_audio_, ready_at_;
     std::atomic<bool> stopped_{false};
     std::thread worker_;
-    std::string error_, dialog_from_, dialog_to_, dialog_id_;
+    std::string error_, dialog_from_, dialog_to_, dialog_id_, keypad_keys_;
 };
+void test_sip_language_keypad(const std::string& executable) {
+    setenv("SIP_WAIT_FOR_MEDIA", "0", 1);
+    setenv("SIP_SECRET", "test-password", 1);
+    setenv("SIP_LISTEN", "127.0.0.1:0", 1);
+    setenv("SIP_INTERFACE", "127.0.0.1", 1);
+    setenv("SIP_CODEC", "PCMU", 1);
+    unsetenv("SIP_GREETING");
+    unsetenv("SIP_TEST_DTMF");
+    unsetenv("COTURN_URL");
+    for (const bool rtp : {false, true}) {
+        const char digit = rtp ? '2' : '1';
+        const char other = rtp ? '1' : '2';
+        Server dialogue; dialogue.pipeline_mode = true; dialogue.language_menu = true;
+        SipServer sip(false, false, false, false, false, true, rtp, 700, {digit, other});
+        setenv("SIP_DTMF_MODE", rtp ? "rtp" : "info", 1);
+        setenv("AUDIOCPP_URL", dialogue.url.c_str(), 1);
+        setenv("SIP_DIALOGUE_URL", (dialogue.url + "/dialogue").c_str(), 1);
+        setenv("LLM_MODEL", "test-llm", 1);
+        Process client(executable, {"--pipeline", "sip:1001@127.0.0.1", sip.uri, "sip:1002@127.0.0.1"});
+        const std::string expected = rtp ? "What is your name?" : "請問此電話持有人名字是？";
+        client.until("Assistant: " + expected);
+        client.until(std::string("DTMF: ") + other);
+        client.terminate();
+        check(client.finish(4) == 0, "SIP language keypad call failed: " + client.output);
+        sip.verify();
+        const auto requests = dialogue.pipeline_requests();
+        const auto turns = std::count_if(requests.begin(), requests.end(), [](const auto& request) {
+            return request.first == "/dialogue";
+        });
+        check(turns == 1, "A keypad event after language selection started an extra turn");
+        for (const auto& [route, body] : requests) {
+            if (route == "/dialogue")
+                check(field(parse(body).get(), "text") == std::string(1, digit), "DTMF digit did not arrive as text");
+            check(route != "/normalize" && route != "/v1/audio/transcriptions/details",
+                  "DTMF passed through speech recognition or transcript correction");
+        }
+    }
+    std::cout << "PASS: SIP INFO and RTP language digits reach dialogue as text, only while the menu is open\n";
+}
 void test_sip(const std::string& executable) {
     setenv("SIP_WAIT_FOR_MEDIA", "0", 1);
     setenv("SIP_SECRET", "test-password", 1); unsetenv("SIP_CODEC");
@@ -990,6 +1039,32 @@ void test_pipeline() {
         check(stt_count == 2 && llm_count == 2, "pipeline skipped a turn");
     }
     {
+        auto shared = config; shared.dialogue_url = server.url + "/dialogue";
+        server.language_menu = true;
+        for (const char digit : {'1', '2'}) {
+            SipPipeline pipeline(shared);
+            check(!pipeline.submit_language_digit(digit), "Keypad started a turn before the language prompt");
+            check(pipeline.queue_greeting(), "Language menu greeting did not queue");
+            reply(pipeline);
+            const auto before = server.pipeline_requests().size();
+            check(!pipeline.submit_language_digit('3'), "The language menu accepted an unsupported digit");
+            check(pipeline.submit_language_digit(digit), "The language menu did not queue the keypad digit during playback");
+            check(!pipeline.submit_language_digit(digit), "A repeated keypad event queued a duplicate turn");
+            pipeline.resume(); reply(pipeline);
+            pipeline.resume();
+            check(!pipeline.submit_language_digit(digit), "Keypad started a turn after the language menu closed");
+            const auto requests = server.pipeline_requests();
+            check(requests.size() == before + 3 && requests[before].first == "/dialogue",
+                  "Keypad input must enter dialogue directly, without ASR or transcript correction");
+            check(field(parse(requests[before].second).get(), "text") == std::string(1, digit),
+                  "Dialogue received the wrong digit");
+            check(field(parse(requests.back().second).get(), "input") ==
+                  (digit == '1' ? "請問此電話持有人名字是？" : "What is your name?"),
+                  "The selected language did not reach TTS");
+        }
+        server.language_menu = false;
+    }
+    {
         SipPipeline longTurn(config);longTurn.resume();
         const auto before=server.pipeline_requests().size();
         std::vector<unsigned char> speaking(16000,1),quiet(64000,0);
@@ -1164,7 +1239,7 @@ int main(int argc, char** argv) {
             while ((n = read(STDIN_FILENO, buffer, sizeof(buffer))) > 0) { audio.write(buffer, n); audio.flush(); }
             return audio ? 0 : 1;
         }
-        check(argc == 3, "Usage: ivrtts_tests cli|tui|sip /path/to/example");
+        check(argc == 3, "Usage: ivrtts_tests cli|tui|sip|language-keypad /path/to/example");
         Temp temp;
         std::filesystem::create_symlink(std::filesystem::canonical(argv[0]), temp.path / "ffplay");
         std::string path = temp.path.string() + ":" + (getenv("PATH") ? getenv("PATH") : "");
@@ -1177,6 +1252,7 @@ int main(int argc, char** argv) {
         if (std::string(argv[1]) == "cli") test_cli(cli, temp.path);
         else if (std::string(argv[1]) == "tui") test_tui(cli);
         else if (std::string(argv[1]) == "sip") test_sip(cli);
+        else if (std::string(argv[1]) == "language-keypad") test_sip_language_keypad(cli);
         else if (std::string(argv[1]) == "env") test_env(temp.path);
 #ifdef IVRTTS_TEST_PIPELINE
         else if (std::string(argv[1]) == "pipeline") test_pipeline();

@@ -12,7 +12,7 @@
 class ivrTTS;
 struct SipTtsConfig {
     std::string model, voice, reference_audio, reference_text, greeting;
-    bool streaming = false;
+    bool streaming = false, awaiting_language = false;
     void apply(ivrTTS& tts, const std::string& audio_url) const;
 };
 enum class SipTtsPurpose { Reply, Welcome, Keypad };
@@ -38,6 +38,7 @@ public:
     void resume();
     bool queue_greeting();
     bool submit_text(const std::string& text);
+    bool submit_language_digit(char digit);
     void feed(const unsigned char* bytes, std::size_t size) noexcept;
     bool take_reply(std::vector<unsigned char>& wav, bool* interim = nullptr, bool* streaming = nullptr, bool* complete = nullptr);
     std::string error();
@@ -46,7 +47,8 @@ private:
     void work();
     bool speech(const std::vector<unsigned char>& pcm);
     void respond(const std::vector<unsigned char>& pcm);
-    void respond_text(std::string caller);
+    void respond_text(std::string caller, bool from_keypad = false);
+    void set_language_selection(bool awaiting_language);
     std::string upload(const std::vector<unsigned char>& pcm);
     void synthesize_speech(std::string text, bool interim, SipTtsPurpose purpose = SipTtsPurpose::Reply);
     void refresh_settings();
@@ -59,6 +61,8 @@ private:
     struct QueuedReply { std::vector<unsigned char> wav; bool interim; bool streaming = false; bool complete = true; };
     std::deque<QueuedReply> replies_;
     std::string error_, pending_text_;
+    char pending_language_digit_ = '\0';
+    bool awaiting_language_ = false;
     bool listening_ = false, pending_greeting_ = false;
     std::vector<std::pair<std::string, std::string>> history_;
     std::thread worker_;

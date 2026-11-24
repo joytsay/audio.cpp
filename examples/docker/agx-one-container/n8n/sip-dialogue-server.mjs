@@ -120,7 +120,7 @@ export function createDialogueServer({ dialogue, readGreetingCsv, normalizeTrans
         const keypadGreeting = req.url === '/tts-config' && body.keypadGreeting === true;
         const welcomeGreeting = req.url === '/tts-config' && body.welcomeGreeting === true;
         const streaming = !keypadGreeting && saved.tts_streaming === true;
-        let reference, greeting;
+        let reference, greeting, awaitingLanguage;
         if (req.url === '/tts-config') {
           if (welcomeGreeting) {
             if (!readGreetingCsv) throw new Error('Greeting reader is unavailable');
@@ -131,7 +131,10 @@ export function createDialogueServer({ dialogue, readGreetingCsv, normalizeTrans
               try {
                 const opening = await scenarioCalls.start(body.sessionId, saved.sip_scenario_id,
                   AbortSignal.any([signal, AbortSignal.timeout(2000)]));
-                if (opening) greeting = `${greeting.trim()}\n${opening}`.trim();
+                if (opening) {
+                  greeting = `${greeting.trim()}\n${opening}`.trim();
+                  awaitingLanguage = scenarioCalls.awaitingLanguage(body.sessionId) || undefined;
+                }
               } catch (error) {
                 if (!signal.aborted) console.warn('[sip-dialogue] Scenario opening unavailable:', error.message);
               }
@@ -157,7 +160,7 @@ export function createDialogueServer({ dialogue, readGreetingCsv, normalizeTrans
           }
         }
         res.setHeader('Content-Type','application/json');
-        res.end(JSON.stringify({model, streaming, reference, greeting, voice: !keypadGreeting && saved.tts_voice_id?.startsWith('preset-') ? (saved.tts_voice_id === 'preset-wangSG9s' ? 'WangSG' : 'lingCL') : undefined, vad_end_silence_ms:saved.vad_end_silence_ms??2000}));return;
+        res.end(JSON.stringify({model, streaming, reference, greeting, awaitingLanguage, voice: !keypadGreeting && saved.tts_voice_id?.startsWith('preset-') ? (saved.tts_voice_id === 'preset-wangSG9s' ? 'WangSG' : 'lingCL') : undefined, vad_end_silence_ms:saved.vad_end_silence_ms??2000}));return;
       }
       if (typeof body.text !== 'string' || !body.text.trim() || typeof body.model !== 'string' || typeof body.prompt !== 'string' || !Array.isArray(body.messages) || body.messages.length > 12 || body.messages.some(m => !['user', 'assistant'].includes(m.role) || typeof m.content !== 'string')) throw new Error('Invalid SIP dialogue request');
       caller = {sessionId: body.sessionId, role: 'Caller', text: body.text};
@@ -207,7 +210,8 @@ export function createDialogueServer({ dialogue, readGreetingCsv, normalizeTrans
       if (typeof reply !== 'string' || !reply.trim()) throw new Error('Dialogue returned an empty reply');
       if (scenarioReply === undefined) reply = normalizeTranscript(reply.trim());
       await saveLog(caller.sessionId, [{role: caller.role, text: caller.text}, {role: 'AI', text: reply}]);
-      send({ type: 'reply', reply });
+      const awaitingLanguage = scenarioReply !== undefined && scenarioCalls?.awaitingLanguage(body.sessionId);
+      send({ type: 'reply', reply, ...(awaitingLanguage ? {awaitingLanguage} : {}) });
       res.end();
     } catch (error) {
       if (caller) await saveLog(caller.sessionId, [{role: caller.role, text: caller.text}, {role: 'Call', text: 'Reply failed'}]);

@@ -621,6 +621,8 @@ private:
             if (call == call_) {
                 std::cout << "DTMF: " << bevent_get_text(data) << '\n';
                 SipMonitor::get().event("SIP_DTMF", bevent_get_text(data));
+                const std::string digit = bevent_get_text(data);
+                if (pipeline_ && digit.size() == 1 && pipeline_->submit_language_digit(digit.front())) break;
             }
             if (call == call_ && (realtime_tts_ || !announcement_.empty())) {
                 const std::string digit = bevent_get_text(data);

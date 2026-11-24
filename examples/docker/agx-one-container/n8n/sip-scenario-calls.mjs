@@ -96,5 +96,10 @@ export function createSipScenarioCalls({simulation, fetchImpl = fetch, knowledge
     return dispatchReminder || normalizeReply(reply.trim());
   }
 
-  return {start, turn};
+  function awaitingLanguage(sessionId) {
+    const entry = current(sessionId);
+    return !!entry && !entry.call.sourceOpening && entry.call.step === 0;
+  }
+
+  return {start, turn, awaitingLanguage};
 }
