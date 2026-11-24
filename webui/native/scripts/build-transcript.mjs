@@ -5,7 +5,6 @@ await build({
     contents: [
       "export * from './src/lib/transcript.ts';",
       "export { correctAsrTranscript, DEFAULT_ASR_POSTPROCESS_MODEL } from './src/lib/asr-postprocess.ts';",
-      "export * as scenarioSimulation from './src/lib/scenario-simulation.ts';",
     ].join("\n"),
     resolveDir: process.cwd(),
   },

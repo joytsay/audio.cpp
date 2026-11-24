@@ -23,10 +23,6 @@
 		reverse_proxy n8n:5678
 	}
 
-	handle /ivr-simulation {
-		reverse_proxy knowledge:8085
-	}
-
 	# Keep llama.cpp requests on the same HTTPS origin, including router APIs.
 	handle_path /llm/* {
 		reverse_proxy voice-ai:8082

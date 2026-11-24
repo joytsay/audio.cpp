@@ -1,105 +1,50 @@
 export type DialogueSource = "prompt.csv" | "n8n";
 
-export const N8N_LOOKUP_NOTICE = "查詢中，請稍後。";
+export type IvrResponse = {
+  reply: string;
+  stage: "opening" | "menu" | "scenario";
+  status: string;
+  language: "zh" | "en";
+  awaitingLanguage: boolean;
+  scenario: {number: number; title: string} | null;
+  work_order?: {order_id: string; pending: boolean};
+};
 
-// Classify only the wait announcement here; the workflow remains authoritative
-// for retrieval/save routing. Never announce a save as a lookup.
-export function isN8nLookup(text: string, messages: ReadonlyArray<{role: string; content: string}> = []): boolean {
-  if (/回報工單|回报工单|新增工單|新增工单|增加工單|增加工单|建立工單/.test(text) && !/查詢|查询|如何|怎麼|怎么|流程|規則|规则|[？?]/.test(text)) return false;
-  if (/查詢|查询|查一下|查找|找出|列出|最新|最舊|最旧|最早|工單內容|工单内容|明細|明细|詳情|详情|幾個|几个|多少|呢[？?。\s]*$|SOP|流程|規則|规则|如何|怎麼|怎么|是什麼|是什么|在哪|哪裡|哪里|\b(?:where|what|which|how|lookup|search|find|latest|oldest)\b/i.test(text)) return true;
-  const period = /^(?:(?:[\d零〇一二三四五六七八九十]+年)?[\d零〇一二三四五六七八九十]+月|\d{4}-\d{2}|這個月|这个月|本月|上個月|上个月)(?:的|呢|[。？?\s])*$/u;
-  const history = messages.filter(m=>m.role === "user");
-  if (history.at(-1)?.content === text) history.pop();
-  const previous = history.at(-1)?.content;
-  if (period.test(text.trim()) && previous) return isN8nLookup(previous, history.slice(0,-1));
-  // The workflow retrieves knowledge for ordinary questions too, not only
-  // phrases containing 查詢/最新. Suppress filler while collecting report details.
-  return !history.some(m => /回報工單|回报工单|新增工單|新增工单|增加工單|增加工单|建立工單/.test(m.content));
-}
-
-// Only a fresh, explicit intake can bypass LLM warm-up. The workflow still
-// registers the turn and decides the reply; report details and queries keep
-// their normal preparation and persistence path.
-export function isN8nIntake(text: string, messages: ReadonlyArray<{role: string; content: string}> = []): boolean {
-  const normalize = (value: string) => value.replace(/工单/g, "工單").replace(/回报/g, "回報");
-  const start = /^(?:我(?:想要|想|要)?|請|幫我)?(?:回報工單|增加工單|新增工單|建立工單|工單回報)[。！!，,\s]*$/u;
-  if (!start.test(normalize(text).trim())) return false;
-  const history = messages.filter(message => message.role === "user");
-  if (history.at(-1)?.content === text) history.pop();
-  return !history.some(message => /回報工單|增加工單|新增工單|建立工單|工單回報/.test(normalize(message.content)));
-}
-
-// The direct knowledge steps, model and session memory run inside GeoVision · Workflow.
-// Browser and SIP callers share this transport and never run a second LLM loop.
-export async function n8nDialogue(
-  input: {
-    sessionId: string;
-    text: string;
-    model: string;
-    messages: ReadonlyArray<{ role: string; content: string }>;
-    scenarioReport?: {number: 2 | 3; language: "zh" | "en"};
-  },
+// GeoVision · Workflow forwards each call turn to the knowledge service's IVR
+// engine, which holds the call state (opening, 情境 routing, dialogue history)
+// and grounds every reply in the uploaded HTML call script. Browser and SIP
+// callers share this client and send only the session ID and caller text.
+export async function ivrDialogue(
+  input: {sessionId: string; text?: string; start?: boolean; scenarioId?: string},
   signal: AbortSignal,
   options: {
     workflowUrl?: string;
-    onTool?: (name: string, state: "started" | "completed" | "failed") => void;
-    noticeDelaySeconds?: number;
-    prepareModel?: () => Promise<string>;
-    onProgress?: (text: string, signal: AbortSignal) => void | Promise<void>;
     onWorkflow?: (state: "started" | "completed" | "failed") => void;
-    onWorkOrderSaved?: (id: string) => void;
   } = {},
-): Promise<string> {
+): Promise<IvrResponse> {
   signal.throwIfAborted();
   options.onWorkflow?.("started");
-  const noticeController = new AbortController();
-  const noticeSignal = AbortSignal.any([signal, noticeController.signal]);
-  let notice: Promise<void> = Promise.resolve();
-  let noticeTimer: ReturnType<typeof setTimeout> | undefined;
-  const configuredDelay = options.noticeDelaySeconds;
-  const delaySeconds = typeof configuredDelay === "number" && Number.isInteger(configuredDelay) && configuredDelay >= 1 && configuredDelay <= 60 ? configuredDelay : 3;
   try {
-    if (options.onProgress && isN8nLookup(input.text, input.messages))
-      noticeTimer = setTimeout(() => {
-        if (!noticeSignal.aborted) notice = Promise.resolve().then(()=>options.onProgress!(N8N_LOOKUP_NOTICE, noticeSignal)).catch(()=>undefined);
-      }, delaySeconds * 1000);
-    const model = options.prepareModel && !isN8nIntake(input.text, input.messages)
-      ? await options.prepareModel() : input.model;
-    signal.throwIfAborted();
-    const request = fetch(options.workflowUrl || (input.scenarioReport ? "/n8n/webhook/ivr-scenario-report" : "/n8n/webhook/ivr-agent"), {
+    const response = await fetch(options.workflowUrl || "/n8n/webhook/ivr-agent", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({...input, model}),
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(input),
       signal,
     });
-    const response = await request;
     const raw = await response.text();
     let result: any;
-    try { result = JSON.parse(raw); } catch { /* Include plain upstream errors below. */ }
+    try { result = JSON.parse(raw); } catch { /* Report the plain upstream error below. */ }
     if (!response.ok) {
       const detail = result?.message || result?.error?.message || result?.error || raw;
       const hint = response.status === 404 ? " Publish「GeoVision · Workflow」後重試。" : "";
-      throw new Error(`n8n AI Agent workflow failed (${response.status}): ${String(detail).slice(0, 1200)}${hint}`);
+      throw new Error(`IVR workflow failed (${response.status}): ${String(detail).slice(0, 1200)}${hint}`);
     }
     if (typeof result?.reply !== "string" || !result.reply.trim())
-      throw new Error("n8n AI Agent returned no reply. Check the GeoVision · Workflow execution for errors.");
-    if (input.scenarioReport && result.scenario_report !== true)
-      throw new Error("Publish the updated GeoVision · Workflow to enable scenario report saving.");
-    // Webhook responses include completed intermediate steps. These are reported
-    // after execution; they are not a live stream of individual tool starts.
-    for (const name of Array.isArray(result.tools) ? result.tools : [])
-      if (typeof name === "string") options.onTool?.(name, "completed");
-    clearTimeout(noticeTimer);
-    await notice;
+      throw new Error("The IVR workflow returned no reply. Check the GeoVision · Workflow execution for errors.");
     signal.throwIfAborted();
-    if (typeof result.work_order_id === "string" && result.work_order_id)
-      options.onWorkOrderSaved?.(result.work_order_id);
     options.onWorkflow?.("completed");
-    return result.reply.trim();
+    return {...result, reply: result.reply.trim()} as IvrResponse;
   } catch (error) {
-    clearTimeout(noticeTimer);
-    noticeController.abort();
-    await notice;
     options.onWorkflow?.("failed");
     throw error;
   }

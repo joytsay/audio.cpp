@@ -1,42 +1,85 @@
-# Source-grounded knowledge and caller context
+# IVR knowledge service
 
-`ivr-knowledge` serves the internal Compose network at `http://knowledge:8085`.
-It starts without bundled scenario documents. Add your own PDF, DOCX, XLSX,
-CSV, TXT or Markdown files through the Demo's **Add New Scenario** option.
-Original uploads and source-grounded Q/A persist under `/data/scenarios`.
-No source-file bind mounts are required.
+`ivr-knowledge` serves the internal Compose network at `http://knowledge:8085`. It stores uploaded
+scenarios under `/data/scenarios` and runs the IVR call engine. It starts empty: upload your HTML
+call script through the Demo's **Add New Scenario** option.
 
-## Caller intake and n8n storage
+## IVR call engine
 
-`POST /call-turn` registers raw caller transcripts. “我增加工单” or another report opener asks exactly one question about date, numbers and maintenance details. The next response selects `add_work_order`, even if fields are missing. `POST /work-order-draft` then prepares a flat row from registered transcripts; it does **not** persist or claim success.
+`POST /ivr` runs one phone call from the uploaded HTML call script
+(e.g. `情境模擬_20261105.html` with its companion images). The script is the only source of dialogue
+behaviour; nothing about the scenarios is hard-coded.
 
-The n8n workflow's native **Data Table** node creates/reuses `work_orders` and upserts that prepared row. New work orders persist in n8n's existing data volume. Unknown values stay blank, raw caller turns remain in the `transcripts` column, and a deterministic report key makes retries use the same row. No startup result or further confirmation is required. Explicit cancellation prevents saving.
+| Request | Result |
+|---|---|
+| `{sessionId, start: true, scenarioId?}` | Starts a call; replies with the script's first opening prompt. |
+| `{sessionId, text, scenarioId?, work_orders?}` | Answers one caller turn. `work_orders`: saved rows, newest first (n8n sends them). |
+| `{sessionId, records: true}` | Extracts the work orders completed since the last request. |
+| `{sessionId, end: true}` | Discards the call. |
 
-`POST /work-orders` is retired. Existing `/data/work-orders.json` files are read-only legacy backups and remain accessible through `GET /work-orders`; new entries are not written there.
+Each reply carries `stage` (`opening`, `menu`, `scenario`), `status`, `scenario` (`{number, title}`),
+`language` and `awaitingLanguage`, plus `work_order: {order_id, pending: true}` when a work-order
+scenario just completed. `scenarioId` defaults to the most recent uploaded call script.
 
-## Retrieval
+How a call runs:
 
-`GET /documents?query=…` returns source-tagged `Q:` / `A:` chunks and legacy records. The workflow uses `POST /documents` with `{query,records}` to include authoritative rows read by the native Data Table node. Matching Data Table IDs override legacy JSON values. Latest/oldest/all questions use actual dispatch records, filtering months before sorting, preserving date ties and reporting genuinely unknown dates separately.
+1. **Opening.** The AI lines before the first 情境 heading are spoken in order, verbatim. A prompt
+   about 語言 accepts 1/2, 中文/英文 or spoken digits; a prompt asking for N 碼 requires N digits;
+   other answers are accepted as given. The last opening line is the service menu.
+2. **Routing.** The caller selects a 情境 by number (`情境 3`, or a bare `3` at the menu), by its
+   title, or by describing it; the model picks among the section titles and their first caller
+   lines, or returns to the menu when the request is unclear.
+3. **Scenario turns.** The model receives the section's example dialogue with numbered AI lines,
+   the section's figures (transcribed once by the vision model and cached), and only this
+   scenario's turns of the live call. It returns which script line it performs; reaching the last
+   AI line completes the scenario, after which the next request is routed again. Inside a scenario
+   only an explicit `情境 N` switches scenarios, so a bare number stays an answer (a score, a
+   quantity). A turn the model matches to no script line, or reports as a change of topic, is routed
+   again. Fillers (嗯、呃那個) never select anything; a second unclear request lists the options.
+4. **Grounding.** Facts about this call come only from the caller; reference facts (stock, SOP
+   steps, fault codes, colleagues) only from the script's AI lines and figures. In work-order
+   scripts, example IDs the caller has not said are masked from the model, a reply that still
+   repeats one is regenerated, and any sentence that still carries it is dropped.
+5. **Saved work orders.** Besides the script's sections, the router offers a built-in lookup:
+   「查詢最新的工單」, 「最舊的呢？」, a work order number, or how many there are. The model only
+   classifies the question (latest / oldest / number / all / the one just answered, and which detail);
+   the rows are selected and the answer is worded from their actual fields in code, so dates and
+   values are never invented. Answers stay short: number, dispatch date and title; equipment, work
+   done, test result or notes only when asked (「那它的維修內容呢？」).
+6. **Outbound sections** (whose first line is the AI's, e.g. dispatch reminders and surveys) start
+   with that line verbatim.
+7. **Work orders.** Sections titled or opened as a work-order report (工單) save a work order. The
+   reply goes out first; the n8n workflow then requests the record, which the model extracts from
+   the caller's confirmed words.
+8. **English.** Choosing 2 translates the opening and outbound lines once (cached) and the model
+   speaks the script's equivalents in English.
 
-Routing accepts simplified/traditional Chinese, spoken dates and month-only follow-ups. “This month” uses Asia/Taipei time. Compact spreadsheet dates such as `202611/06` normalize to `2026-11-06` for sorting without editing the source file. Query answers do not require users to supply work-order details.
+Sessions are written to `/data/ivr-sessions` after every turn and expire after two hours idle; turns
+of one call are processed one at a time. Figure transcriptions and translations are cached in
+`/data/ivr-cache`; figures are transcribed when the service starts, so the first call does not wait.
 
-`GET /health` reports saved scenario/file counts and succeeds with an empty
-store. With no uploaded knowledge, queries report that no documents have been
-uploaded. Poppler/Tesseract provide local Chinese/English PDF extraction.
-No Python or external generation API is needed.
+The engine uses the vision worker already loaded for document retrieval:
+`IVR_LLM_URL` (default `http://voice-ai:8087/v1`) and `IVR_LLM_MODEL` (default `ivr-vision`,
+Qwen3-VL-4B-Instruct). Replies use JSON-schema constrained output.
 
-Run `npm ci --ignore-scripts && TEST_HTTP=1 npm test`. Unit checks use generated temporary fixtures and legacy data. Native persistence and UI-visible table rows are checked by `webui/native/tests/n8n-workflow-runtime.py` in isolated containers.
+### Checks
 
-## Visual document retrieval
+`node test.mjs` runs the offline engine tests with a fake model. `node replay-scenarios.mjs [N…]` replays every 情境 of the uploaded script — the
+script's own opening answers and caller lines — against the running service and real model, prints
+each turn and extracted work order, and fails if a section does not complete:
 
-The GeoVision document route uses the [multimodal RAG notebook's procedure](https://github.com/debnsuma/fcc-ai-engineering-aws/tree/main/03-multimodal-rag). The upload adapters extract passages and table rows, render PDF pages, and collect supported document figures. For an HTML export with relative image paths, select the HTML and its companion images together. Reimporting the same HTML adds the images to the existing scenario. Inline image data works in a single HTML file.
+```sh
+docker exec ivr-knowledge node /app/test.mjs
+docker exec ivr-knowledge node /app/replay-scenarios.mjs
+```
 
-The n8n document workflow calls llama.cpp to embed text and images in the same vector space. Qdrant runs inside `ivr-knowledge` and listens at `http://knowledge:6333` on the Compose network. It stores vectors in the `ivr-qdrant-data` volume and ranks the current corpus by cosine similarity. Each answer receives up to five ranked items, including up to two source images and their page or section locators.
+## Uploads and document retrieval
 
-When upgrading from standalone `ivr-qdrant`, stop that container before recreating `knowledge`. Keep the existing volume so the bundled Qdrant can open the same collection files.
+Uploads accept PDF, DOCX, XLSX, CSV, TXT, Markdown and HTML (companion images require HTML).
+Poppler/Tesseract provide local Chinese/English PDF extraction. When `IVR_RAG_INDEX_UPLOADS` is
+enabled, the n8n **Document RAG** workflow embeds uploaded text and figures with
+Qwen3-VL-Embedding-2B into Qdrant, which runs inside this container (`http://knowledge:6333`,
+volume `ivr-qdrant-data`). The IVR call engine does not use vector search: a call script's section
+is small enough to give the model in full.
 
-The AGX Compose defaults use [Qwen3-VL-Embedding-2B Q4_K_M](https://huggingface.co/gorse-io/Qwen3-VL-Embedding-2B-GGUF) on port 8088 for retrieval and [Qwen3-VL-4B-Instruct Q4_K_M](https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct-GGUF) on port 8087 for answers. Each llama.cpp model needs its matching GGUF vision projector. The pinned llama.cpp server can fetch the matching projector with `-hf`. The ports are internal to Compose. `IVR_RAG_EMBED_MODEL`, `IVR_RAG_VISION_MODEL`, and `IVR_RAG_GPU_LAYERS` control the two workers.
-
-Structured part, directory, and work-order queries can still use exact Data Table lookups. Report readback and saving use the caller transcript. The native `/v1/rag` GraphRAG API used by standalone clients has a separate corpus and configuration.
-
-Open a **Document RAG input** execution in n8n to see which vectors already exist, which documents were embedded and saved, which sources ranked highest, and the vision response. On the first indexing request, the workflow builds Qdrant vectors from the saved uploads. Subsequent queries reuse the stored vectors across n8n and Qdrant restarts. If you override the embedding model with one of a different size, set `IVR_RAG_EMBED_DIMENSIONS` to match.
+`GET /health` reports saved scenario and file counts.

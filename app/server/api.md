@@ -413,14 +413,13 @@ content verbatim; CSV validation happens in the demo editor.
 `ui-settings/demo-settings.yaml` when UI management is enabled. The optional
 `asr_postprocess_enabled` boolean and `asr_postprocess_model` string store the
 Demo's transcript correction settings. The optional `sip_scenario_id` selects a
-saved HTML simulation for the next SIP IVR call. An empty value selects the
-regular SIP dialogue, and an omitted value uses the latest uploaded simulation.
+saved HTML call script for the next SIP IVR call. An empty value selects the
+regular SIP dialogue, and an omitted value uses the latest uploaded call script.
 The optional
-`dialogue_source` string accepts `prompt.csv` (the default) or `n8n`. In n8n
-mode, the WebUI posts the call ID, current text, and recent transcript to
-`/n8n/webhook/ivr-agent`. The workflow executes the knowledge sub-workflow
-directly and returns the spoken reply and completed step names. Selected HTML
-simulations use `/ivr-simulation` for routing and scoped document retrieval.
+`dialogue_source` string accepts `prompt.csv` (the default) or `n8n`. A selected
+call script, or n8n mode, posts the call's session ID and the caller's text to
+`/n8n/webhook/ivr-agent`; the workflow forwards it to the knowledge service's IVR
+engine, which keeps the call state and answers from the uploaded call script.
 See the [n8n setup](../../examples/docker/agx-one-container/n8n/README.md).
 
 ## Demo call transcripts

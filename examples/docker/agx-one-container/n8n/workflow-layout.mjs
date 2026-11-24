@@ -1,13 +1,10 @@
 export const ivrWorkflowId = 'ivrWorkflow';
+// Retired in revision 28: the knowledge service's IVR engine replaced it.
 export const knowledgeToolsId = 'ivrKnowledgeTools';
 export const scenarioAdminId = 'ivrScenarioAdmin';
 
 const sections = [
-  { id: ivrWorkflowId, anchors: ['ivr-input', 'scenario-report-input', 'workflow-group-1'] },
-  {
-    id: knowledgeToolsId, name: 'GeoVision · Knowledge Tools',
-    anchors: ['rag-tool-input', 'manual-rag-test', 'workflow-group-3'],
-  },
+  { id: ivrWorkflowId, anchors: ['ivr-input', 'workflow-group-1'] },
   {
     id: scenarioAdminId, name: 'GeoVision · Scenario Admin', offset: 1990,
     anchors: ['scenario-list-webhook', 'delete-scenario-webhook', 'scenario-file-import-webhook'],
@@ -15,9 +12,10 @@ const sections = [
   { id: 'ivrDocumentRag', name: 'GeoVision · Document RAG', offset: 2580, anchors: ['document-rag-input'] },
 ];
 
-// Execute Sub-workflow validates that its target is published first.
-export const managedWorkflowIds = [knowledgeToolsId, ivrWorkflowId, scenarioAdminId, 'ivrDocumentRag'];
-export const workflowLayoutRevision = 27;
+export const managedWorkflowIds = [ivrWorkflowId, scenarioAdminId, 'ivrDocumentRag'];
+// 30: the IVR engine flow (a revision 29 agent flow was deployed from another branch).
+// 31: saved work orders are passed to the engine for lookups.
+export const workflowLayoutRevision = 31;
 const scenarioAdminRevision = 26;
 
 export function removeLegacyScenarioUpload(workflow) {
@@ -63,19 +61,6 @@ return [{json:{...input,collectionUrl,embeddingUrl,ids:input.documents.map(d=>d.
   }
 }
 
-function layoutKnowledge(workflow) {
-  const positions = {
-    'workflow-group-3': [0, 550],
-  };
-  for (const node of workflow.nodes) {
-    if (positions[node.id]) node.position = positions[node.id];
-    else node.position[1] -= 320;
-    if (node.id === 'workflow-group-3') Object.assign(node.parameters, {
-      width: 2190, height: 780, content: '## Knowledge and work orders\nRead or save native Data Table rows and retrieve source evidence.',
-    });
-  }
-}
-
 export function splitManagedWorkflow(workflow) {
   workflow = removeLegacyScenarioUpload(workflow) ?? workflow;
   const byName = new Map(workflow.nodes.map(node => [node.name, node]));
@@ -114,14 +99,6 @@ export function splitManagedWorkflow(workflow) {
         ivrWorkflowRevision: section.id === scenarioAdminId ? scenarioAdminRevision : workflowLayoutRevision },
     };
     if (section.offset) for (const node of next.nodes) node.position[1] -= section.offset;
-    if (section.id === knowledgeToolsId) {
-      for (const node of next.nodes) {
-        const target = node.parameters?.workflowId;
-        if (target?.value === workflow.id) target.value = knowledgeToolsId;
-        else if (target === workflow.id) node.parameters.workflowId = knowledgeToolsId;
-      }
-      layoutKnowledge(next);
-    }
     if (section.id === 'ivrDocumentRag') configureDocumentEndpoints(next);
     return next;
   });

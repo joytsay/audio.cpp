@@ -1,8 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy, tick } from "svelte";
-  import { n8nDialogue, type DialogueSource } from "$lib/n8n-dialogue";
-  import {answerSimulationRag,importScenarioFiles,listKnowledgeScenarios,matchSimulation,removeKnowledgeScenario,type KnowledgeScenario,type SimulationTurn} from "$lib/knowledge-scenarios";
-  import {advanceSimulationOpening,createSimulation,simulationOpeningComplete,simulationOpeningPrompt,simulationClarification,simulationPrompt} from "$lib/scenario-simulation";
+  import { ivrDialogue, type DialogueSource } from "$lib/n8n-dialogue";
+  import {importScenarioFiles,listKnowledgeScenarios,removeKnowledgeScenario,type KnowledgeScenario} from "$lib/knowledge-scenarios";
   import SipSidebar from "$lib/SipSidebar.svelte";
   import type { SipSettings, SipLive } from "$lib/sip";
   import PanelDivider from "$lib/PanelDivider.svelte";
@@ -56,6 +55,7 @@
     chatText,
     type ChatMessage,
   } from "$lib/openai";
+  import { splitReplySentences } from "$lib/text";
   import {
     discoverDemoAudioModels,
     discoverDemoLlmModels,
@@ -213,8 +213,6 @@
     }
     if (typeof saved.tts_streaming === "boolean")
       ttsStreaming = saved.tts_streaming;
-    if (typeof saved.lookup_notice_delay_seconds === "number")
-      lookupNoticeDelaySeconds = savedLookupNoticeDelaySeconds = saved.lookup_notice_delay_seconds;
     if (typeof saved.tts_playback_rate === "number")
       ttsPlaybackRate = saved.tts_playback_rate;
     if (saved.tts_voice_id !== undefined) {
@@ -311,7 +309,6 @@
         llm_model: llm,
         dialogue_source: dialogueSource,
         sip_scenario_id: savedSipScenarioId,
-        lookup_notice_delay_seconds: lookupNoticeDelaySeconds,
         tts_streaming: streamingTts,
         tts_playback_rate: ttsPlaybackRate,
         tts_voice_id: savedVoiceId,
@@ -479,11 +476,26 @@
     rtf?: number | null;
   };
   type DemoMessage = ChatMessage & {
-    progressNotice?: boolean;
     audioId?: string;
     audioUrl?: string;
     audioName?: string;
   };
+  // Show an assistant reply one sentence per chat bubble.
+  function assistantBubbles(text: string): DemoMessage[] {
+    return splitReplySentences(text).map(content => ({ role: "assistant", content }));
+  }
+  // Rejoin consecutive same-role bubbles so model history keeps one message per turn.
+  function chatHistory(list: DemoMessage[]): ChatMessage[] {
+    const turns: ChatMessage[] = [];
+    for (const { role, content } of list) {
+      if (!content.trim()) continue;
+      const last = turns.at(-1);
+      if (last && last.role === role)
+        last.content += (/[\u3000-\u9fff\uff00-\uffef]$/.test(last.content) ? "" : " ") + content.trim();
+      else turns.push({ role, content: content.trim() });
+    }
+    return turns;
+  }
   let incomingPlayer: HTMLAudioElement | null = null,
     incomingBuffer: AudioBuffer | null = null;
   let stopIncomingPlayback: (() => void) | null = null;
@@ -501,7 +513,13 @@
   let restoreScenarioOnLoad = true;
   let newScenarioFiles: File[] = [], knowledgeUploading = false, knowledgeDeleting = false, knowledgeStatus = "";
   let knowledgeAborter: AbortController | null = null;
-  let simulation: ReturnType<typeof createSimulation> | null = null;
+  // One IVR engine session per call. The knowledge service holds the call
+  // state; the page only keeps the session ID and the selected script.
+  let simulation: {sessionId: string; scenarioId?: string} | null = null;
+  function createSimulation(scenarioId?: string) {
+    const sessionId = "web-" + Array.from(crypto.getRandomValues(new Uint8Array(12)), byte => byte.toString(16).padStart(2, "0")).join("");
+    return {sessionId, scenarioId};
+  }
   $: selectedKnowledgeScenario = knowledgeScenarios.find(scenario => scenarioMode === `scenario:${scenario.id}`);
   $: if (restoreScenarioOnLoad && !settingsLoading && knowledgeScenarios.length)
     restoreScenarioSelection();
@@ -876,25 +894,6 @@
   let hotwords = "",
     savingHotwords = false,
     hotwordsStatus = "";
-  let lookupNoticeDelaySeconds = 3, savedLookupNoticeDelaySeconds = 3;
-  async function saveLookupNoticeDelay() {
-    const value = lookupNoticeDelaySeconds;
-    if (!Number.isInteger(value) || value < 1 || value > 60) {
-      lookupNoticeDelaySeconds = savedLookupNoticeDelaySeconds;
-      settingsStatus = "Wait notice delay must be a whole number from 1 to 60 seconds.";
-      return;
-    }
-    savingSettings = true;
-    try {
-      const current = await endpointJson<{settings: DemoSettings | null}>("", "ui/demo-settings", {cache: "no-store"});
-      await endpointJson("", "ui/demo-settings", {method: "POST", body: JSON.stringify({settings: {...(current.settings || {schema_version: 1}), lookup_notice_delay_seconds: value}})});
-      savedLookupNoticeDelaySeconds = value;
-      settingsStatus = "Wait notice delay saved · applies to the next turn";
-    } catch (cause) {
-      lookupNoticeDelaySeconds = savedLookupNoticeDelaySeconds;
-      settingsStatus = `Could not save wait notice delay: ${cause instanceof Error ? cause.message : cause}`;
-    } finally { savingSettings = false; }
-  }
   let ttsStreaming = false,
     ttsPlaybackRate = 0.9;
   $: ttsRunMode = streamingTts ? "streaming" : "offline";
@@ -1483,108 +1482,20 @@
       record("CONVERSATION_ITEM_ADDED", `USER · ${text}`);
       let reply = text;
       if (simulation) {
-        const active = simulation;
-        const openingReply = advanceSimulationOpening(active, text);
-        if (openingReply !== null) {
-          reply = openingReply;
-          if (simulationOpeningComplete(active)) active.startIndex = messages.length + 1;
-        } else {
-          status = "Thinking";
-          record("AGENT_STATE_CHANGED", "listening → thinking");
-          operationStarted = performance.now();
-          const scenario = active.scenario || await matchSimulation(active.id, text, signal, active.language);
-          if (generation !== epoch || signal.aborted) return;
-          if (active.workOrderId) {
-            reply = active.language === "en" ? `Work order ${active.workOrderId} is saved.` : `工單 ${active.workOrderId} 已儲存。`;
-          } else if (!active.scenario && active.language === "zh" && scenario?.dispatchReminder) {
-            active.scenario = scenario;
-            reply = scenario.dispatchReminder;
-          } else if (scenario && !scenario.custom && (scenario.number === 2 || scenario.number === 3)) {
-            active.scenario = scenario;
-            reply = await n8nDialogue({
-              sessionId: active.sessionId,
-              text,
-              model: llm,
-              scenarioReport: {number: scenario.number, language: active.language},
-              messages: messages.slice(active.startIndex)
-                .filter(message => !message.progressNotice && message.content.trim())
-                .map(({role, content}) => ({role, content})),
-            }, signal, {
-              onWorkflow: state => record(`N8N_WORKFLOW_${state.toUpperCase()}`, "GeoVision · Workflow"),
-              onTool: (name, state) => record(`N8N_STEP_${state.toUpperCase()}`, name),
-              onWorkOrderSaved: id => { active.workOrderId = id; },
-            });
-            if (generation !== epoch || signal.aborted) return;
-          } else if (scenario?.retrieval) {
-            const previous = messages.slice(active.startIndex, -1)
-              .findLast(message => message.role === "user")?.content.slice(0, 1000) || "";
-            const history = scenario.custom ? messages.slice(active.startIndex, -1)
-              .flatMap<SimulationTurn>(({role, content, progressNotice}) =>
-                !progressNotice && content.trim() && (role === "user" || role === "assistant")
-                  ? [{role, content: content.slice(0, 1000)}] : []).slice(-8) : undefined;
-            reply = await answerSimulationRag(active.id, scenario.number, active.language, text, previous, signal, history);
-            if (generation !== epoch || signal.aborted) return;
-            active.scenario = scenario;
-            record("RAG_COMPLETED", scenario.title, performance.now() - operationStarted);
-          } else if (scenario) {
-            const response = await completeLocalTurn(
-              simulationPrompt(active, scenario),
-              messages.slice(active.startIndex),
-              signal,
-              { max_tokens: 512, temperature: 0.2 },
-            );
-            if (generation !== epoch || signal.aborted) return;
-            reply = chatText(response).trim();
-            if (!reply) throw new Error("The language model returned an empty reply.");
-            active.scenario = scenario;
-            record("LLM_COMPLETED", llm, performance.now() - operationStarted, reportedRtf(response));
-          } else reply = simulationClarification(active);
-        }
-      } else if (useLlm && dialogueSource === "n8n") {
-        status = "Thinking · n8n";
+        status = "Thinking";
         record("AGENT_STATE_CHANGED", "listening → thinking");
         operationStarted = performance.now();
-        reply = await n8nDialogue({
-          sessionId: run,
-          text,
-          model: llm,
-          messages: messages.filter(message => !message.progressNotice && message.content.trim())
-            .map(({ role, content }) => ({ role, content })),
-        }, signal, { noticeDelaySeconds: lookupNoticeDelaySeconds, prepareModel: async () => {
-          llm = await ensureDemoLlmReady(llmBase(), llm, signal, (message) => { status = message; });
-          return llm;
-        }, onProgress: async (notice, noticeSignal) => {
-          if (generation !== epoch || noticeSignal.aborted) return;
-          messages = [...messages, {role: "assistant", content: notice, progressNotice: true}];
-          status = notice;
-          record("RETRIEVAL_NOTICE", notice);
-          try {
-            if (useTts) {
-              const id = await load(ttsKey, noticeSignal, true, ttsRunMode);
-              const body: Record<string, unknown> = {model: id, input: notice, response_format: "wav"};
-              if (referencePath && supportsReference) { body.voice_ref = referencePath; body.reference_text = referenceText; }
-              else body.voice = voice;
-              if (streamingTts) await streamTts(body, generation, noticeSignal);
-              else {
-                const speech = await synthesizeSpeech(body, noticeSignal);
-                if (generation === epoch && !noticeSignal.aborted) await playAudio(speech.audio, generation, "assistant", noticeSignal);
-              }
-            }
-          } catch (cause) {
-            if (!noticeSignal.aborted && generation === epoch) record("RETRIEVAL_NOTICE_FAILED", String(cause));
-          } finally {
-            if (generation === epoch && !noticeSignal.aborted) status = "Thinking · n8n";
-          }
-        }, onWorkflow: state => {
-          if (generation !== epoch || signal.aborted) return;
-          record(`N8N_WORKFLOW_${state.toUpperCase()}`, "GeoVision · Workflow");
-        }, onTool: (name, state) => {
-          if (generation !== epoch || signal.aborted) return;
-          status = `n8n · ${name} · ${state}`;
-          record(`N8N_STEP_${state.toUpperCase()}`, name);
-        } });
+        const result = await ivrDialogue({sessionId: simulation.sessionId, text, scenarioId: simulation.scenarioId}, signal, {
+          onWorkflow: state => {
+            if (generation !== epoch || signal.aborted) return;
+            record(`N8N_WORKFLOW_${state.toUpperCase()}`, "GeoVision · Workflow");
+          },
+        });
         if (generation !== epoch || signal.aborted) return;
-        record("LLM_COMPLETED", "n8n dialogue completed", performance.now() - operationStarted);
+        reply = result.reply;
+        record("LLM_COMPLETED", result.scenario ? `情境 ${result.scenario.number}：${result.scenario.title} · ${result.status}` : `IVR ${result.stage}`,
+          performance.now() - operationStarted);
+        if (result.work_order) record("WORK_ORDER_COMPLETED", result.work_order.order_id);
       } else if (useLlm) {
         status = "Thinking";
         record("AGENT_STATE_CHANGED", "listening → thinking");
@@ -1611,7 +1522,7 @@
         return;
       }
       if (!simulation) reply = normalizeTranscript(reply, hotwords);
-      messages = [...messages, { role: "assistant", content: reply }];
+      messages = [...messages, ...assistantBubbles(reply)];
       saveCallLog("AI", reply);
       record("CONVERSATION_ITEM_ADDED", `ASSISTANT · ${reply}`);
       operationStarted = performance.now();
@@ -1647,9 +1558,7 @@
       method: "POST",
       body: JSON.stringify({
         model: ready,
-        messages: [{ role: "system", content: system }, ...history
-          .filter(message => !message.progressNotice && message.content.trim())
-          .map(({ role, content }) => ({ role, content }))],
+        messages: [{ role: "system", content: system }, ...chatHistory(history)],
         ...generationOptions,
         stream: false,
       }),
@@ -1679,10 +1588,10 @@
     const active = simulation;
     if (!active) return;
     if (!useTts && greeting.trim() && !messages.length)
-      messages = [{ role: "assistant", content: greeting }];
-    const prompt = simulationOpeningPrompt(active);
-    messages = [...messages, { role: "assistant", content: prompt }];
-    if (simulationOpeningComplete(active)) active.startIndex = messages.length;
+      messages = assistantBubbles(greeting);
+    const {reply: prompt} = await ivrDialogue({sessionId: active.sessionId, start: true, scenarioId: active.scenarioId}, signal);
+    if (generation !== epoch || signal.aborted || simulation !== active) return;
+    messages = [...messages, ...assistantBubbles(prompt)];
     saveCallLog("AI", prompt);
     record("CONVERSATION_ITEM_ADDED", `ASSISTANT · ${prompt}`);
     await speakReply(prompt, generation, signal);
@@ -1694,7 +1603,7 @@
   async function startSimulationDuringCall(scenario: KnowledgeScenario) {
     const signal = controller?.signal, generation = epoch;
     if (!signal || signal.aborted) return;
-    simulation = createSimulation(scenario.id, scenario.opening);
+    simulation = createSimulation(scenario.id);
     busy = true;
     error = "";
     reset();
@@ -2349,8 +2258,9 @@
     run = new Date().toLocaleTimeString();
     releaseChatAudio();
     messages = [];
-    simulation = useLlm && selectedKnowledgeScenario?.simulation
-      ? createSimulation(selectedKnowledgeScenario.id, selectedKnowledgeScenario.opening) : null;
+    // A selected call script, or the n8n dialogue source, runs the IVR engine.
+    simulation = useLlm && selectedKnowledgeScenario?.simulation ? createSimulation(selectedKnowledgeScenario.id)
+      : useLlm && dialogueSource === "n8n" ? createSimulation() : null;
     controller = new AbortController();
     try {
       if (useAsr && (!window.isSecureContext || !navigator.mediaDevices))
@@ -2493,7 +2403,7 @@
             body.voice_ref = referencePath;
             body.reference_text = referenceText;
           } else body.voice = voice;
-          messages = [{ role: "assistant", content: greeting }];
+          messages = assistantBubbles(greeting);
           await tick();
           if (generation !== epoch || !connected) return;
           playbackMs = (
@@ -2510,7 +2420,7 @@
           if (generation !== epoch) return;
           if (!audio)
             throw new Error(greetingStatus || "Greeting synthesis failed.");
-          messages = [{ role: "assistant", content: greeting }];
+          messages = assistantBubbles(greeting);
           await tick();
           if (generation !== epoch || !connected) return;
           playbackMs = await playAudio(
@@ -2748,13 +2658,6 @@
           >{savingGreeting ? "Saving…" : "Update greetings.csv"}</button
         >
         <small>{greetingStatus}</small>
-        <label>Wait notice delay (seconds)<input
-          aria-label="Wait notice delay (seconds)"
-          type="number" min="1" max="60" step="1" required
-          bind:value={lookupNoticeDelaySeconds}
-          on:change={saveLookupNoticeDelay}
-        /></label>
-        <small>Say “查詢中，請稍後。” if a lookup is still pending. Changes save automatically.</small>
       </fieldset>
     </section>
     <div class="section-label">MODEL SETTINGS</div>

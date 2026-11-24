@@ -3,238 +3,19 @@
   "name": "GeoVision · Workflow",
   "nodes": [
     {
-      "id": "rag-tool-input",
-      "name": "RAG tool input",
-      "type": "n8n-nodes-base.executeWorkflowTrigger",
-      "typeVersion": 1.1,
-      "position": [
-        70,
-        1000
-      ],
-      "parameters": {
-        "inputSource": "workflowInputs",
-        "workflowInputs": {
-          "values": [
-            {
-              "name": "operation",
-              "type": "string"
-            },
-            {
-              "name": "sessionId",
-              "type": "string"
-            },
-            {
-              "name": "query",
-              "type": "string"
-            }
-          ]
-        }
-      }
-    },
-    {
-      "id": "prepare-guidance",
-      "name": "Prepare guidance",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        1150,
-        1240
-      ],
-      "parameters": {
-        "jsCode": "const {query,records}=$('Validate query').first().json;\nreturn [{json:{query,records}}];"
-      }
-    },
-    {
-      "id": "retrieve-guidance",
-      "name": "Retrieve guidance",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [
-        1690,
-        1240
-      ],
-      "parameters": {
-        "method": "POST",
-        "url": "http://knowledge:8085/rag",
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={{ $json }}",
-        "options": {
-          "timeout": 240000
-        }
-      },
-      "executeOnce": true
-    },
-    {
-      "id": "return-guidance",
-      "name": "Return guidance",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        1980,
-        1240
-      ],
-      "parameters": {
-        "jsCode": "const result=$input.first().json;\nif(typeof result.answer!=='string'&&!Array.isArray(result.work_orders))throw new Error('Multimodal RAG returned no result');\nreturn [{json:result}];"
-      }
-    },
-    {
-      "id": "load-knowledge-files",
-      "name": "Load knowledge files",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [
-        730,
-        1240
-      ],
-      "parameters": {
-        "url": "http://knowledge:8085/documents",
-        "options": {
-          "timeout": 240000
-        },
-        "sendQuery": false,
-        "method": "POST",
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={{ {query:$json.query,records:$json.records,routeOnly:true} }}"
-      }
-    },
-    {
-      "id": "route-scenario-reference",
-      "name": "Search imported tables?",
-      "type": "n8n-nodes-base.if",
-      "typeVersion": 2.2,
-      "position": [
-        940,
-        1240
-      ],
-      "parameters": {
-        "conditions": {
-          "options": {
-            "caseSensitive": true,
-            "leftValue": "",
-            "typeValidation": "strict",
-            "version": 2
-          },
-          "conditions": [
-            {
-              "id": "has-scenario-reference",
-              "leftValue": "={{ $json.scenario_reference || $json.scenario_lookup?.term || \"\" }}",
-              "rightValue": "",
-              "operator": {
-                "type": "string",
-                "operation": "notEmpty",
-                "singleValue": true
-              }
-            }
-          ],
-          "combinator": "and"
-        },
-        "options": {}
-      }
-    },
-    {
-      "id": "lookup-scenario-reference",
-      "name": "Look up scenario records",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [
-        1150,
-        1470
-      ],
-      "parameters": {
-        "method": "POST",
-        "url": "http://127.0.0.1:8087/lookup-records",
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={{ {reference:$json.scenario_reference,lookup:$json.scenario_lookup} }}",
-        "options": {
-          "timeout": 240000
-        }
-      }
-    },
-    {
-      "id": "route-directory-match",
-      "name": "Use scenario result?",
-      "type": "n8n-nodes-base.if",
-      "typeVersion": 2.2,
-      "position": [
-        1380,
-        1470
-      ],
-      "parameters": {
-        "conditions": {
-          "options": {
-            "caseSensitive": true,
-            "leftValue": "",
-            "typeValidation": "strict",
-            "version": 2
-          },
-          "conditions": [
-            {
-              "id": "has-directory-match",
-              "leftValue": "={{ !$('Load knowledge files').first().json.scenario_lookup?.fallback || $json.matched_rows > 0 ? 'yes' : '' }}",
-              "rightValue": "",
-              "operator": {
-                "type": "string",
-                "operation": "notEmpty",
-                "singleValue": true
-              }
-            }
-          ],
-          "combinator": "and"
-        },
-        "options": {}
-      }
-    },
-    {
-      "id": "return-scenario-reference",
-      "name": "Return scenario records",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        1600,
-        1470
-      ],
-      "parameters": {
-        "jsCode": "const {result,scenario_lookup}=$('Load knowledge files').first().json;\nconst {records,matched_rows,tables}=$input.first().json;\nif(!Array.isArray(records)||!Number.isInteger(matched_rows))throw new Error('Invalid scenario lookup result');\nreturn [{json:{...result,scenario_lookup,scenario_records:records,scenario_match_count:matched_rows,scenario_tables:tables}}];"
-      }
-    },
-    {
-      "id": "manual-rag-test",
-      "name": "Test RAG",
-      "type": "n8n-nodes-base.manualTrigger",
+      "id": "workflow-group-1",
+      "name": "1 · IVR call",
+      "type": "n8n-nodes-base.stickyNote",
       "typeVersion": 1,
       "position": [
-        70,
-        1500
-      ],
-      "parameters": {}
-    },
-    {
-      "id": "rag-test-query",
-      "name": "Test query",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        290,
-        1500
+        0,
+        0
       ],
       "parameters": {
-        "jsCode": "// Edit this text to test another retrieval question.\nreturn [{json:{query:'維修工單回報時，SN、製造日期與電容值要如何記錄？'}}];"
-      }
-    },
-    {
-      "id": "validate-rag-query",
-      "name": "Validate query",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        510,
-        1240
-      ],
-      "parameters": {
-        "jsCode": "const input=$input.first().json;\nif(typeof input.query!=='string'||!input.query.trim())throw new Error('缺少 query；手動測試請使用 Test RAG。');\nreturn [{json:{query:input.query.trim(),records:input.records||[]}}];"
+        "width": 2280,
+        "height": 420,
+        "color": 5,
+        "content": "## IVR call\nThe knowledge service runs the call from the uploaded HTML call script (opening, 情境 routing, dialogue, session memory). Saved work orders are passed in so callers can ask about them. The reply is returned first; a completed work order is then extracted and upserted into the work_orders Data Table."
       }
     },
     {
@@ -243,8 +24,8 @@
       "type": "n8n-nodes-base.webhook",
       "typeVersion": 2.1,
       "position": [
-        70,
-        150
+        80,
+        160
       ],
       "parameters": {
         "httpMethod": "POST",
@@ -255,95 +36,61 @@
       "webhookId": "ivr-agent"
     },
     {
-      "id": "prepare-ivr-input",
-      "name": "Prepare IVR input",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
+      "id": "ivr-read-work-orders-table",
+      "name": "Read work orders · Data Table",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
       "position": [
-        290,
-        150
+        520,
+        160
       ],
+      "alwaysOutputData": true,
       "parameters": {
-        "jsCode": "const body = $input.first().json.body;\nif (!body || typeof body.text !== 'string' || !body.text.trim() || typeof body.sessionId !== 'string' || !body.sessionId.trim() || typeof body.model !== 'string' || !body.model.trim()) throw new Error('text, sessionId and model are required');\nconst messages = Array.isArray(body.messages) ? body.messages : [];\nif (messages.length > 100 || messages.some(m => !['user','assistant'].includes(m.role) || typeof m.content !== 'string')) throw new Error('Invalid conversation history');\nconst text=body.text.trim();\nconst user_transcripts=messages.filter(m=>m.role==='user').map(m=>m.content);\nlet query=text;\nif(!/[工公]單/.test(text)&&/^(?:那|我要查詢|查詢)?(?:最舊|最早|最新|全部|所有)(?:的|呢|[。？?\\s])*$/u.test(text)&&user_transcripts.some(t=>/[工公]單/.test(t)))query=`查詢工單：${text}`;\nconst scenarioReport=body.scenarioReport;\nif (scenarioReport!==undefined && (![2,3].includes(scenarioReport?.number)||!['zh','en'].includes(scenarioReport.language))) throw new Error('Invalid scenario report');\nconst report_messages=scenarioReport?messages.map(({role,content})=>({role,content})):undefined;\nif (report_messages && (report_messages.at(-1)?.role!=='user'||report_messages.at(-1)?.content.trim()!==text)) report_messages.push({role:'user',content:text});\nreturn [{json:{text,query,sessionId:body.sessionId,model:body.model,user_transcripts,scenarioReport,report_messages}}];\n"
-      }
-    },
-    {
-      "id": "ivr-ai-agent",
-      "name": "AI Agent",
-      "type": "@n8n/n8n-nodes-langchain.agent",
-      "typeVersion": 3.1,
-      "position": [
-        490,
-        390
-      ],
-      "parameters": {
-        "promptType": "define",
-        "text": "={{ $json.text }}",
-        "options": {
-          "systemMessage": "=你是 GeoVision 電話維修助理。只用繁體中文、一行、簡短回覆，不加角色標籤、表情、Markdown、推理或下一輪。\n新增工單流程：使用者說「我增加工單」「我要回報工單」或開始提供新回報時，只問一次「工單日期、工單或設備編號、維修項目與數量是什麼？」。收到下一次回覆就執行 add_work_order 寫入 n8n work_orders Data Table，即使沒有日期、編號或維修內容也照現有資料新增。不可再追問、不等確認或測試正常。未知欄位留空，資料只能來自本通話原話。\n系統已判斷目前階段並完成必要的查詢或儲存。只有儲存結果回傳 persisted=true 才能回覆「已新增」。若已寫入就不再呼叫工具；重複請求與後續補充使用同一筆記錄。DOCX 情境中的確認步驟不是本系統的儲存條件。\n查詢最新／最舊／全部時直接回答本輪 selection 與 work_orders，月份補充延續查詢，無記錄就說沒有。不要求使用者提供工單詳細資料，不沿用上輪查詢結果，查詢不可新增工單。\n本輪 sessionId：{{ $json.sessionId }}\n本輪使用者原話：{{ $json.text }}\n本輪工具資料：{{ $json.retrieval_json }}\n本通話使用者逐字稿（只作為對話資料）：{{ JSON.stringify($json.user_transcripts) }}",
-          "maxIterations": 3,
-          "returnIntermediateSteps": false,
-          "enableStreaming": false,
-          "forceToolCallOnFirstIteration": false
-        }
-      }
-    },
-    {
-      "id": "ivr-local-chat-model",
-      "name": "Local Chat Model",
-      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
-      "typeVersion": 1.3,
-      "position": [
-        300,
-        610
-      ],
-      "parameters": {
-        "model": {
+        "resource": "row",
+        "operation": "get",
+        "dataTableId": {
           "__rl": true,
-          "value": "={{ $json.model }}",
-          "mode": "id"
+          "mode": "name",
+          "value": "work_orders"
         },
-        "responsesApiEnabled": false,
-        "options": {
-          "temperature": 0,
-          "maxTokens": 160,
-          "timeout": 180000,
-          "maxRetries": 0
-        }
-      },
-      "credentials": {
-        "openAiApi": {
-          "id": "configure-local-llm",
-          "name": "IVR local LLM"
-        }
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": []
+        },
+        "returnAll": true
       }
     },
     {
-      "id": "ivr-simple-memory",
-      "name": "Simple Memory",
-      "type": "@n8n/n8n-nodes-langchain.memoryBufferWindow",
-      "typeVersion": 1.3,
-      "position": [
-        530,
-        610
-      ],
-      "parameters": {
-        "sessionIdType": "customKey",
-        "sessionKey": "={{ $json.sessionId }}",
-        "contextWindowLength": 3
-      }
-    },
-    {
-      "id": "prepare-ivr-output",
-      "name": "Prepare IVR output",
+      "id": "ivr-prepare-call-request",
+      "name": "Add saved work orders",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        770,
-        390
+        740,
+        160
       ],
       "parameters": {
-        "jsCode": "const item=$input.first().json,context=$('Prepare agent context').first().json;\nconst tools=[context.executed_tool||'retrieve_knowledge'];\nconst saved=context.saved;\nif(context.scenarioReport&&saved){\n const id=saved.work_order.id;\n const reply=context.scenarioReport.language==='en'?`Work order ${id} has been saved.`:`工單 ${id} 已儲存。`;\n return [{json:{reply,tools:[...new Set(tools)],scenario_report:true,work_order_id:id}}];\n}\nlet reply;\nif(saved)reply=`工單 ${saved.work_order.fields?.工單編號||saved.work_order.id} ${saved.updated?'已補充':'已新增'}。`;\nelse if(typeof context.facts.answer==='string'&&!context.facts.selection)reply=context.facts.answer;\nelse if(context.facts.scenario_lookup?.kind==='catalog'){\n const {scenario_lookup:lookup,scenario_tables:tables=[]}=context.facts;\n const labels=tables.map(table=>{\n  const fields=table.headers.slice(0,3).join('、');\n  return (table.sheet||table.name)+(fields?`（${fields}）`:'');\n });\n const summary=labels.join('、');\n reply=summary?`${lookup.term} 可查詢：${summary.slice(0,175)}${summary.length>175?'…':''}。`:`目前沒有可查詢的 ${lookup.term} 資料表。`;\n}\nelse if(Array.isArray(context.facts.scenario_records)){\n const {reference,scenario_lookup:lookup,scenario_records:records,scenario_match_count:count}=context.facts;\n const term=reference||{\n  employee:`員工編號 ${lookup?.term}`,serial:`SN ${lookup?.term}`,customer_site:`${lookup?.customer} ${lookup?.term}`,\n }[lookup?.kind]||lookup.term;\n const key=reference||lookup.term;\n const row=records[0];\n if(!row)reply=reference?`沒有查到 ${reference} 的工單。`:`沒有查到 ${term} 的資料。`;\n else if(row.directory_reply)reply=row.directory_reply;\n else{\n  const fields=Object.entries(row.fields).flatMap(([name,value])=>{\n   const text=String(value??'').replace(/\\s+/g,' ').trim();\n   return !text||text.normalize('NFKC').toUpperCase()===key.normalize('NFKC').toUpperCase()?[]:[`${name} ${text}`];\n  });\n  const prefix=`${term}（${row.table}）`;\n  const suffix=(count>1?`；另有 ${count-1} 筆相符記錄`:'')+(row.ocr?'；圖片辨識結果請核對原件':'')+'。';\n  const details=fields.length?`：${fields.join('，')}`:'';\n  const budget=Math.max(0,200-suffix.length);\n  const line=prefix+details;\n  reply=(line.length>budget?line.slice(0,budget-1)+'…':line)+suffix;\n }\n}\nelse if(context.facts.selection){\n const facts=context.facts,rows=facts.work_orders;\n const displayDate=date=>/^\\d{4}-\\d{2}-\\d{2}$/.test(date)?date.replaceAll('-','/'):date||'日期未完整';\n const reference=facts.reference;\n const label={newest:'最新',oldest:'最舊',all:'查到的'}[facts.selection]||'';\n const scope=facts.period?facts.period.slice(0,4)+'年'+Number(facts.period.slice(5))+'月':'';\n if(!rows.length&&reference)reply=`沒有查到 ${reference} 的工單。`;\n else if(!rows.length&&scope)reply=`${scope}沒有工單記錄。`;\n else if(!rows.length)reply=facts.undated_count>0?`${facts.undated_count} 筆工單日期未完整，無法判定${label}工單。`:`沒有查到${label}工單的有效記錄。`;\n else if(facts.view==='fans'||facts.view==='details'){\n  const items=rows.flatMap(r=>Array.isArray(r.fields.FAN明細)?r.fields.FAN明細:[]);\n  const total=items.length?items.reduce((n,item)=>n+Number(item.數量||0),0):rows.reduce((n,r)=>n+(Number(String(r.fields.FAN數量??'').replace(/個$/,''))||0),0);\n  const types=[...new Set(items.map(i=>i.類型).filter(Boolean))].map(type=>`${type} ${items.filter(i=>i.類型===type).reduce((n,i)=>n+Number(i.數量||0),0)} 個`).join('、');\n  const fan=total?`FAN 共 ${total} 個${types?'（'+types+'）':''}`:'未記錄 FAN 數量';\n  reply=facts.view==='fans'?`${fan}。`:rows.slice(0,2).map(({fields:f})=>`${f['派工單號']}：${displayDate(f['派工日期'])}，${f['維修內容']||f['維修項目']||f['派工項目']||'未記錄維修內容'}`).join('；')+`，${fan}。`;\n }else{\n  const summaries=rows.slice(0,3).map(({fields:f})=>`${f['派工單號']}（${displayDate(f['派工日期'])}）`);\n  reply=`${scope}${label}工單${rows.length===1?'為':'共 '+rows.length+' 筆：'}${rows.length===1?' ':''}${summaries.join('、')}${rows.length>3?'，其餘 '+(rows.length-3)+' 筆可再查詢':''}。`;\n  if(facts.undated_count>0&&facts.selection!=='all')reply+=`另有 ${facts.undated_count} 筆日期未完整，未列入排序。`;\n }\n}else if(context.report_reply){\n reply=context.report_reply;\n}else{\n if(typeof item.output!=='string'||!item.output.trim())throw new Error('AI Agent returned an empty reply');\n reply=item.output.replace(/<(?:think|analysis)\\b[^>]*>[\\s\\S]*?(?:<\\/(?:think|analysis)>|$)/gi,'')\n  .replace(/<\\/?\\p{L}[\\p{L}\\p{N}_:-]*(?:\\s+[^<>]*)?\\s*\\/?>/gu,'').trim().replace(/^(?:AI|助理|GEOVISION)[：:]\\s*/i,'').split(/\\n|【|---/)[0].trim();\n // One conversational line, never a repeated essay, markdown or chain of thought.\n reply=reply.replace(/[😀-🙏🌀-🫿]/gu,'').trim();\n const first=reply.match(/^.*?[。？！!?](?:[」”])?/u)?.[0];\n if(first)reply=first;\n if(reply.length>200)reply='請告訴我這一輪要查詢或確認的重點？';\n if(/已(?:新增|儲存|建立|輸入完成|完成)|新增成功|保存成功|完成回報|回報完成|工單完成/.test(reply))reply='工單尚未儲存。';\n if(!reply||/[：:]$/.test(reply))reply='目前沒有足夠的資料回答這個問題。';\n}\nreturn [{json:{reply:reply.replace(/\\s*\\n\\s*/g,' '),tools:[...new Set(tools)]}}];\n"
+        "jsCode": "// The IVR engine answers questions about saved work orders from these rows.\nconst body=$('IVR Input').first().json.body??{};\nif(typeof body.text!=='string')return [{json:body}];\nconst text=value=>String(value??'');\nconst rows=$input.all().map(item=>item.json).filter(row=>row.id&&row.order_id)\n .sort((a,b)=>text(b.createdAt).localeCompare(text(a.createdAt))).slice(0,20)\n .map(row=>({order_id:text(row.order_id),reference_number:text(row.reference_number),dispatch_date:text(row.dispatch_date),\n  title:text(row.title),equipment_number:text(row.equipment_number),maintenance_items:text(row.maintenance_items),\n  notes:text(row.notes),test_result:text(row.test_result),saved_at:text(row.createdAt)}));\nreturn [{json:{...body,work_orders:rows}}];"
+      }
+    },
+    {
+      "id": "ivr-engine-turn",
+      "name": "IVR call engine",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        960,
+        160
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://knowledge:8085/ivr",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json }}",
+        "options": {
+          "timeout": 240000
+        }
       }
     },
     {
@@ -352,8 +99,8 @@
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.4,
       "position": [
-        1030,
-        390
+        1180,
+        160
       ],
       "parameters": {
         "respondWith": "json",
@@ -362,128 +109,13 @@
       }
     },
     {
-      "id": "workflow-group-1",
-      "name": "1 · IVR Input → AI Agent → IVR Output",
-      "type": "n8n-nodes-base.stickyNote",
-      "typeVersion": 1,
-      "position": [
-        0,
-        0
-      ],
-      "parameters": {
-        "width": 1220,
-        "height": 820,
-        "content": "## IVR dialogue\nRegister the caller turn, execute the knowledge workflow directly and return the reply.",
-        "color": 5
-      }
-    },
-    {
-      "id": "workflow-group-3",
-      "name": "3 · RAG",
-      "type": "n8n-nodes-base.stickyNote",
-      "typeVersion": 1,
-      "position": [
-        0,
-        870
-      ],
-      "parameters": {
-        "width": 2050,
-        "height": 1560,
-        "content": "## Knowledge and work orders\nRead or save native Data Table rows and retrieve source evidence.",
-        "color": 6
-      }
-    },
-    {
-      "id": "register-ivr-turn",
-      "name": "Register caller turn",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [
-        510,
-        150
-      ],
-      "parameters": {
-        "method": "POST",
-        "url": "http://knowledge:8085/call-turn",
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={{ {sessionId:$json.sessionId,text:$json.text,user_transcripts:$json.user_transcripts,...($json.scenarioReport?{scenarioReport:$json.scenarioReport,report_messages:$json.report_messages}:{})} }}",
-        "options": {}
-      }
-    },
-    {
-      "id": "retrieve-ivr-turn",
-      "name": "Retrieve current turn",
-      "type": "n8n-nodes-base.executeWorkflow",
-      "typeVersion": 1.3,
-      "position": [
-        950,
-        150
-      ],
-      "parameters": {
-        "source": "database",
-        "workflowId": {
-          "__rl": true,
-          "value": "ivrKnowledgeTools",
-          "mode": "id"
-        },
-        "workflowInputs": {
-          "mappingMode": "defineBelow",
-          "value": {
-            "operation": "={{ $json.tool === 'add_work_order' ? 'add' : 'retrieve' }}",
-            "sessionId": "={{ $json.sessionId }}",
-            "query": "={{ $json.query || $('Prepare IVR input').first().json.query }}"
-          },
-          "schema": [
-            {
-              "id": "operation",
-              "displayName": "operation",
-              "type": "string",
-              "display": true
-            },
-            {
-              "id": "sessionId",
-              "displayName": "sessionId",
-              "type": "string",
-              "display": true
-            },
-            {
-              "id": "query",
-              "displayName": "query",
-              "type": "string",
-              "display": true
-            }
-          ],
-          "matchingColumns": [],
-          "attemptToConvertTypes": false,
-          "convertFieldsToString": false
-        },
-        "options": {
-          "waitForSubWorkflow": true
-        }
-      }
-    },
-    {
-      "id": "prepare-agent-context",
-      "name": "Prepare agent context",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        70,
-        390
-      ],
-      "parameters": {
-        "jsCode": "const input=$('Prepare IVR input').first().json;\nconst decision=$('Register caller turn').first().json;\nconst result=$input.first().json;\nconst saved=result.persisted===true&&result.work_order?.id ? result : undefined;\nconst facts=saved ? undefined : result;\nif(decision.tool==='add_work_order'&&!saved)throw new Error('Work order persistence was not confirmed');\nif(!saved&&!Array.isArray(facts.passages)&&!Array.isArray(facts.work_orders)&&!Array.isArray(facts.scenario_records))throw new Error('No retrieval result for the current turn');\nif(decision.selection&&facts?.selection!==decision.selection)throw new Error('Knowledge workflow returned the wrong work-order selection');\nif(decision.period&&facts?.period!==decision.period)throw new Error('Knowledge workflow returned the wrong work-order month');\nif(decision.reference&&facts?.reference!==decision.reference)throw new Error('Knowledge workflow returned the wrong work-order reference');\nif(decision.view&&facts?.view!==decision.view)throw new Error('Knowledge workflow returned the wrong work-order detail view');\nconst preview=saved?{persisted:true,work_order_id:saved.work_order.id}:Array.isArray(facts.scenario_records)?{reference:facts.reference,scenario_match_count:facts.scenario_match_count,scenario_record:facts.scenario_records[0]}:facts.work_orders?{selection:facts.selection,period:facts.period,selected_count:facts.selected_count,undated_count:facts.undated_count,work_orders:facts.work_orders.slice(0,3).map(({fields:f})=>({fields:{派工單號:f['派工單號'],派工日期:f['派工日期'],負責人:f['負責人'],客戶名稱:f['客戶名稱'],派工項目:f['派工項目']}}))}:{passages:facts.passages.slice(0,3).map(text=>text.slice(0,500)),sources:[...new Set((facts.sources||[]).map(s=>s.source))]};\nreturn [{json:{...input,...decision,facts:facts||{},saved,executed_tool:decision.tool||'retrieve_knowledge',retrieval_json:JSON.stringify(preview)}}];\n"
-      }
-    },
-    {
-      "id": "ivr-route-scenario-result",
-      "name": "Scenario lookup result?",
+      "id": "ivr-work-order-pending",
+      "name": "Work order to save?",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.2,
       "position": [
-        270,
-        390
+        1400,
+        160
       ],
       "parameters": {
         "conditions": {
@@ -495,12 +127,12 @@
           },
           "conditions": [
             {
-              "id": "has-scenario-records",
-              "leftValue": "={{ ($json.facts.scenario_records || $json.facts.answer || ($json.scenarioReport && $json.saved)) ? 'yes' : '' }}",
+              "id": "work-order-pending",
+              "leftValue": "={{ $json.work_order?.pending === true }}",
               "rightValue": "",
               "operator": {
-                "type": "string",
-                "operation": "notEmpty",
+                "type": "boolean",
+                "operation": "true",
                 "singleValue": true
               }
             }
@@ -511,26 +143,13 @@
       }
     },
     {
-      "id": "prepare-tool-request",
-      "name": "Prepare tool request",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        290,
-        1000
-      ],
-      "parameters": {
-        "jsCode": "const input=$input.first().json;\nreturn [{json:{operation:input.operation||'retrieve',query:input.query||'',sessionId:input.sessionId||''}}];"
-      }
-    },
-    {
       "id": "ensure-work-orders-table",
       "name": "Ensure work_orders",
       "type": "n8n-nodes-base.dataTable",
       "typeVersion": 1.1,
       "position": [
-        510,
-        1000
+        300,
+        160
       ],
       "parameters": {
         "resource": "table",
@@ -598,54 +217,36 @@
       }
     },
     {
-      "id": "route-tool-operation",
-      "name": "Store work order?",
-      "type": "n8n-nodes-base.if",
-      "typeVersion": 2.2,
-      "position": [
-        730,
-        1000
-      ],
-      "parameters": {
-        "conditions": {
-          "options": {
-            "caseSensitive": true,
-            "leftValue": "",
-            "typeValidation": "strict",
-            "version": 2
-          },
-          "conditions": [
-            {
-              "id": "operation-add",
-              "leftValue": "={{ $('Prepare tool request').first().json.operation }}",
-              "rightValue": "add",
-              "operator": {
-                "type": "string",
-                "operation": "equals"
-              }
-            }
-          ],
-          "combinator": "and"
-        },
-        "options": {}
-      }
-    },
-    {
-      "id": "prepare-work-order-row",
-      "name": "Prepare work-order row",
+      "id": "ivr-read-work-orders",
+      "name": "Extract work orders",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        1000,
-        1000
+        1620,
+        60
       ],
       "parameters": {
         "method": "POST",
-        "url": "http://knowledge:8085/work-order-draft",
+        "url": "http://knowledge:8085/ivr",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ {sessionId:$('Prepare tool request').first().json.sessionId} }}",
-        "options": {}
+        "jsonBody": "={{ {records:true,sessionId:$('IVR Input').first().json.body.sessionId} }}",
+        "options": {
+          "timeout": 240000
+        }
+      }
+    },
+    {
+      "id": "ivr-split-work-orders",
+      "name": "One row per work order",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1840,
+        60
+      ],
+      "parameters": {
+        "jsCode": "const records=$input.first().json.records;\nif(!Array.isArray(records))throw new Error('IVR engine returned no work orders');\nreturn records.map(record=>({json:record}));"
       }
     },
     {
@@ -654,8 +255,8 @@
       "type": "n8n-nodes-base.dataTable",
       "typeVersion": 1.1,
       "position": [
-        1290,
-        1000
+        2060,
+        60
       ],
       "parameters": {
         "resource": "row",
@@ -820,57 +421,6 @@
       }
     },
     {
-      "id": "return-saved-work-order",
-      "name": "Return saved work order",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        1580,
-        1000
-      ],
-      "parameters": {
-        "jsCode": "function tableRecord(row){\n const value=name=>String(row[name]??'');\n let transcripts=[];try{transcripts=JSON.parse(row.transcripts||'[]');if(!Array.isArray(transcripts))transcripts=[];}catch{transcripts=[];}\n let resultFields={};try{resultFields=JSON.parse(row.results||'{}')?.fields||{};}catch{}\n const id=value('order_id')||`DT-${row.id}`;\n return {id,source:'n8n Data Table / work_orders',sessionId:value('session_id'),reportKey:value('report_key'),createdAt:row.createdAt,updatedAt:row.updatedAt,transcripts,fields:{...resultFields,派工單號:value('reference_number')||id,派工日期:value('dispatch_date'),工單編號:value('reference_number'),工單名稱:value('title'),設備編號:value('equipment_number'),維修內容:value('maintenance_items'),維修項目:value('maintenance_items'),數量:value('quantity'),備註:value('notes'),起機測試:value('test_result')}};\n}\n\nconst row=$input.first().json;\nif(!row.id||!row.order_id)throw new Error('Data Table did not confirm saving the row');\nreturn [{json:{persisted:true,work_order:tableRecord(row)}}];"
-      }
-    },
-    {
-      "id": "read-work-orders-table",
-      "name": "Read work orders · Data Table",
-      "type": "n8n-nodes-base.dataTable",
-      "typeVersion": 1.1,
-      "position": [
-        70,
-        1240
-      ],
-      "parameters": {
-        "resource": "row",
-        "operation": "get",
-        "dataTableId": {
-          "__rl": true,
-          "mode": "name",
-          "value": "work_orders"
-        },
-        "matchType": "allConditions",
-        "filters": {
-          "conditions": []
-        },
-        "returnAll": true
-      },
-      "alwaysOutputData": true
-    },
-    {
-      "id": "pack-table-records",
-      "name": "Prepare table records",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        290,
-        1240
-      ],
-      "parameters": {
-        "jsCode": "function tableRecord(row){\n const value=name=>String(row[name]??'');\n let transcripts=[];try{transcripts=JSON.parse(row.transcripts||'[]');if(!Array.isArray(transcripts))transcripts=[];}catch{transcripts=[];}\n let resultFields={};try{resultFields=JSON.parse(row.results||'{}')?.fields||{};}catch{}\n const id=value('order_id')||`DT-${row.id}`;\n return {id,source:'n8n Data Table / work_orders',sessionId:value('session_id'),reportKey:value('report_key'),createdAt:row.createdAt,updatedAt:row.updatedAt,transcripts,fields:{...resultFields,派工單號:value('reference_number')||id,派工日期:value('dispatch_date'),工單編號:value('reference_number'),工單名稱:value('title'),設備編號:value('equipment_number'),維修內容:value('maintenance_items'),維修項目:value('maintenance_items'),數量:value('quantity'),備註:value('notes'),起機測試:value('test_result')}};\n}\n\nconst records=$input.all().map(item=>item.json).filter(row=>row.id).map(tableRecord);\nreturn [{json:{query:$('Prepare tool request').first().json.query,records}}];"
-      }
-    },
-    {
       "id": "scenario-list-webhook",
       "name": "List uploaded scenarios",
       "type": "n8n-nodes-base.webhook",
@@ -917,53 +467,6 @@
         "responseBody": "={{ $json }}",
         "options": {}
       }
-    },
-    {
-      "parameters": {
-        "conditions": {
-          "options": {
-            "caseSensitive": true,
-            "leftValue": "",
-            "typeValidation": "strict",
-            "version": 2
-          },
-          "conditions": [
-            {
-              "id": "fixed-intake-reply",
-              "leftValue": "={{ $json.intent === 'report' ? ($json.report_reply || '') : '' }}",
-              "rightValue": "",
-              "operator": {
-                "type": "string",
-                "operation": "notEmpty",
-                "singleValue": true
-              }
-            }
-          ],
-          "combinator": "and"
-        },
-        "options": {}
-      },
-      "id": "ivr-fixed-reply",
-      "name": "Fixed reply?",
-      "type": "n8n-nodes-base.if",
-      "typeVersion": 2.2,
-      "position": [
-        730,
-        150
-      ]
-    },
-    {
-      "parameters": {
-        "jsCode": "const decision=$input.first().json;\nif(typeof decision.report_reply!=='string'||!decision.report_reply.trim())throw new Error('Fixed IVR reply is missing');\nreturn [{json:{reply:decision.report_reply.trim(),tools:[],...(decision.scenarioReport?{scenario_report:true}:{})}}];"
-      },
-      "id": "ivr-return-fixed-reply",
-      "name": "Return fixed reply",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        1010,
-        610
-      ]
     },
     {
       "id": "delete-scenario-webhook",
@@ -1094,23 +597,6 @@
           "responseCode": "={{ $json.statusCode }}"
         }
       }
-    },
-    {
-      "id": "scenario-report-input",
-      "name": "Scenario Report Input",
-      "type": "n8n-nodes-base.webhook",
-      "typeVersion": 2.1,
-      "position": [
-        70,
-        570
-      ],
-      "parameters": {
-        "httpMethod": "POST",
-        "path": "ivr-scenario-report",
-        "responseMode": "responseNode",
-        "options": {}
-      },
-      "webhookId": "ivr-scenario-report"
     },
     {
       "id": "document-rag-input",
@@ -1637,266 +1123,6 @@
     }
   ],
   "connections": {
-    "IVR Input": {
-      "main": [
-        [
-          {
-            "node": "Prepare IVR input",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Prepare IVR input": {
-      "main": [
-        [
-          {
-            "node": "Register caller turn",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Register caller turn": {
-      "main": [
-        [
-          {
-            "node": "Fixed reply?",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Retrieve current turn": {
-      "main": [
-        [
-          {
-            "node": "Prepare agent context",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Prepare agent context": {
-      "main": [
-        [
-          {
-            "node": "Scenario lookup result?",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "AI Agent": {
-      "main": [
-        [
-          {
-            "node": "Prepare IVR output",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Prepare IVR output": {
-      "main": [
-        [
-          {
-            "node": "IVR Output",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Load knowledge files": {
-      "main": [
-        [
-          {
-            "node": "Search imported tables?",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Prepare guidance": {
-      "main": [
-        [
-          {
-            "node": "Retrieve guidance",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Retrieve guidance": {
-      "main": [
-        [
-          {
-            "node": "Return guidance",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Test RAG": {
-      "main": [
-        [
-          {
-            "node": "Test query",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Local Chat Model": {
-      "ai_languageModel": [
-        [
-          {
-            "node": "AI Agent",
-            "type": "ai_languageModel",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Simple Memory": {
-      "ai_memory": [
-        [
-          {
-            "node": "AI Agent",
-            "type": "ai_memory",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "RAG tool input": {
-      "main": [
-        [
-          {
-            "node": "Prepare tool request",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Test query": {
-      "main": [
-        [
-          {
-            "node": "Prepare tool request",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Prepare tool request": {
-      "main": [
-        [
-          {
-            "node": "Ensure work_orders",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Ensure work_orders": {
-      "main": [
-        [
-          {
-            "node": "Store work order?",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Store work order?": {
-      "main": [
-        [
-          {
-            "node": "Prepare work-order row",
-            "type": "main",
-            "index": 0
-          }
-        ],
-        [
-          {
-            "node": "Read work orders · Data Table",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Prepare work-order row": {
-      "main": [
-        [
-          {
-            "node": "Save work order · Data Table",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Save work order · Data Table": {
-      "main": [
-        [
-          {
-            "node": "Return saved work order",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Read work orders · Data Table": {
-      "main": [
-        [
-          {
-            "node": "Prepare table records",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Prepare table records": {
-      "main": [
-        [
-          {
-            "node": "Validate query",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Validate query": {
-      "main": [
-        [
-          {
-            "node": "Load knowledge files",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
     "List uploaded scenarios": {
       "main": [
         [
@@ -1913,35 +1139,6 @@
         [
           {
             "node": "Scenario list result",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Fixed reply?": {
-      "main": [
-        [
-          {
-            "node": "Return fixed reply",
-            "type": "main",
-            "index": 0
-          }
-        ],
-        [
-          {
-            "node": "Retrieve current turn",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Return fixed reply": {
-      "main": [
-        [
-          {
-            "node": "IVR Output",
             "type": "main",
             "index": 0
           }
@@ -1997,82 +1194,6 @@
         [
           {
             "node": "Return file scenario",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Search imported tables?": {
-      "main": [
-        [
-          {
-            "node": "Look up scenario records",
-            "type": "main",
-            "index": 0
-          }
-        ],
-        [
-          {
-            "node": "Prepare guidance",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Look up scenario records": {
-      "main": [
-        [
-          {
-            "node": "Use scenario result?",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Scenario lookup result?": {
-      "main": [
-        [
-          {
-            "node": "Prepare IVR output",
-            "type": "main",
-            "index": 0
-          }
-        ],
-        [
-          {
-            "node": "AI Agent",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Use scenario result?": {
-      "main": [
-        [
-          {
-            "node": "Return scenario records",
-            "type": "main",
-            "index": 0
-          }
-        ],
-        [
-          {
-            "node": "Prepare guidance",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Scenario Report Input": {
-      "main": [
-        [
-          {
-            "node": "Prepare IVR input",
             "type": "main",
             "index": 0
           }
@@ -2392,6 +1513,106 @@
           }
         ]
       ]
+    },
+    "IVR Input": {
+      "main": [
+        [
+          {
+            "node": "Ensure work_orders",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IVR call engine": {
+      "main": [
+        [
+          {
+            "node": "IVR Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IVR Output": {
+      "main": [
+        [
+          {
+            "node": "Work order to save?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Work order to save?": {
+      "main": [
+        [
+          {
+            "node": "Extract work orders",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Ensure work_orders": {
+      "main": [
+        [
+          {
+            "node": "Read work orders · Data Table",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract work orders": {
+      "main": [
+        [
+          {
+            "node": "One row per work order",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "One row per work order": {
+      "main": [
+        [
+          {
+            "node": "Save work order · Data Table",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read work orders · Data Table": {
+      "main": [
+        [
+          {
+            "node": "Add saved work orders",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Add saved work orders": {
+      "main": [
+        [
+          {
+            "node": "IVR call engine",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     }
   },
   "active": false,
@@ -2402,6 +1623,6 @@
   "pinData": {},
   "tags": [],
   "meta": {
-    "ivrWorkflowRevision": 27
+    "ivrWorkflowRevision": 31
   }
 }

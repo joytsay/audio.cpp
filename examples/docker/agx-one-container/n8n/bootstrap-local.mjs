@@ -1,7 +1,7 @@
 import {publishWorkflow} from './publish-workflow.mjs';
 import {unpublishWorkflow,upgradeResultsColumn} from './unpublish-workflow.mjs';
 import {createScenarioManager} from './scenario-workflows.mjs';
-import {managedWorkflowIds, removeLegacyScenarioUpload, scenarioAdminId, splitManagedWorkflow} from './workflow-layout.mjs';
+import {knowledgeToolsId, managedWorkflowIds, removeLegacyScenarioUpload, scenarioAdminId, splitManagedWorkflow} from './workflow-layout.mjs';
 import { spawn } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
@@ -237,6 +237,16 @@ export async function importMissing({ templates = '/templates', run = runCli, ha
     log(`[ivr-n8n] Imported ${workflows.map(workflow=>workflow.name).join(', ')}.${backup ? ' Backup: '+backup : ''}`);
   }
 
+  // Revision 30 runs calls in the knowledge service; unpublish the old
+  // Knowledge Tools sub-workflow (kept, with its edits, for reference).
+  const tools = installed.get(knowledgeToolsId);
+  if (tools && (tools.active || tools.activeVersionId)) {
+    await files.mkdir(backupDir,{recursive:true});
+    await files.writeFile(path.join(backupDir,`knowledge-tools-${Date.now()}.json`),JSON.stringify(tools),{mode:0o600});
+    await retireWorkflow(knowledgeToolsId);
+    log(`[ivr-n8n] Unpublished ${knowledgeToolsId}; the IVR engine in the knowledge service replaces it.`);
+  }
+
   if (legacy && (legacy.active || legacy.activeVersionId)) {
     if (!installed.has(template.id)) throw new Error('Cannot retire the legacy workflow before the new workflow exists');
     if (!backup || existing?.id !== legacyId) {
@@ -268,7 +278,7 @@ export async function prepareStartupWorkflow({
     for (const id of managedWorkflowIds) {
       if (await publish(id)) log(`[ivr-n8n] Published /workflow/${id}.`);
     }
-  }else log('[ivr-n8n] Automatic publishing disabled. Publish Knowledge Tools before the main IVR workflow, then Scenario Admin and Document RAG.');
+  }else log('[ivr-n8n] Automatic publishing disabled. Publish GeoVision · Workflow, Scenario Admin and Document RAG.');
 }
 
 export async function bootstrap({

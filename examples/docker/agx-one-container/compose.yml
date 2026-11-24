@@ -178,6 +178,10 @@ services:
       PORT: 8085
       KNOWLEDGE_DATA_ROOT: /data
       OCR_LANGUAGES: chi_tra+eng
+      # IVR call engine: the already-loaded vision model answers every turn and
+      # reads the call script's figures (inventory tables, SOPs, directory cards).
+      IVR_LLM_URL: http://voice-ai:8087/v1
+      IVR_LLM_MODEL: ivr-vision
       IVR_RAG_URL: http://n8n:5678/webhook/ivr-document-rag
       IVR_RAG_EMBED_MODEL: ${IVR_RAG_EMBED_MODEL:-gorse-io/Qwen3-VL-Embedding-2B-GGUF:Q4_K_M}
       IVR_RAG_EMBED_DIMENSIONS: ${IVR_RAG_EMBED_DIMENSIONS:-2048}

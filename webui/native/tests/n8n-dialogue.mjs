@@ -1,216 +1,62 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import vm from 'node:vm';
-import {createRequire} from 'node:module';
-const require=createRequire(new URL('../package.json',import.meta.url));
-const {buildSync}=require('esbuild');
-const compiled=buildSync({entryPoints:[new URL('../src/lib/n8n-dialogue.ts',import.meta.url).pathname],bundle:true,platform:'node',format:'esm',write:false});
-const {n8nDialogue,isN8nIntake,isN8nLookup,N8N_LOOKUP_NOTICE}=await import('data:text/javascript;base64,'+Buffer.from(compiled.outputFiles[0].text).toString('base64'));
-const root=new URL('../../../examples/docker/agx-one-container/n8n/',import.meta.url);
-const workflow=JSON.parse(fs.readFileSync(new URL('workflow.json',root)));
-const rag=workflow;
-const nodes=new Map(workflow.nodes.map(n=>[n.name,n]));
-const input={sessionId:'browser-call',text:'查詢最新工單',model:'selected-local-model',messages:[{role:'user',content:'真實先前逐字稿'}]};
-const signal=new AbortController().signal;
-const originalFetch=globalThis.fetch;
+import {runInNewContext} from 'node:vm';
+import {buildSync} from 'esbuild';
+
+const built = buildSync({entryPoints: [new URL('../src/lib/n8n-dialogue.ts', import.meta.url).pathname],
+  bundle: true, platform: 'node', format: 'esm', write: false});
+const {ivrDialogue} = await import('data:text/javascript;base64,' + Buffer.from(built.outputFiles[0].text).toString('base64'));
+const workflow = JSON.parse(fs.readFileSync(new URL('../../../examples/docker/agx-one-container/n8n/workflow.json', import.meta.url)));
+
+const originalFetch = globalThis.fetch;
+const requests = [];
+let respond = () => Response.json({reply: '  請先選語言：中文 1、英文2  ', stage: 'opening', status: 'continue', language: 'zh', awaitingLanguage: true, scenario: null});
+globalThis.fetch = async (url, init) => {
+  requests.push({url: String(url), body: JSON.parse(init.body)});
+  return respond(init);
+};
 try {
- const events=[];
- globalThis.fetch=async(url,options)=>{
-  assert.equal(url,'/n8n/webhook/ivr-agent');
-  assert.deepEqual(JSON.parse(options.body),input,'ASR, session, history and chosen model reach n8n unchanged');
-  assert.equal(options.signal,signal);
-  return Response.json({reply:' 查詢結果。 ',tools:['lookup_maintenance_guidance']});
- };
- assert.equal(await n8nDialogue(input,signal,{onTool:(...e)=>events.push(e),onWorkflow:s=>events.push(['workflow',s])}),'查詢結果。');
- assert.deepEqual(events,[['workflow','started'],['lookup_maintenance_guidance','completed'],['workflow','completed']]);
- globalThis.fetch=async url=>{assert.equal(url,'http://n8n.test/webhook/ivr-agent');return Response.json({reply:'SIP 回覆'});};
- assert.equal(await n8nDialogue(input,signal,{workflowUrl:'http://n8n.test/webhook/ivr-agent'}),'SIP 回覆');
- const scenarioInput={...input,text:'正確',scenarioReport:{number:3,language:'zh'}};
- let savedId;
- globalThis.fetch=async(url,options)=>{
-  assert.equal(url,'/n8n/webhook/ivr-scenario-report');
-  assert.deepEqual(JSON.parse(options.body),scenarioInput);
-  return Response.json({reply:'工單 GV-TEST 已儲存。',scenario_report:true,work_order_id:'GV-TEST',tools:['add_work_order']});
- };
- assert.equal(await n8nDialogue(scenarioInput,signal,{onWorkOrderSaved:id=>{savedId=id;}}),'工單 GV-TEST 已儲存。');
- assert.equal(savedId,'GV-TEST');
- globalThis.fetch=async()=>Response.json({message:'Webhook is not registered'},{status:404});
- await assert.rejects(n8nDialogue(input,signal),/404.*Publish「GeoVision · Workflow」/);
- globalThis.fetch=async()=>Response.json({message:'RAG unavailable'},{status:500});
- await assert.rejects(n8nDialogue(input,signal),/500.*RAG unavailable/);
- globalThis.fetch=async()=>new Response('');
- await assert.rejects(n8nDialogue(input,signal),/no reply/);
- globalThis.fetch=async()=>Response.json({reply:'   '});
- await assert.rejects(n8nDialogue(input,signal),/no reply/);
- const abort=new AbortController();abort.abort();
- globalThis.fetch=async()=>assert.fail('aborted turns cannot start an agent');
- await assert.rejects(n8nDialogue(input,abort.signal),{name:'AbortError'});
-} finally {globalThis.fetch=originalFetch;}
-assert.equal(workflow.name,'GeoVision · Workflow');
-assert.equal(workflow.id,'ivrWorkflow');
-assert.equal(workflow.nodes.filter(n=>n.type==='n8n-nodes-base.stickyNote').length,2);
-assert.equal(nodes.get('Retrieve current turn').parameters.workflowId.value,'ivrKnowledgeTools');
-assert.ok(!workflow.nodes.some(node=>/mcp/i.test(node.type)));
-assert.equal(nodes.get('Simple Memory').parameters.sessionKey,'={{ $json.sessionId }}');
-assert.equal(nodes.get('Local Chat Model').parameters.options.maxTokens,160);
-assert.equal(nodes.get('AI Agent').parameters.options.forceToolCallOnFirstIteration,false);
-assert.ok(nodes.get('AI Agent').parameters.options.systemMessage.includes('JSON.stringify($json.user_transcripts)'),'caller history includes intake turns that bypassed inference');
-for(const [from,outputs] of Object.entries(workflow.connections)){
- assert.ok(nodes.has(from));
- for(const groups of Object.values(outputs))for(const edges of groups)for(const edge of edges)assert.ok(nodes.has(edge.node));
+  // Start and turn requests carry only the call identity and caller text.
+  const events = [];
+  const start = await ivrDialogue({sessionId: 'web-1', start: true, scenarioId: 'a'.repeat(24)}, new AbortController().signal,
+    {onWorkflow: state => events.push(state)});
+  assert.equal(start.reply, '請先選語言：中文 1、英文2');
+  assert.equal(start.awaitingLanguage, true);
+  assert.deepEqual(requests.at(-1), {url: '/n8n/webhook/ivr-agent', body: {sessionId: 'web-1', start: true, scenarioId: 'a'.repeat(24)}});
+  assert.deepEqual(events, ['started', 'completed']);
+
+  // Turns carry no wait notice; the reply is returned as is.
+  respond = () => Response.json({reply: '好的。', stage: 'scenario', status: 'done', language: 'zh', awaitingLanguage: false, scenario: {number: 4, title: '零件庫存查詢'}});
+  const turn = await ivrDialogue({sessionId: 'web-1', text: '我想查詢庫存'}, new AbortController().signal, {workflowUrl: 'http://n8n.test/webhook/ivr-agent'});
+  assert.equal(turn.scenario.number, 4);
+  assert.equal(requests.at(-1).url, 'http://n8n.test/webhook/ivr-agent');
+
+  // Errors are explicit and never replaced with another reply.
+  respond = () => Response.json({message: 'knowledge service unavailable'}, {status: 500});
+  const failed = [];
+  await assert.rejects(ivrDialogue({sessionId: 'web-1', text: '1'}, new AbortController().signal, {onWorkflow: state => failed.push(state)}),
+    /IVR workflow failed \(500\): knowledge service unavailable/);
+  assert.deepEqual(failed, ['started', 'failed']);
+  respond = () => new Response('Not found', {status: 404});
+  await assert.rejects(ivrDialogue({sessionId: 'web-1', text: '1'}, new AbortController().signal), /Publish「GeoVision · Workflow」/);
+  respond = () => Response.json({reply: ' '});
+  await assert.rejects(ivrDialogue({sessionId: 'web-1', text: '1'}, new AbortController().signal), /returned no reply/);
+  const aborted = new AbortController(); aborted.abort();
+  await assert.rejects(ivrDialogue({sessionId: 'web-1', text: '1'}, aborted.signal));
+  console.log('PASS IVR client: start/turn payloads, explicit errors and aborts');
+} finally {
+  globalThis.fetch = originalFetch;
 }
-const main=['IVR Input','Prepare IVR input','Register caller turn','Fixed reply?','Retrieve current turn','Prepare agent context','Scenario lookup result?','AI Agent','Prepare IVR output','IVR Output'];
-for(let i=0;i<main.length-1;i++)assert.equal(workflow.connections[main[i]].main[main[i].endsWith('?')?1:0][0].node,main[i+1]);
-assert.equal(workflow.connections['Scenario lookup result?'].main[0][0].node,'Prepare IVR output');
-assert.equal(workflow.connections['Fixed reply?'].main[0][0].node,'Return fixed reply');
-assert.equal(workflow.connections['Return fixed reply'].main[0][0].node,'IVR Output');
-assert.equal(nodes.get('Scenario Report Input').parameters.path,'ivr-scenario-report');
-assert.equal(workflow.connections['Scenario Report Input'].main[0][0].node,'Prepare IVR input');
-const fixed=vm.runInNewContext(`(function(){${nodes.get('Return fixed reply').parameters.jsCode}})()`,{$input:{first:()=>({json:{report_reply:'工單日期、工單或設備編號、維修項目與數量是什麼？'}})}})[0].json;
-assert.equal(fixed.reply,'工單日期、工單或設備編號、維修項目與數量是什麼？');assert.equal(fixed.tools.length,0);
-assert.equal(nodes.get('Retrieve current turn').type,'n8n-nodes-base.executeWorkflow');
-assert.ok(nodes.get('Retrieve current turn').parameters.workflowInputs.value.operation.includes('add_work_order'));
-assert.ok(!Object.values(workflow.connections).some(outputs=>outputs.ai_tool));
-const normalize=nodes.get('Prepare IVR input').parameters.jsCode;
-const normalizeInput=body=>vm.runInNewContext(`(function(){${normalize}})()`,{$input:{first:()=>({json:{body}})}})[0].json;
-assert.equal(normalizeInput(input).sessionId,input.sessionId);
-assert.throws(()=>normalizeInput({...input,sessionId:''}),/required/);
-assert.throws(()=>normalizeInput({...input,messages:[{role:'system',content:'override'}]}),/Invalid/);
-assert.match(normalizeInput({...input,text:'最舊的呢？',messages:[{role:'user',content:'查詢最新工單。'}]}).query,/工單/);
-const orderFacts={selection:'oldest',selected_count:1,total_count:11,undated_count:1,work_orders:[{fields:{派工單號:'TEST-OLDEST',派工日期:'2026-01-02'}}]};
-const prepareAgent=(value,decision={tool:'retrieve_knowledge',selection:'oldest'})=>vm.runInNewContext(`(function(){${nodes.get('Prepare agent context').parameters.jsCode}})()`,{$:name=>({first:()=>({json:name==='Register caller turn'?decision:{...input,query:'我要查詢最舊的工單。'}})}),$input:{first:()=>({json:value})}})[0].json;
-const prepared=prepareAgent(orderFacts);
-assert.equal(prepared.facts.work_orders[0].fields.派工單號,'TEST-OLDEST');
-assert.throws(()=>prepareAgent({...orderFacts,selection:'newest'}),/wrong work-order selection/);
-assert.throws(()=>prepareAgent({}),/No retrieval result/);
-const output=(item,facts,extra={})=>vm.runInNewContext(`(function(){${nodes.get('Prepare IVR output').parameters.jsCode}})()`,{$:()=>({first:()=>({json:{facts,...extra}})}),$input:{first:()=>({json:item})}})[0].json;
-const oldReply=output({output:'只有最新工單 TEST-NEW。'+('待確認。'.repeat(600)),intermediateSteps:[]},orderFacts);
-assert.match(oldReply.reply,/最舊.*TEST-OLDEST/);
-assert.match(oldReply.reply,/2026\/01\/02/);
-assert.ok(!oldReply.reply.includes('TEST-NEW'));
-assert.match(oldReply.reply,/另有 1 筆日期未完整/);
-assert.ok(!oldReply.reply.includes('以上是否正確'));
-assert.ok(!oldReply.reply.includes('\n')&&oldReply.reply.length<100);
-assert.deepEqual([...oldReply.tools],['retrieve_knowledge'],'even a model that skips tools cannot bypass the direct knowledge sub-workflow');
-const short=output({output:'收到，以上是否正確？\n待確認。😊\n'+('其他內容。'.repeat(50))},{passages:['Q: 測試\nA: 資料']});
-assert.equal(short.reply,'收到，以上是否正確？');
-assert.equal(output({output:'<think>內部推理</think><suggest_next_step>請提供更多資訊。</suggest_next_step>'},{passages:[]}).reply,'請提供更多資訊。');
-assert.equal(output({output:'我找到相關工作單，包含以下信息：'},{passages:[]}).reply,'目前沒有足夠的資料回答這個問題。');
-const guarded=output({output:'工單已儲存。'},{passages:[]});assert.ok(!guarded.reply.includes('已儲存'));
-const saved=output({}, {}, {saved:{persisted:true,work_order:{id:'GV-TEST'}},executed_tool:'add_work_order'});
-assert.equal(saved.reply,'工單 GV-TEST 已新增。');
-const retrieval=nodes.get('Retrieve guidance');
-assert.equal(retrieval.parameters.url,'http://knowledge:8085/rag');
-assert.ok(!nodes.has('Seed Simple Vector Store'));
-const visualFacts={answer:'圖表顯示庫存 2 個。',passages:[],sources:[{source:'inventory.html',kind:'image'}]};
-assert.equal(prepareAgent(visualFacts,{tool:'retrieve_knowledge'}).facts.answer,visualFacts.answer);
-assert.equal(output({},visualFacts).reply,visualFacts.answer);
-console.log('PASS direct n8n retrieval, fact-based replies, native save acknowledgment and RAG output');
 
-const splitReport=output({output:'請提供具體信息。'},{passages:[]},{report_reply:'已收到設備1234、項目5678、數量8個。'});
-assert.equal(splitReport.reply,'已收到設備1234、項目5678、數量8個。');
-const directSave=prepareAgent({persisted:true,work_order:{id:'GV-DIRECT'}},{tool:'add_work_order'});
-const directReply=output({output:'確認維修內容後，您已完成回報。'},{},directSave);
-assert.equal(directReply.reply,'工單 GV-DIRECT 已新增。');
-assert.deepEqual([...directReply.tools],['add_work_order']);
-const reportReply=output({},{},{...directSave,scenarioReport:{number:3,language:'zh'}});
-assert.equal(reportReply.reply,'工單 GV-DIRECT 已儲存。');
-assert.equal(reportReply.work_order_id,'GV-DIRECT');
-assert.equal(reportReply.scenario_report,true);
-const fakeComplete=output({output:'確認維修內容後，您已完成回報。'},{passages:[]});
-assert.equal(fakeComplete.reply,'工單尚未儲存。');
-const monthly=output({output:'請提供工單詳細資料。'},{...orderFacts,period:'2026-11',work_orders:[]});
-assert.equal(monthly.reply,'2026年11月沒有工單記錄。');
-console.log('PASS deterministic save tool routing, partial-report acknowledgments, false-completion guard and direct monthly lookup answers');
-
-const enriched=output({output:'請確認日期。'},{},{saved:{persisted:true,created:false,updated:true,work_order:{id:'GV-DIRECT'}},executed_tool:'add_work_order'});
-assert.equal(enriched.reply,'工單 GV-DIRECT 已補充。');
-
-const dataNodes=workflow.nodes.filter(n=>n.type==='n8n-nodes-base.dataTable');
-assert.deepEqual(dataNodes.map(n=>n.parameters.operation).sort(),['create','get','upsert']);
-const saveNode=nodes.get('Save work order · Data Table');
-assert.equal(saveNode.parameters.dataTableId.value,'work_orders');
-assert.equal(saveNode.parameters.filters.conditions[0].keyName,'report_key');
-assert.equal(nodes.get('Store work order?').parameters.conditions.conditions[0].rightValue,'add');
-const row={id:7,order_id:'GV-NATIVE',report_key:'key',dispatch_date:'',maintenance_items:'',transcripts:'["我增加工单。","不知道。"]'};
-const nativeSaved=vm.runInNewContext(`(function(){${nodes.get('Return saved work order').parameters.jsCode}})()`,{$input:{first:()=>({json:row})}})[0].json;
-assert.equal(nativeSaved.persisted,true);assert.equal(nativeSaved.work_order.id,'GV-NATIVE');assert.equal(nativeSaved.work_order.fields.派工日期,'');
-assert.throws(()=>vm.runInNewContext(`(function(){${nodes.get('Return saved work order').parameters.jsCode}})()`,{$input:{first:()=>({json:{}})}}),/did not confirm/);
-const namedRow={...row,reference_number:'A1235',results:JSON.stringify({fields:{派工單號:'A1235'}})};
-const namedSave=vm.runInNewContext(`(function(){${nodes.get('Return saved work order').parameters.jsCode}})()`,{$input:{first:()=>({json:namedRow})}})[0].json;
-assert.equal(output({output:'okay'},{},{saved:namedSave}).reply,'工單 A1235 已新增。');
-assert.equal(saveNode.parameters.columns.value.results,'={{ $json.results }}');
-const detailsFacts={selection:'details',view:'details',reference:'F15P1',work_orders:[{fields:{派工單號:'F15P1/2_ME',派工日期:'2026-06-02',維修內容:'五年一維',FAN數量:14,FAN明細:[{類型:'強排',數量:4},{類型:'間面',數量:10}]}}]};
-const detailsAnswer=output({output:'請提供更多資訊。'},detailsFacts);
-assert.ok(detailsAnswer.reply.includes('F15P1/2_ME')&&detailsAnswer.reply.includes('14')&&!detailsAnswer.reply.includes('已新增'));
-assert.ok(output({output:'已新增。'},{...detailsFacts,view:'fans'}).reply.includes('強排 4 個、間面 10 個'));
-console.log('PASS native Data Table creation/upsert/read nodes and acknowledgment only after a successful table write');
-
-assert.equal(isN8nLookup('查詢最新工單。'),true);
-assert.equal(isN8nLookup('F15P1 工單內容？',[{role:'user',content:'我要回報工單。'}]),true);
-assert.equal(isN8nLookup('FAN幾個',[{role:'user',content:'我要回報工單。'}]),true);
-assert.equal(isN8nLookup('風扇壞了要找誰？'),true);
-assert.equal(isN8nLookup('A1235，五年一維，FAN2個',[{role:'user',content:'我要新增工單。'}]),false);
-assert.equal(isN8nLookup('二零二六年十一月的。',[{role:'user',content:'最新的工单，帮我列出来。'}]),true);
-assert.equal(isN8nLookup('我增加工单。'),false);
-assert.equal(isN8nLookup('二零二六年十一月的。',[{role:'user',content:'我增加工单。'}]),false);
-const realSetTimeout=globalThis.setTimeout,realClearTimeout=globalThis.clearTimeout;
-let fireNotice=null,scheduledDelay=null;const timerToken={};
-globalThis.setTimeout=(fn,delay,...args)=>{if(delay>=1000&&delay<=60000){scheduledDelay=delay;fireNotice=fn;return timerToken;}return realSetTimeout(fn,delay,...args);};
-globalThis.clearTimeout=token=>{if(token===timerToken)fireNotice=null;else realClearTimeout(token);};
-const flush=()=>new Promise(resolve=>realSetTimeout(resolve,0));
-try{
- let requestStarted=false,finishRequest,finishNotice,noticeSignal,completed=false;
- globalThis.fetch=async()=>{requestStarted=true;return await new Promise(resolve=>{finishRequest=resolve;});};
- const answer=n8nDialogue(input,signal,{onProgress:(text,activeSignal)=>{
-  assert.equal(text,'查詢中，請稍後。');assert.ok(requestStarted);noticeSignal=activeSignal;
-  return new Promise(resolve=>{finishNotice=resolve;});
- }}).then(value=>{completed=true;return value;});
- await flush();assert.equal(finishNotice,undefined,'no notice before the three-second timer');
- assert.ok(fireNotice,'three-second timer scheduled');fireNotice();await flush();
- assert.ok(finishNotice&&!completed,'notice starts while retrieval is pending');
- finishRequest(Response.json({reply:'Final answer'}));await flush();
- assert.equal(completed,false,'final playback waits for notice audio');
- finishNotice();assert.equal(await answer,'Final answer');assert.equal(noticeSignal.aborted,false);
- let failRequest,cancelled=false;
- globalThis.fetch=async()=>await new Promise(resolve=>{failRequest=resolve;});
- const failure=n8nDialogue(input,signal,{onProgress:(_text,activeSignal)=>new Promise(resolve=>{
-  activeSignal.addEventListener('abort',()=>{cancelled=true;resolve();},{once:true});
- })});
- fireNotice();await flush();failRequest(Response.json({message:'upstream failure'},{status:500}));
- await assert.rejects(failure,/upstream failure/);assert.equal(cancelled,true);
- globalThis.fetch=async()=>Response.json({reply:'Quick answer'});
- await n8nDialogue(input,signal,{onProgress:()=>assert.fail('fast lookups must be silent')});
- assert.equal(fireNotice,null,'completed retrieval cancels the pending timer');
- let finishPreparation,preparationNotice=false,preparedRequest=false;
- globalThis.fetch=async(_url,options)=>{preparedRequest=true;assert.equal(JSON.parse(options.body).model,'prepared-model');return Response.json({reply:'Ready'});};
- const preparing=n8nDialogue(input,signal,{prepareModel:()=>new Promise(resolve=>{finishPreparation=resolve;}),onProgress:()=>{preparationNotice=true;}});
- fireNotice();await flush();assert.equal(preparationNotice,true);assert.equal(preparedRequest,false,'announcement covers model loading before the webhook starts');
- finishPreparation('prepared-model');assert.equal(await preparing,'Ready');
- globalThis.fetch=async()=>Response.json({reply:'Configured'});
- await n8nDialogue(input,signal,{noticeDelaySeconds:7,onProgress:()=>{}});
- assert.equal(scheduledDelay,7000,'custom notice delay is expressed in seconds');
- await n8nDialogue(input,signal,{noticeDelaySeconds:0,onProgress:()=>{}});
- assert.equal(scheduledDelay,3000,'invalid saved delays use the default');
- globalThis.fetch=async()=>Response.json({reply:'Added'});
-
- await n8nDialogue({...input,text:'我增加工单。'},signal,{onProgress:()=>assert.fail('report creation must not announce lookup')});
-}finally{globalThis.fetch=originalFetch;globalThis.setTimeout=realSetTimeout;globalThis.clearTimeout=realClearTimeout;}
-console.log('PASS lookup wait notice after three seconds only, fast lookup silence, ordered audio and error cancellation');
-
-try {
- for (const text of ['我要新增工單。','我增加工单。','我要回報工單。']) {
-  const intake={...input,text,messages:[{role:'user',content:text}]};
-  globalThis.fetch=async(_url,options)=>{assert.equal(JSON.parse(options.body).model,input.model);return Response.json({reply:fixed.reply,tools:[]});};
-  assert.equal(await n8nDialogue(intake,signal,{prepareModel:()=>assert.fail('fixed intake must not wait for LLM loading')}),fixed.reply);
-  assert.equal(isN8nIntake(text,intake.messages),true);
- }
- assert.equal(isN8nIntake('新增工單的流程是什麼？'),false);
- assert.equal(isN8nIntake('我要新增工單，2026年11月12日 A123'),false);
- assert.equal(isN8nIntake('我要新增工單。',[{role:'user',content:'我要回報工單。'}]),false);
- let prepared=false;
- globalThis.fetch=async()=>Response.json({reply:'已處理。'});
- await n8nDialogue({...input,text:'A123，FAN2個'},signal,{prepareModel:async()=>{prepared=true;return input.model;}});
- assert.equal(prepared,true,'detail turns still prepare the model');
-} finally {globalThis.fetch=originalFetch;}
-console.log('PASS first intake skips model warm-up, retrieval and agent; details and queries retain their normal path');
+// The workflow saves one Data Table row per completed work order.
+const split = workflow.nodes.find(node => node.name === 'One row per work order');
+const run = records => runInNewContext(`(function(){${split.parameters.jsCode}})()`, {$input: {first: () => ({json: {records}})}});
+const rows = run([{order_id: 'GV-1', report_key: 'k1'}, {order_id: 'GV-2', report_key: 'k2'}]);
+assert.deepEqual(JSON.parse(JSON.stringify(rows)), [{json: {order_id: 'GV-1', report_key: 'k1'}}, {json: {order_id: 'GV-2', report_key: 'k2'}}]);
+assert.throws(() => run(undefined), /no work orders/);
+const save = workflow.nodes.find(node => node.name === 'Save work order · Data Table');
+assert.equal(save.parameters.operation, 'upsert');
+assert.equal(save.parameters.filters.conditions[0].keyName, 'report_key', 'retries update the same row');
+const extract = workflow.nodes.find(node => node.name === 'Extract work orders');
+assert.match(extract.parameters.jsonBody, /records:true/);
+console.log('PASS work-order save: one upserted row per completed work order, keyed by report_key');

@@ -3,7 +3,6 @@ import { readFile } from 'node:fs/promises';
 import { stripTypeScriptTypes } from 'node:module';
 import { pathToFileURL } from 'node:url';
 import path from 'node:path';
-import { createSipScenarioCalls } from './sip-scenario-calls.mjs';
 
 async function loadDemoModule(directory, name) {
   // Strip-only loading is supported by both Node 22 and Node 26.
@@ -11,7 +10,7 @@ async function loadDemoModule(directory, name) {
   return import('data:text/javascript;base64,' + Buffer.from(source).toString('base64'));
 }
 export async function loadDialogue(directory = '/dialogue') {
-  return (await loadDemoModule(directory, 'n8n-dialogue.ts')).n8nDialogue;
+  return (await loadDemoModule(directory, 'n8n-dialogue.ts')).ivrDialogue;
 }
 export async function loadGreetingReader(directory = '/dialogue') {
   return (await loadDemoModule(directory, 'greetings.ts')).readGreetingCsv;
@@ -47,18 +46,20 @@ export async function ensureModel(base, model, signal, fetchImpl = fetch) {
 }
 
 export function createDialogueServer({ dialogue, readGreetingCsv, normalizeTranscript = text => text,
-  correctAsrTranscript, defaultAsrModel, scenarioSimulation, fetchImpl = fetch,
+  correctAsrTranscript, defaultAsrModel, fetchImpl = fetch,
   saveCallLogs = false,
   audioUrl = process.env.SIP_DIALOGUE_AUDIO_URL || 'http://voice-ai:8081',
   llmUrl = process.env.SIP_DIALOGUE_LLM_URL || 'http://voice-ai:8082/v1',
   asrPostprocessUrl = process.env.SIP_DIALOGUE_ASR_POSTPROCESS_URL || 'http://voice-ai:8089/v1',
-  knowledgeUrl = process.env.SIP_DIALOGUE_KNOWLEDGE_URL || 'http://knowledge:8085',
   workflowUrl = process.env.SIP_DIALOGUE_WORKFLOW_URL || 'http://127.0.0.1:5678/webhook/ivr-agent',
-  scenarioReportUrl = process.env.SIP_DIALOGUE_SCENARIO_REPORT_URL || new URL('ivr-scenario-report', workflowUrl).href,
 } = {}) {
-  const scenarioCalls = scenarioSimulation && createSipScenarioCalls({
-    simulation: scenarioSimulation, fetchImpl, knowledgeUrl, normalizeReply: normalizeTranscript,
-  });
+  // SIP calls that started an IVR engine session (the selected call script).
+  // The engine itself keeps the call state; this only remembers which calls use it.
+  const engineCalls = new Map();
+  const rememberCall = (sessionId, scenarioId) => {
+    engineCalls.set(sessionId, {scenarioId, seen: Date.now()});
+    for (const [id, call] of engineCalls) if (Date.now() - call.seen > 2 * 60 * 60 * 1000) engineCalls.delete(id);
+  };
   const saveLog = async (sessionId, entries) => {
     const start = saveCallLogs && typeof sessionId === 'string' && /^sip-(\d{13})$/.exec(sessionId);
     if (!start) return;
@@ -127,16 +128,17 @@ export function createDialogueServer({ dialogue, readGreetingCsv, normalizeTrans
             const response = await fetchImpl(`${audioUrl}/v1/ui/greetings`, { signal, cache: 'no-store' });
             if (!response.ok) throw new Error(`Could not read greetings.csv (${response.status})`);
             greeting = readGreetingCsv((await response.json()).content);
-            if (scenarioCalls && saved.llm_enabled !== false && typeof body.sessionId === 'string') {
+            // An empty saved scenario ID turns the call script off for SIP.
+            if (dialogue && saved.llm_enabled !== false && saved.sip_scenario_id !== '' && typeof body.sessionId === 'string') {
               try {
-                const opening = await scenarioCalls.start(body.sessionId, saved.sip_scenario_id,
-                  AbortSignal.any([signal, AbortSignal.timeout(2000)]));
-                if (opening) {
-                  greeting = `${greeting.trim()}\n${opening}`.trim();
-                  awaitingLanguage = scenarioCalls.awaitingLanguage(body.sessionId) || undefined;
-                }
+                const scenarioId = saved.sip_scenario_id || undefined;
+                const opening = await dialogue({sessionId: body.sessionId, start: true, scenarioId},
+                  AbortSignal.any([signal, AbortSignal.timeout(10_000)]), {workflowUrl});
+                rememberCall(body.sessionId, scenarioId);
+                greeting = `${greeting.trim()}\n${opening.reply}`.trim();
+                awaitingLanguage = opening.awaitingLanguage || undefined;
               } catch (error) {
-                if (!signal.aborted) console.warn('[sip-dialogue] Scenario opening unavailable:', error.message);
+                if (!signal.aborted) console.warn('[sip-dialogue] Call script opening unavailable:', error.message);
               }
             }
             const entries = [{role: 'Call', text: 'Started'}];
@@ -174,18 +176,6 @@ export function createDialogueServer({ dialogue, readGreetingCsv, normalizeTrans
       res.setHeader('Content-Type', 'application/x-ndjson');
       send({ type: 'configuration', source, model });
       const messages = [...body.messages, { role: 'user', content: body.text }];
-      const runDialogue = (input, url, onWorkOrderSaved) => {
-        if (!dialogue) throw new Error('n8n dialogue handler is unavailable');
-        return dialogue(input, signal, {
-          workflowUrl: url,
-          noticeDelaySeconds: saved.lookup_notice_delay_seconds,
-          prepareModel: input.scenarioReport ? undefined : () => ensureModel(llmUrl, model, signal, fetchImpl),
-          onProgress: text => send({type: 'progress', text}),
-          onWorkflow: state => send({ type: 'event', event: `N8N_WORKFLOW_${state.toUpperCase()}`, summary: 'GeoVision · Workflow' }),
-          onTool: (name, state) => send({ type: 'event', event: `N8N_STEP_${state.toUpperCase()}`, summary: name }),
-          onWorkOrderSaved,
-        });
-      };
       const complete = async (prompt, history, maxTokens) => {
         const ready = await ensureModel(llmUrl, model, signal, fetchImpl);
         const completion = await fetchImpl(`${llmUrl}/chat/completions?autoload=true`, {
@@ -195,22 +185,27 @@ export function createDialogueServer({ dialogue, readGreetingCsv, normalizeTrans
         if (!completion.ok) throw new Error(`LLM request failed (${completion.status})`);
         return (await completion.json()).choices?.[0]?.message?.content;
       };
-      let reply, scenarioReply;
+      let reply, awaitingLanguage, engine;
       if (saved.llm_enabled === false) reply = body.text;
-      else {
-        scenarioReply = await scenarioCalls?.turn({
-          sessionId: body.sessionId, text: body.text, model, signal,
-          report: (input, onSaved) => runDialogue(input, scenarioReportUrl, onSaved),
-          complete: (prompt, history) => complete(prompt, history, 512),
+      else if (engineCalls.has(body.sessionId) || source === 'n8n') {
+        // The IVR engine answers from the call script and keeps the call state.
+        const call = engineCalls.get(body.sessionId);
+        if (!dialogue) throw new Error('IVR dialogue client is unavailable');
+        engine = await dialogue({sessionId: body.sessionId, text: body.text, scenarioId: call?.scenarioId}, signal, {
+          workflowUrl,
+          onWorkflow: state => send({ type: 'event', event: `N8N_WORKFLOW_${state.toUpperCase()}`, summary: 'GeoVision · Workflow' }),
         });
-        reply = scenarioReply ?? (source === 'n8n'
-          ? await runDialogue({ sessionId: body.sessionId, text: body.text, model, messages }, workflowUrl)
-          : await complete(body.prompt, messages, 256));
-      }
+        // Only calls that started a call script stay on it; a call that reached
+        // the engine through the n8n source follows later source changes.
+        if (call) rememberCall(body.sessionId, call.scenarioId);
+        reply = engine.reply;
+        awaitingLanguage = engine.awaitingLanguage;
+        if (engine.work_order) send({type: 'event', event: 'WORK_ORDER_COMPLETED', summary: engine.work_order.order_id});
+      } else reply = await complete(body.prompt, messages, 256);
       if (typeof reply !== 'string' || !reply.trim()) throw new Error('Dialogue returned an empty reply');
-      if (scenarioReply === undefined) reply = normalizeTranscript(reply.trim());
+      // Script replies are already written text; normalize only free LLM replies.
+      if (!engine) reply = normalizeTranscript(reply.trim());
       await saveLog(caller.sessionId, [{role: caller.role, text: caller.text}, {role: 'AI', text: reply}]);
-      const awaitingLanguage = scenarioReply !== undefined && scenarioCalls?.awaitingLanguage(body.sessionId);
       send({ type: 'reply', reply, ...(awaitingLanguage ? {awaitingLanguage} : {}) });
       res.end();
     } catch (error) {
@@ -225,11 +220,11 @@ export function createDialogueServer({ dialogue, readGreetingCsv, normalizeTrans
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const directory = process.env.SIP_DIALOGUE_SOURCE_DIR || '/dialogue';
-  const [dialogue, readGreetingCsv, { normalizeTranscript, correctAsrTranscript, DEFAULT_ASR_POSTPROCESS_MODEL, scenarioSimulation }] = await Promise.all([
+  const [dialogue, readGreetingCsv, { normalizeTranscript, correctAsrTranscript, DEFAULT_ASR_POSTPROCESS_MODEL }] = await Promise.all([
     loadDialogue(directory),
     loadGreetingReader(directory),
     import(pathToFileURL(path.join(directory, 'transcript.mjs')).href),
   ]);
-  createDialogueServer({ dialogue, readGreetingCsv, normalizeTranscript, correctAsrTranscript, scenarioSimulation,
+  createDialogueServer({ dialogue, readGreetingCsv, normalizeTranscript, correctAsrTranscript,
     defaultAsrModel: DEFAULT_ASR_POSTPROCESS_MODEL, saveCallLogs: true }).listen(Number(process.env.SIP_DIALOGUE_PORT || 8086), '0.0.0.0', () => console.log('[sip-dialogue] Ready on port 8086'));
 }

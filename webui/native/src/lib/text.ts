@@ -47,7 +47,7 @@ function endsSentence(text: string, index: number): boolean {
  * Break text after each sentence terminator, keeping the terminator and any
  * following whitespace attached to the sentence it ends.
  */
-function splitSentences(text: string): string[] {
+export function splitSentences(text: string): string[] {
   const sentences: string[] = [];
   let start = 0;
 
@@ -66,6 +66,43 @@ function splitSentences(text: string): string[] {
 
   if (start < text.length) sentences.push(text.slice(start));
   return sentences;
+}
+
+// A long Chinese sentence is also shown clause by clause: it breaks after a
+// full-width comma or colon, and a clause shorter than minClause characters
+// ("好的，", "處理方式：") stays with the clause that follows it.
+const longSentence = 24, minClause = 8;
+function splitClauses(sentence: string): string[] {
+  if (sentence.trim().length <= longSentence) return [sentence];
+  const clauses: string[] = [];
+  let current = '';
+  for (const part of sentence.split(/(?<=[，：])/)) {
+    current += part;
+    if (current.trim().length >= minClause) { clauses.push(current); current = ''; }
+  }
+  if (current) {
+    if (clauses.length && current.trim().length < minClause) clauses[clauses.length - 1] += current;
+    else clauses.push(current);
+  }
+  return clauses;
+}
+
+/**
+ * Split text into distinct sentences suitable for chat message replies,
+ * respecting paragraph breaks and language sentence terminators.
+ */
+export function splitReplySentences(text: string): string[] {
+  const lines = text.split(/\r?\n+/).map(l => l.trim()).filter(Boolean);
+  const result: string[] = [];
+  for (const line of lines) {
+    const pieces = splitSentences(line).flatMap(splitClauses).map(s => s.trim()).filter(Boolean);
+    if (pieces.length) {
+      result.push(...pieces);
+    } else if (line) {
+      result.push(line);
+    }
+  }
+  return result.length ? result : (text.trim() ? [text.trim()] : []);
 }
 
 /**

@@ -3,8 +3,16 @@ import {setTimeout as delay} from 'node:timers/promises';
 import {pathToFileURL} from 'node:url';
 import {isDeepStrictEqual} from 'node:util';
 import {withN8nApi} from './unpublish-workflow.mjs';
-import {lookupScenario} from './scenario-lookup.mjs';
-import {dispatchDate} from '../knowledge/conversation.mjs';
+
+// Normalize spreadsheet dispatch dates (2026/6/2, 202606/02, 20260602) for display.
+export function dispatchDate(value){
+  const text=String(value??'').normalize('NFKC').trim();
+  const match=text.match(/^(\d{4})[-/年](\d{1,2})[-/月](\d{1,2})(?:日|號)?$/)||
+    text.match(/^(\d{4})(\d{2})\/(\d{1,2})$/)||text.match(/^(\d{4})(\d{2})(\d{2})$/);
+  if(!match)return '';
+  const date=`${match[1]}-${match[2].padStart(2,'0')}-${match[3].padStart(2,'0')}`;
+  return !Number.isNaN(Date.parse(date))&&new Date(date).toISOString().slice(0,10)===date?date:'';
+}
 
 const importRoute=id=>`/scenario-imports/${id}`;
 const tableRoute=id=>`/data-tables/${encodeURIComponent(id)}`;
@@ -190,34 +198,6 @@ export function createScenarioManager({withApi=withN8nApi,knowledgeUrl='http://k
         for(const table of tables)await repairTableDates(api,table);
       },{expiresIn:600});
     },
-    async lookupRecords({reference,lookup}={}){
-      const valid=reference
-        ? typeof reference==='string'&&reference.length<=100&&/^[A-Za-z]{1,6}-?\d[A-Za-z0-9_/-]*$/.test(reference)
-        : ['site','person','keyword','employee','serial','model','customer_site','catalog'].includes(lookup?.kind)&&
-          typeof lookup.term==='string'&&lookup.term.trim()&&lookup.term.length<=(lookup.kind==='catalog'?128:100)&&
-          (lookup.sheet===undefined||typeof lookup.sheet==='string')&&
-          (lookup.kind!=='customer_site'||(typeof lookup.customer==='string'&&lookup.customer.trim()));
-      if(!valid){
-        throw Object.assign(new Error('Invalid scenario lookup'),{status:400});
-      }
-      const tables=(await registeredTables()).filter(table=>!lookup?.sheet||lookup.sheet===table.sheet||lookup.sheet===table.name);
-      if(lookup?.kind==='catalog'){
-        const dataset=value=>String(value??'').normalize('NFKC').trim().toLowerCase().replace(/資料庫$/,'');
-        const matching=lookup.sheet?tables:tables.filter(table=>dataset(table.scenario)===dataset(lookup.term));
-        return {records:[],matched_rows:0,tables:matching.map(({name,sheet,columns})=>({name,sheet,headers:columns.map(({header})=>header)}))};
-      }
-      if(!tables.length)return {records:[],matched_rows:0};
-      return withApi(['dataTableRow:read'],async api=>{
-        for(const table of tables){
-          table.rows=await list(api,tableRoute(table.id)+'/rows');
-          for(const {id} of table.columns.filter(isDispatchDate)){
-            for(const row of table.rows)row[id]=formatDispatchDate(row[id]);
-          }
-        }
-        const {records,matched_rows}=lookupScenario({reference,lookup},tables,[]);
-        return {records,matched_rows};
-      });
-    },
     import(file){
       return enqueue(async()=>{
         const {attachments,...document}=file;
@@ -271,18 +251,17 @@ export function createScenarioServer(manager=createScenarioManager()){
     res.setHeader('Content-Type','application/json; charset=utf-8');
     try{
       if(req.method==='GET'&&req.url==='/health')return res.end('{"status":"ok"}');
-      if(req.method==='POST'&&['/imports','/lookup-reference','/lookup-records'].includes(req.url)){
-        const importing=req.url==='/imports';
-        const limit=importing?14*1024*1024:1024;
+      if(req.method==='POST'&&req.url==='/imports'){
+        const limit=14*1024*1024;
         let raw='';
         req.setEncoding('utf8');
         for await(const chunk of req){
           raw+=chunk;
-          if(raw.length>limit)throw Object.assign(new Error(importing?'Scenario upload is too large':'Scenario lookup is too large'),{status:413});
+          if(raw.length>limit)throw Object.assign(new Error('Scenario upload is too large'),{status:413});
         }
         let body;
         try{body=JSON.parse(raw);}catch{throw Object.assign(new Error('Invalid JSON'),{status:400});}
-        const result=importing?await manager.import(body):await manager.lookupRecords(body||{});
+        const result=await manager.import(body);
         return res.end(JSON.stringify(result));
       }
       const id=/^\/scenarios\/([a-f0-9]{24})$/.exec(req.url)?.[1];

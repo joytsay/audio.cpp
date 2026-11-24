@@ -4,7 +4,6 @@ export type KnowledgeScenario = {
   createdAt: string;
   qaCount: number;
   simulation?: boolean;
-  opening?: SimulationOpening;
   examples?: string[];
   tables?: {name: string; sheet: string; rowCount: number}[];
   files: {name: string; size: number; sha256: string}[];
@@ -55,35 +54,6 @@ export async function importScenarioFiles(files: File[],signal: AbortSignal,onIm
     if(!scenario?.id||!Array.isArray(scenario.tables))throw new Error(`Import did not complete for ${file.name}.`);
     onImport(scenario);
   }
-}
-
-export type SimulationScenario = {
-  number: number;
-  title: string;
-  steps?: string;
-  custom?: boolean;
-  retrieval?: boolean;
-  dispatchReminder?: string;
-};
-export type SimulationOpening = {prompts: string[]; language: "zh" | "en"};
-export type SimulationTurn = {role: "user" | "assistant"; content: string};
-
-export async function matchSimulation(id: string,text: string,signal: AbortSignal,language: "zh" | "en" = "zh") {
-  const result = await request<{scenario: SimulationScenario | null}>('/ivr-simulation', {
-    method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id,text,language}),signal,
-  });
-  return result.scenario;
-}
-
-export async function answerSimulationRag(
-  id: string, number: number, language: "zh" | "en", text: string, previous: string, signal: AbortSignal,
-  history?: SimulationTurn[],
-) {
-  const result = await request<{answer: string}>('/ivr-simulation',{
-    method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id,number,language,text,previous,history}),signal,
-  });
-  if(typeof result.answer!=='string'||!result.answer.trim())throw new Error('Multimodal RAG returned no answer.');
-  return result.answer.trim();
 }
 
 export async function removeKnowledgeScenario(id: string): Promise<void> {
