@@ -174,14 +174,16 @@ void SipTtsConfig::apply(ivrTTS& tts, const std::string& audio_url) const {
 }
 
 SipTtsConfig resolve_sip_tts(const std::string& dialogue_url, const std::string& model, const std::string& voice,
-                            const std::atomic<bool>& stopping, SipTtsPurpose purpose) {
+                            const std::atomic<bool>& stopping, SipTtsPurpose purpose, const std::string& session_id) {
     SipTtsConfig config{model, voice, {}, {}, {}};
     if (dialogue_url.empty()) return config;
     auto body = object(); add(body.get(), "model", model);
     if (purpose == SipTtsPurpose::Keypad)
         json_object_object_add(body.get(), "keypadGreeting", json_object_new_boolean(true));
-    if (purpose == SipTtsPurpose::Welcome)
+    if (purpose == SipTtsPurpose::Welcome) {
         json_object_object_add(body.get(), "welcomeGreeting", json_object_new_boolean(true));
+        if (!session_id.empty()) add(body.get(), "sessionId", session_id);
+    }
     const auto endpoint = dialogue_url.substr(0, dialogue_url.rfind("/dialogue"));
     auto settings = post(endpoint + "/tts-config", body.get(), stopping);
     if (const auto selected = text(settings.get(), "model"); !selected.empty()) config.model = selected;
@@ -296,18 +298,22 @@ void SipPipeline::respond(const std::vector<unsigned char>& pcm) {
     auto transcript = post(config_.audio_url + "/v1/audio/transcriptions/details", stt.get(), stopping_);
     auto caller = text(transcript.get(), "text");
     if (caller.find_first_not_of(" \r\n\t") == std::string::npos) { resume(); return; }
+    SipMonitor::get().event("ASR_COMPLETED", caller);
     respond_text(std::move(caller));
 }
 void SipPipeline::respond_text(std::string caller) {
     if (!config_.dialogue_url.empty()) {
         auto input = object(); add(input.get(), "text", caller); add(input.get(), "context", config_.hotwords);
+        json_object_object_add(input.get(), "postprocess", json_object_new_boolean(true));
         const auto path = config_.dialogue_url.rfind("/dialogue");
         if (path == std::string::npos) throw std::runtime_error("SIP dialogue URL must end in /dialogue");
         auto normalized = post(config_.dialogue_url.substr(0, path) + "/normalize", input.get(), stopping_);
         caller = text(normalized.get(), "text");
+        const auto postprocess = text(normalized.get(), "postprocess");
+        if (postprocess == "completed") SipMonitor::get().event("ASR_POSTPROCESS_COMPLETED", caller);
+        if (postprocess == "fallback") SipMonitor::get().event("ASR_POSTPROCESS_FALLBACK", caller);
     }
     SipMonitor::get().message("user", caller);
-    SipMonitor::get().event("ASR_COMPLETED", caller);
     std::cout << "Caller: " << caller << "\n";
     std::string context;
     if (config_.use_rag) {
@@ -391,7 +397,7 @@ void SipPipeline::respond_text(std::string caller) {
     if (history_.size() > 12) history_.erase(history_.begin(), history_.begin() + 2);
 }
 void SipPipeline::synthesize_speech(std::string answer, bool interim, SipTtsPurpose purpose) {
-    const auto config = resolve_sip_tts(config_.dialogue_url, config_.tts_model, config_.voice, stopping_, purpose);
+    const auto config = resolve_sip_tts(config_.dialogue_url, config_.tts_model, config_.voice, stopping_, purpose, session_id_);
     const bool welcome = purpose == SipTtsPurpose::Welcome;
     if (welcome) {
         if (config.greeting.empty()) throw std::runtime_error("Greeting transcript is empty");

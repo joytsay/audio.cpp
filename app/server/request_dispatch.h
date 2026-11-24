@@ -6,6 +6,7 @@
 #include "server_ui.h"
 #include "sip_settings.h"
 #include "demo_settings.h"
+#include "demo_call_logs.h"
 
 #include "engine/framework/debug/trace.h"
 #include "engine/framework/runtime/errors.h"
@@ -51,6 +52,8 @@ struct RequestDispatcher {
         response = state.handle_health();
       } else if ((request.method == "GET" || request.method == "POST") && request.path == "/v1/ui/demo-settings") {
         response = demo_settings_response(request, state.config_.ui_management, state.request_base_);
+      } else if (request.method == "POST" && request.path == "/v1/ui/demo-call-log") {
+        response = demo_call_log_response(request, state.config_.ui_management, state.request_base_);
       } else if (request.method == "GET" && request.path == "/v1/ui/system-info") {
         response = ui_system_info_response(state.config_.ui_enabled || state.config_.ui_management);
       } else if (request.method == "POST" && request.path == "/v1/ui/sip/text") {

@@ -16,18 +16,29 @@ export function scenarioFileName(filename) {
   return (/\.html?$/i.test(filename) ? path.basename(filename) : path.parse(filename).name).trim();
 }
 
+const scenarioHeading = /^(?:情境|Scenario)\s*(?:(\d{1,3})(?!\d)\s*[:：.、-]?|[:：])\s*(.+)/i;
+function readHeading(line, highest) {
+  const match = scenarioHeading.exec(line);
+  if (match) return {number: match[1] ? Number(match[1]) : highest + 1, title: match[2]};
+}
+
 export function htmlScenarioText(html, images) {
   const lines = [];
   const parts = [];
+  let section = '', highest = 0;
   const flush = () => {
     const line = parts.join('').replace(/\s+/g, ' ').trim();
     if (line) lines.push(line);
+    const heading = images && readHeading(line, highest);
+    if (heading) {
+      highest = Math.max(highest, heading.number);
+      section = /^情境\s*\d+/i.test(line) ? line : `情境 ${heading.number}：${heading.title}`;
+    }
     parts.length = 0;
   };
   const blocks = /^(?:address|article|blockquote|br|dd|div|dl|dt|h[1-6]|hr|li|main|ol|p|pre|section|table|td|th|tr|ul)$/;
   const ignored = /^(?:head|script|style|template|noscript|iframe|svg|canvas)$/;
   const nodes = [...parseDocument(html).children].reverse();
-  let section = '';
   while (nodes.length) {
     const node = nodes.pop();
     if (!node) { flush(); continue; }
@@ -35,7 +46,6 @@ export function htmlScenarioText(html, images) {
     if (!node.children || ignored.test(node.name) || Object.hasOwn(node.attribs ?? {}, 'hidden')) continue;
     if (node.name === 'img' && images && node.attribs.src) {
       flush();
-      section = lines.findLast(line => /^(?:情境|scenario)\s*\d+/i.test(line)) ?? section;
       images.push({src:node.attribs.src, text:(node.attribs.alt || node.attribs.name || '').slice(0,200), section});
     }
     const block = blocks.test(node.name);
@@ -90,17 +100,19 @@ export function scenarioExamples(name, dataset, documents) {
 
 export function dialogueTemplate(text) {
   const sections = [{title:'通話開場', turns:[]}];
+  let highest = 0;
   let turn;
   for (const line of text.split(/\r?\n/).map(line => line.trim()).filter(Boolean)) {
-    const heading = /^(?:情境|Scenario)\s*(\d+)\s*[:：.、-]?\s*(.+)/i.exec(line);
+    const heading = readHeading(line, highest);
     if (heading) {
-      sections.push({number:Number(heading[1]), title:heading[2], turns:[]});
+      highest = Math.max(highest, heading.number);
+      sections.push({...heading, turns:[]});
       turn = undefined;
       continue;
     }
-    const speaker = /^(AI|助理|GEOVISION|A|答案|回答|Q|問題|維修人員|客戶|使用者|YOU)\s*[:：]\s*(.*)$/i.exec(line);
+    const speaker = /^(AI|Assistant|助理|GEOVISION|A|答案|回答|Q|問題|維修人員|客戶|使用者|Caller|User|YOU)\s*[:：]\s*(.*)$/i.exec(line);
     if (speaker) {
-      const role = /^(AI|助理|GEOVISION|A|答案|回答)$/i.test(speaker[1]) ? 'assistant' : 'caller';
+      const role = /^(AI|Assistant|助理|GEOVISION|A|答案|回答)$/i.test(speaker[1]) ? 'assistant' : 'caller';
       turn = {role, text:speaker[2]};
       sections.at(-1).turns.push(turn);
     } else if (turn && !/^(?:選擇情境|進入情境|參考圖表)$/.test(line)) {
@@ -109,7 +121,7 @@ export function dialogueTemplate(text) {
   }
   const populated = sections.filter(section => section.turns.length);
   const roles = new Set(populated.flatMap(section => section.turns.map(turn => turn.role)));
-  return roles.size === 2 ? populated : [];
+  return roles.size === 2 || (roles.has('assistant') && populated.some(section => section.number)) ? populated : [];
 }
 
 export function fileDataset(filename, sources) {

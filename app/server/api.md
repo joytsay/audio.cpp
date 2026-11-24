@@ -412,16 +412,26 @@ content verbatim; CSV validation happens in the demo editor.
 `{ "settings": { "schema_version": 1, ... } }` and saves them to
 `ui-settings/demo-settings.yaml` when UI management is enabled. The optional
 `asr_postprocess_enabled` boolean and `asr_postprocess_model` string store the
-Demo's transcript correction settings. The optional
+Demo's transcript correction settings. The optional `sip_scenario_id` selects a
+saved HTML simulation for the next SIP IVR call. An empty value selects the
+regular SIP dialogue, and an omitted value uses the latest uploaded simulation.
+The optional
 `dialogue_source` string accepts `prompt.csv` (the default) or `n8n`. In n8n
-mode, the WebUI connects to `/n8n/mcp/ivr-maintenance` using MCP Streamable HTTP,
-discovers the tools exposed by n8n, and passes their schemas to the selected
-local LLM. LLM tool calls are executed through MCP; their results go back to
-the LLM before its final reply reaches TTS. Call ID, current ASR text, and user
-transcripts are bound to the maintenance tools' `context` argument by the client.
-The MCP endpoint is provided by the AGX Compose n8n service through Caddy; it
-is not a native audio server endpoint. See the
-[Scenario 1 workflow setup](../../examples/docker/agx-one-container/n8n/README.md).
+mode, the WebUI posts the call ID, current text, and recent transcript to
+`/n8n/webhook/ivr-agent`. The workflow executes the knowledge sub-workflow
+directly and returns the spoken reply and completed step names. Selected HTML
+simulations use `/ivr-simulation` for routing and scoped document retrieval.
+See the [n8n setup](../../examples/docker/agx-one-container/n8n/README.md).
+
+## Demo call transcripts
+
+The browser Demo and SIP dialogue bridge append text to
+`POST /v1/ui/demo-call-log` when UI management is enabled. A request includes
+`session_id`, `started_at_ms` (Unix milliseconds), and an `entries` array
+of one to three objects with a `role` (`Call`, `Caller`, or `AI`) and `text`.
+The server keeps the ten most recent call sessions by start time in
+`ui-settings/call-logs/`, with one UTC timestamped `*-log.txt` transcript per call.
+AGX Compose persists this directory under the repository's `ui-settings` mount.
 
 ## `GET /v1/audio/voices?model=<id>`
 

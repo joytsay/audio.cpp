@@ -1,5 +1,5 @@
 import { endpointJson, type ChatMessage } from "./openai";
-import { normalizeTranscript } from "./transcript";
+import { normalizeTranscript, traditionalTranscript } from "./transcript";
 
 export const DEFAULT_ASR_POSTPROCESS_MODEL = "s1-mini-chinese-1106-bf16";
 export const DEFAULT_ASR_POSTPROCESS_LABEL = "S1-mini-Chinese-1106 · BF16";
@@ -8,7 +8,8 @@ const instructions =
   "You are a text normalizer for speech-to-text transcripts. The input begins " +
   "with a control line specifying the styling, structure, and context settings; " +
   "clean the transcript to match those settings and output only the cleaned text. " +
-  "Preserve the original language, names, numbers, units, and identifiers. Do not answer the transcript.";
+  "Use Traditional Chinese for Chinese text and preserve other languages, names, numbers, units, and identifiers. " +
+  "Do not answer the transcript.";
 
 function technicalTokens(text: string): string[] {
   return (text.normalize("NFKC").match(/[A-Za-z0-9]+(?:[./_:+-][A-Za-z0-9]+)*/g) ?? [])
@@ -25,16 +26,18 @@ export async function correctAsrTranscript(
   hotwords: string,
   routerBase: string,
   signal: AbortSignal,
+  { defaultBase = "/asr-postprocess/v1", limitInputLength = true } = {},
 ): Promise<string> {
-  const length = [...text].length;
-  if (length < 3 || length > 1200) return text;
+  const original = traditionalTranscript(text);
+  const length = [...original].length;
+  if (!original.trim() || (limitInputLength && (length < 3 || length > 1200))) return original;
   const defaultModel = model === DEFAULT_ASR_POSTPROCESS_MODEL;
   const messages: ChatMessage[] = [
     { role: "system", content: instructions },
     { role: "user", content: "[Styling: semi-formal] [Structure: prose] [Context: general]\n" + text },
   ];
   const result = await endpointJson<CorrectionResponse>(
-    defaultModel ? "/asr-postprocess/v1" : routerBase,
+    defaultModel ? defaultBase : routerBase,
     defaultModel ? "chat/completions" : "chat/completions?autoload=true",
     {
       method: "POST",
@@ -49,9 +52,10 @@ export async function correctAsrTranscript(
   const choice = result.choices?.[0];
   const content = choice?.message?.content;
   if (choice?.finish_reason !== "stop" || typeof content !== "string" ||
-      /<\/?think>|\[Styling:/i.test(content)) return text;
+      /<\/?think>|\[Styling:/i.test(content)) return original;
+  // Apply OpenCC after inference even when the model outputs Simplified Chinese.
   const candidate = normalizeTranscript(content, hotwords).trim();
   if (!candidate || [...candidate].length > length * 1.5 + 10 ||
-      technicalTokens(candidate).join("|") !== technicalTokens(text).join("|")) return text;
+      technicalTokens(candidate).join("|") !== technicalTokens(original).join("|")) return original;
   return candidate;
 }

@@ -1,8 +1,11 @@
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import {buildSync} from 'esbuild';
-const normalizedModule=buildSync({entryPoints:[new URL('../src/lib/transcript.ts',import.meta.url).pathname],bundle:true,platform:'node',format:'esm',write:false});
-const {normalizeTranscript}=await import('data:text/javascript;base64,'+Buffer.from(normalizedModule.outputFiles[0].text).toString('base64'));
+const normalizedModule=buildSync({stdin:{
+  contents:"export { normalizeTranscript } from './transcript.ts'; export { correctAsrTranscript, DEFAULT_ASR_POSTPROCESS_MODEL } from './asr-postprocess.ts'; export * as scenarioSimulation from './scenario-simulation.ts';",
+  resolveDir:new URL('../src/lib/',import.meta.url).pathname,
+},bundle:true,platform:'node',format:'esm',write:false});
+const {normalizeTranscript,correctAsrTranscript,DEFAULT_ASR_POSTPROCESS_MODEL,scenarioSimulation}=await import('data:text/javascript;base64,'+Buffer.from(normalizedModule.outputFiles[0].text).toString('base64'));
 import { fileURLToPath } from 'node:url';
 import { createDialogueServer, loadDialogue, loadGreetingReader } from '../../../examples/docker/agx-one-container/n8n/sip-dialogue-server.mjs';
 
@@ -15,17 +18,42 @@ let ttsFamily='zipvoice',voiceId;
 let failTtsLoad=false;
 let greetingsCsv='greeting\n"您好，這裡是 GeoVision IVR，請問需要什麼協助？"\n';
 let source = 'n8n', failTool = false, modelReady = true, modelLoads = 0, modelDiscovery = 0;
+let asrPostprocessEnabled, asrModel, failCorrection=false;
+const correctionRequests=[];
+const scenarioId='b'.repeat(24);
+const reportRequests=[];
+let correctionText='请检查设备 C1-VFD-12CC04。';
 const requests = [], toolCalls = [];
 const originalFetch = globalThis.fetch;
 const query = '如何確認維修起機測試流程？';
 const mockFetch = async (url, options = {}) => {
   url = String(url); options.signal?.throwIfAborted();
-  if (url === 'http://audio.test/v1/ui/demo-settings') return Response.json({ settings: { dialogue_source: source, llm_model: 'selected-demo-llm', lookup_notice_delay_seconds: noticeDelaySeconds,tts_streaming:ttsStreaming,vad_end_silence_ms:endSilenceMs,tts_model_id:'zipvoice-test',tts_model_family:ttsFamily,tts_model_path:`/models/${ttsFamily}.gguf`,tts_model_task:ttsFamily==='bluemagpie'?'tts':'clon',tts_voice_id:voiceId } });
+  if (url === 'http://audio.test/v1/ui/demo-settings') return Response.json({ settings: { dialogue_source: source, llm_model: 'selected-demo-llm', lookup_notice_delay_seconds: noticeDelaySeconds,tts_streaming:ttsStreaming,vad_end_silence_ms:endSilenceMs,tts_model_id:'zipvoice-test',tts_model_family:ttsFamily,tts_model_path:`/models/${ttsFamily}.gguf`,tts_model_task:ttsFamily==='bluemagpie'?'tts':'clon',tts_voice_id:voiceId, asr_postprocess_enabled: asrPostprocessEnabled, asr_postprocess_model: asrModel } });
+  if (url === 'http://correction.test/v1/chat/completions' ||
+      (url === 'http://llm.test/v1/chat/completions?autoload=true' && JSON.parse(options.body).model === 'alternate-model')) {
+    const {model, messages}=JSON.parse(options.body);
+    const input=messages[1].content;
+    correctionRequests.push({url, model, text:input.slice(input.indexOf('\n')+1)});
+    return failCorrection ? new Response('worker unavailable',{status:503}) :
+      Response.json({choices:[{finish_reason:'stop',message:{content:correctionText}}]});
+  }
   if (url === 'http://audio.test/v1/ui/greetings') {
     assert.equal(options.cache,'no-store');
     return Response.json({content:greetingsCsv});
   }
   if (url === 'http://audio.test/v1/models/load') { ttsLoads.push(JSON.parse(options.body)); return failTtsLoad ? new Response('backend unavailable',{status:503}) : Response.json({loaded:true}); }
+  if (url === 'http://knowledge.test/scenarios') return Response.json({scenarios:[
+    {id:scenarioId,simulation:true,files:[{name:'opening-test.html'}]},
+  ]});
+  if (url === 'http://knowledge.test/ivr-simulation') {
+    const input = JSON.parse(options.body);
+    assert.equal(input.id,scenarioId);
+    return Response.json({scenario:{number:3,title:'查修'}});
+  }
+  if (url === 'http://n8n.test/webhook/ivr-scenario-report') {
+    reportRequests.push(JSON.parse(options.body));
+    return Response.json({scenario_report:true,reply:'請提供故障碼。',tools:[]});
+  }
   if (url === 'http://audio.test/v1/ui/voices') return Response.json({voices:[{id:'my-clone',audio:'UklGRg==',transcript:''}]});
   if (url === 'http://llm.test/models') { modelDiscovery++; return Response.json({ data: [{ id: 'selected-demo-llm', loaded: modelReady, status: { value: modelReady ? 'loaded' : 'unloaded' } }] }); }
   if (url === 'http://llm.test/models/load') { modelLoads++; modelReady = true; return Response.json({}); }
@@ -51,7 +79,7 @@ const mockFetch = async (url, options = {}) => {
 };
 globalThis.fetch = mockFetch;
 const seenNoticeDelays=[];
-const server = createDialogueServer({ dialogue: (...args)=>{seenNoticeDelays.push(args[2].noticeDelaySeconds);return dialogue(...args);}, readGreetingCsv, normalizeTranscript, fetchImpl: mockFetch, audioUrl: 'http://audio.test', llmUrl: 'http://llm.test/v1', workflowUrl: 'http://n8n.test/webhook/ivr-agent' });
+const server = createDialogueServer({ dialogue: (...args)=>{seenNoticeDelays.push(args[2].noticeDelaySeconds);return dialogue(...args);}, readGreetingCsv, normalizeTranscript, correctAsrTranscript, defaultAsrModel:DEFAULT_ASR_POSTPROCESS_MODEL, scenarioSimulation, fetchImpl: mockFetch, audioUrl: 'http://audio.test', llmUrl: 'http://llm.test/v1', asrPostprocessUrl:'http://correction.test/v1', knowledgeUrl:'http://knowledge.test', workflowUrl: 'http://n8n.test/webhook/ivr-agent' });
 server.listen(0, '127.0.0.1'); await once(server, 'listening');
 const base = `http://127.0.0.1:${server.address().port}`;
 const input = { sessionId: 'same-sip-call', text: query, model: 'old-worker-model', prompt: 'Saved telephone prompt', messages: [{ role: 'user', content: 'Previous caller turn' }, { role: 'assistant', content: 'Previous reply' }] };
@@ -64,6 +92,36 @@ try {
   assert.equal((await originalFetch(base + '/health')).status, 200);
   const normalized=await originalFetch(base+'/normalize',{method:'POST',body:JSON.stringify({text:'十一月十二号A一二三五年一维，Fan两个。'})});
   assert.equal((await normalized.json()).text,'11月12號A1235年一維，Fan2個。');
+  const normalizeTurn=async (postprocess,text='请维修设备 C1-VFD-12CC04。')=>(await originalFetch(base+'/normalize',{method:'POST',body:JSON.stringify({
+    text,postprocess,
+  })})).json();
+  assert.deepEqual(await normalizeTurn(false),{text:'請維修設備 C1-VFD-12CC04。'});
+  assert.equal(correctionRequests.length,0);
+  assert.deepEqual(await normalizeTurn(true),{text:'請檢查設備 C1-VFD-12CC04。',postprocess:'completed'});
+  assert.deepEqual(correctionRequests.at(-1),{url:'http://correction.test/v1/chat/completions',model:DEFAULT_ASR_POSTPROCESS_MODEL,text:'請維修設備 C1-VFD-12CC04。'});
+  asrModel='alternate-model';
+  assert.equal((await normalizeTurn(true)).postprocess,'completed');
+  assert.deepEqual(correctionRequests.at(-1),{url:'http://llm.test/v1/chat/completions?autoload=true',model:'alternate-model',text:'請維修設備 C1-VFD-12CC04。'});
+  failCorrection=true;
+  assert.deepEqual(await normalizeTurn(true),{text:'請維修設備 C1-VFD-12CC04。',postprocess:'fallback'});
+  asrPostprocessEnabled=false;
+  assert.deepEqual(await normalizeTurn(true),{text:'請維修設備 C1-VFD-12CC04。'});
+  assert.equal(correctionRequests.length,3);
+  assert.deepEqual(await normalizeTurn(true,'查'),{text:'查'});
+  assert.equal(correctionRequests.length,3);
+  asrPostprocessEnabled=true;
+  failCorrection=false;
+  correctionText='查询';
+  for (const text of ['查','請查']) {
+    assert.deepEqual(await normalizeTurn(true,text),{text:'查詢',postprocess:'completed'});
+    assert.equal(correctionRequests.at(-1).text,text);
+  }
+  failCorrection=true;
+  const longText='查'.repeat(20001);
+  assert.deepEqual(await normalizeTurn(true,longText),{text:longText,postprocess:'fallback'});
+  assert.equal(correctionRequests.at(-1).text,longText);
+  assert.deepEqual(await normalizeTurn(true,' '),{text:' '});
+  assert.equal(correctionRequests.length,6);
   const callSettings=await originalFetch(base+'/settings',{method:'POST',body:'{}'});
   assert.equal((await callSettings.json()).vad_end_silence_ms,2000);
   ttsStreaming=true;
@@ -112,7 +170,7 @@ try {
   assert.deepEqual(events[0], { type: 'configuration', source: 'n8n', model: 'selected-demo-llm' });
   assert.ok(events.some(e => e.event === 'N8N_WORKFLOW_STARTED'));
   assert.ok(!events.some(e=>e.type==='progress'),'no announcement for a fast lookup');
-  assert.ok(events.some(e => e.event === 'MCP_TOOL_COMPLETED'));
+  assert.ok(events.some(e => e.event === 'N8N_STEP_COMPLETED'));
   assert.equal(events.at(-1).reply, 'n8n 已檢索維修流程。');
   assert.equal(toolCalls.length, 1);
   assert.equal(requests.length,0,'SIP does not run a parallel LLM loop for n8n');
@@ -123,7 +181,7 @@ try {
   assert.equal(modelLoads, 1, 'load the selected model before the AI Agent starts');
   assert.equal(plain[0].source, 'prompt.csv');
   assert.equal(plain.at(-1).reply, '一般提示詞回覆。');
-  assert.equal(toolCalls.length, 1, 'prompt.csv must not use MCP');
+  assert.equal(toolCalls.length, 1, 'prompt.csv must not invoke the n8n workflow');
   assert.equal(requests.at(-1).messages[0].content, input.prompt);
 
   source = 'n8n'; failTool = true;
@@ -147,6 +205,27 @@ try {
   releaseLookup();let remaining='';
   for(;;){const part=await reader.read();if(part.done)break;remaining+=new TextDecoder().decode(part.value);}
   assert.ok(remaining.includes('"type":"reply"'));holdLookup=false;
+  const scenarioSession = 'automatic-html-opening';
+  greetingsCsv='greeting\n"您好，這裡是 GeoVision IVR，請問需要什麼協助？"\n';
+  const scenarioWelcome = await originalFetch(base+'/tts-config',{method:'POST',
+    body:JSON.stringify({model:'zipvoice',welcomeGreeting:true,sessionId:scenarioSession})});
+  assert.equal((await scenarioWelcome.json()).greeting,
+    '您好，這裡是 GeoVision IVR，請問需要什麼協助？\n'+scenarioSimulation.languagePrompt);
+  const say = async text => {
+    const response = await originalFetch(base+'/dialogue',{method:'POST',body:JSON.stringify({
+      ...input,sessionId:scenarioSession,text,messages:[],
+    })});
+    return (await response.text()).trim().split('\n').map(JSON.parse).at(-1);
+  };
+  const discoveriesBeforeScenario = modelDiscovery;
+  for (const [answer, prompt] of [
+    ['1', /電話持有人名字/], ['測試員', /員工編號/], ['847', /直屬主管/],
+    ['測試主管', /要回報什麼內容/], ['回報現場查修', /故障碼/],
+  ]) assert.match((await say(answer)).reply,prompt);
+  assert.equal(modelDiscovery,discoveriesBeforeScenario);
+  assert.equal(reportRequests.length,1);
+  assert.deepEqual(reportRequests[0].scenarioReport,{number:3,language:'zh'});
+  assert.deepEqual(reportRequests[0].messages,[{role:'user',content:'回報現場查修'}]);
   console.log('PASS: real shared n8n dialogue code, saved source/model, same-call source switching, model readiness, AI Agent webhook calls, streamed events and explicit errors');
 } finally {
   globalThis.fetch = originalFetch;

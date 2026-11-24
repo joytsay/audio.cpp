@@ -12,8 +12,8 @@ const installMissing=options=>realImportMissing({repairCredentials:async()=>{},r
 const readTemplate=async name=>JSON.parse(await fs.readFile(path.join(templates,name),'utf8'));
 const credentials=await readTemplate('local-credentials.json');
 const template=await readTemplate('workflow.json');
-const mcp=await readTemplate('maintenance-mcp-tools.json');
-const rag=await readTemplate('maintenance-knowledge-rag.json');
+const mcp=await readTemplate('../../../../webui/native/tests/fixtures/n8n/maintenance-mcp-tools.json');
+const rag=await readTemplate('../../../../webui/native/tests/fixtures/n8n/maintenance-knowledge-rag.json');
 const entities=new Map([[credentials[0].id,credentials[0]]]);
 const imports=[];
 const run=async args=>{
@@ -29,13 +29,26 @@ assert.equal(entities.get(template.id).name,'GeoVision · Workflow');
 assert.ok(!entities.has(rag.id),'new installs omit legacy workflows');
 assert.ok(managedWorkflowIds.every(id=>entities.has(id)));
 const installedMain=entities.get(template.id);
-assert.equal(installedMain.nodes.length,16);
+assert.equal(installedMain.nodes.length,15);
 assert.equal(installedMain.meta.ivrWorkflowRevision,workflowLayoutRevision);
-assert.equal(entities.get(knowledgeToolsId).nodes.find(n=>n.name==='retrieve_knowledge').parameters.workflowId.value,knowledgeToolsId);
+assert.equal(installedMain.nodes.find(n=>n.name==='Retrieve current turn').parameters.workflowId.value,knowledgeToolsId);
 await installMissing({templates,has,listWorkflows,run:async()=>assert.fail('preserve existing unified edits'),log:()=>{}});
 await assert.rejects(installMissing({templates,has:async()=>false,listWorkflows:async()=>new Map(),run:async()=>{},log:()=>{}}),/import incomplete/);
 assert.equal(await exists('workflow','missing',{run:async()=>{throw Error('No workflows found');}}),false);
 await assert.rejects(exists('workflow','missing',{run:async()=>{throw Error('database unavailable');}}),/database unavailable/);
+
+const splitBackup=await fs.mkdtemp(path.join(os.tmpdir(),'ivr-direct-subflow-'));
+try {
+ const oldTools={...structuredClone(entities.get(knowledgeToolsId)),meta:{ivrWorkflowRevision:25}};
+ oldTools.nodes.push(...mcp.nodes.filter(node=>/mcpTrigger/.test(node.type)));
+ entities.set(knowledgeToolsId,oldTools);
+ await installMissing({templates,has,listWorkflows,run,backupDir:splitBackup,log:()=>{}});
+ const upgraded=entities.get(knowledgeToolsId);
+ assert.equal(upgraded.meta.ivrWorkflowRevision,workflowLayoutRevision);
+ assert.ok(!upgraded.nodes.some(node=>/mcp/i.test(node.type)));
+ const [backup]=await fs.readdir(splitBackup);
+ assert.deepEqual(JSON.parse(await fs.readFile(path.join(splitBackup,backup),'utf8')),[oldTools]);
+} finally {await fs.rm(splitBackup,{recursive:true,force:true});}
 
 const directory=await fs.mkdtemp(path.join(os.tmpdir(),'ivr-unified-migration-'));
 try {
@@ -58,14 +71,13 @@ try {
  assert.ok(!merged.nodes.some(n=>n.name==='Local Embeddings'));
  assert.equal(tools.nodes.find(n=>n.name==='Retrieve guidance').parameters.url,'http://knowledge:8085/rag');
  assert.ok(!merged.nodes.some(n=>n.name==='Custom read-only tool'),'requested two-tool set removes old tools');
- assert.deepEqual(tools.connections.retrieve_knowledge.ai_tool[0].map(e=>e.node),['Scenario MCP']);
- assert.equal(tools.nodes.find(n=>n.name==='retrieve_knowledge').parameters.workflowId.value,knowledgeToolsId);
+ assert.ok(![...tools.nodes,...merged.nodes].some(node=>/mcp/i.test(node.type)));
  assert.equal(merged.name,'GeoVision · Workflow');
  assert.equal(merged.nodes.filter(n=>n.type==='n8n-nodes-base.stickyNote').length,1);
  assert.equal(new Set(merged.nodes.map(n=>n.id)).size,merged.nodes.length);
  assert.deepEqual(entities.get(rag.id),oldRag,'legacy source remains recoverable');
  const backups=await fs.readdir(directory);assert.equal(backups.length,1);
- assert.deepEqual(JSON.parse(await fs.readFile(path.join(directory,backups[0]),'utf8')),{mcp:oldMcp,rag:oldRag});
+ assert.deepEqual(JSON.parse(await fs.readFile(path.join(directory,backups[0]),'utf8')),[oldMcp]);
  assert.equal(mergedWorkflowMigration(merged,null,template),null);
  await installMissing({templates,has,listWorkflows,run:async()=>assert.fail('migration must be idempotent'),log:()=>{}});
  const onlyMcp=mergedWorkflowMigration(mcp,null,template);
@@ -95,13 +107,14 @@ installedOldId.id=mcp.id;
 installedOldId.active=true;
 installedOldId.activeVersionId='previous-published-version';
 installedOldId.versionId='previous-draft-version';
-installedOldId.nodes.find(n=>n.name==='retrieve_knowledge').parameters.workflowId.value=mcp.id;
+installedOldId.nodes.find(n=>n.name==='Retrieve current turn').parameters.workflowId.value=mcp.id;
+installedOldId.meta.ivrWorkflowRevision=25;
 installedOldId.nodes.find(n=>n.name==='AI Agent').parameters.options.maxIterations=2;
 const renamed=workflowIdMigration(installedOldId,template.id);
 assert.equal(renamed.id,'ivrWorkflow');
 assert.equal(renamed.active,false);
 assert.ok(!('activeVersionId' in renamed)&&!('versionId' in renamed));
-assert.equal(renamed.nodes.find(n=>n.name==='retrieve_knowledge').parameters.workflowId.value,'ivrWorkflow');
+assert.equal(renamed.nodes.find(n=>n.name==='Retrieve current turn').parameters.workflowId.value,'ivrWorkflow');
 assert.equal(renamed.nodes.find(n=>n.name==='AI Agent').parameters.options.maxIterations,2);
 assert.equal(installedOldId.id,mcp.id,'original workflow is untouched');
 const renameDir=await fs.mkdtemp(path.join(os.tmpdir(),'ivr-workflow-id-test-'));
@@ -109,7 +122,7 @@ try{
  entities.delete(template.id);entities.set(mcp.id,installedOldId);
  imports.length=0;retired.length=0;
  await installMissing({templates,has,listWorkflows,run,backupDir:renameDir,log:()=>{}});
- assert.equal(entities.get(template.id).nodes.find(n=>n.name==='AI Agent').parameters.options.maxIterations,2,'ID migration preserves current-revision user edits');
+ assert.equal(entities.get(template.id).nodes.find(n=>n.name==='Retrieve current turn').parameters.workflowId.value,knowledgeToolsId);
  assert.deepEqual(retired,[mcp.id]);
  await installMissing({templates,has,listWorkflows,run:async()=>assert.fail('rename must be idempotent'),backupDir:renameDir,log:()=>{}});
  // An interrupted retirement must resume without overwriting target edits.
@@ -126,7 +139,7 @@ const revisionThree=structuredClone(template);revisionThree.meta.ivrWorkflowRevi
 assert.equal(mergedWorkflowMigration(revisionThree,null,template).meta.ivrWorkflowRevision,template.meta.ivrWorkflowRevision,'revision 3 upgrades to native Data Table intake');
 const revisionFour=structuredClone(template);revisionFour.meta.ivrWorkflowRevision=4;
 assert.equal(mergedWorkflowMigration(revisionFour,null,template).meta.ivrWorkflowRevision,template.meta.ivrWorkflowRevision,'revision 4 upgrades to one-question Data Table saving');
-console.log('PASS workflow bootstrap, legacy backups, MCP tool bindings, retry and idempotence');
+console.log('PASS workflow bootstrap, legacy backups, direct workflow bindings, retry and idempotence');
 
 const credentialDir=await fs.mkdtemp(path.join(os.tmpdir(),'ivr-local-credential-test-'));
 try {
@@ -212,7 +225,7 @@ revisionTwenty.nodes.find(n=>n.id==='ivr-route-scenario-result').parameters.cond
 const scenarioUpgrade=mergedWorkflowMigration(revisionTwenty,null,template);
 assert.equal(scenarioUpgrade.connections['Scenario Report Input'].main[0][0].node,'Prepare IVR input');
 assert.match(scenarioUpgrade.nodes.find(n=>n.id==='ivr-route-scenario-result').parameters.conditions.conditions[0].leftValue,/scenarioReport/);
-assert.equal(scenarioUpgrade.nodes.find(n=>n.name==='AI Agent').parameters.text,'custom caller prompt');
+assert.ok(!scenarioUpgrade.nodes.some(node=>/mcp/i.test(node.type)));
 assert.equal(mergedWorkflowMigration(scenarioUpgrade,null,template),null);
 const revisionTwentyTwo=structuredClone(template);
 revisionTwentyTwo.meta.ivrWorkflowRevision=22;
@@ -232,25 +245,18 @@ for (const node of bundledQdrant) {
   node.parameters.options={...node.parameters.options,timeout:12345};
 }
 const bundledUpgrade=mergedWorkflowMigration(revisionTwentyThree,null,template);
-assert.equal(bundledUpgrade.meta.ivrWorkflowRevision,24);
-assert.deepEqual(bundledUpgrade.connections,revisionTwentyThree.connections);
+assert.equal(bundledUpgrade.meta.ivrWorkflowRevision,workflowLayoutRevision);
 for (const node of bundledQdrant) {
   const updated=bundledUpgrade.nodes.find(candidate=>candidate.id===node.id);
   assert.equal(updated.parameters.url,template.nodes.find(candidate=>candidate.id===node.id).parameters.url);
-  assert.equal(updated.parameters.options.timeout,12345);
 }
-assert.equal(mergedWorkflowMigration(bundledUpgrade,null,template),null);
 
 const localWorkflow=structuredClone(template);
-const scenarioTool={id:'scenario-file-fixture',name:'Local scenario',position:[990,100],type:'@n8n/n8n-nodes-langchain.toolWorkflow',parameters:{workflowId:{value:'local-scenario-workflow'}}};
-localWorkflow.nodes.push(scenarioTool);
-localWorkflow.connections[scenarioTool.name]={ai_tool:[[{node:'Scenario MCP',type:'ai_tool',index:0}]]};
 localWorkflow.nodes.find(node=>node.name==='Local Chat Model').parameters.options.temperature=0.42;
 localWorkflow.nodes.find(node=>node.id==='document-rag-embed-query').parameters.url='http://local-model.test/embedding';
 const [splitMain,splitTools,splitScenarios,splitRag]=splitManagedWorkflow(localWorkflow);
 assert.equal(splitMain.nodes.find(node=>node.name==='Local Chat Model').parameters.options.temperature,0.42);
-assert.equal(splitTools.nodes.find(node=>node.id===scenarioTool.id).parameters.workflowId.value,'local-scenario-workflow');
-assert.deepEqual(splitTools.connections[scenarioTool.name],localWorkflow.connections[scenarioTool.name]);
+assert.ok(splitTools.nodes.some(node=>node.type==='n8n-nodes-base.executeWorkflowTrigger'));
 assert.equal(splitScenarios.nodes.find(node=>node.id==='scenario-file-import-webhook').parameters.path,'ivr-import-scenario');
 assert.equal(splitRag.nodes.find(node=>node.id==='document-rag-embed-query').parameters.url,'http://local-model.test/embedding');
 assert.equal(splitRag.nodes.filter(node=>node.parameters.url?.includes('collectionUrl')).length,5);
@@ -297,7 +303,7 @@ try{
  assert.ok(!Object.hasOwn(admin.pinData,'scenario-upload-webhook'));
  assert.ok(!Object.hasOwn(admin.connections,'scenario-upload-webhook'));
  const [file]=await fs.readdir(adminBackupDir);
- assert.deepEqual(JSON.parse(await fs.readFile(path.join(adminBackupDir,file),'utf8')),oldAdmin);
+ assert.deepEqual(JSON.parse(await fs.readFile(path.join(adminBackupDir,file),'utf8')),[oldAdmin]);
  await installMissing({templates,has,listWorkflows,run:async()=>assert.fail('migration must be idempotent'),backupDir:adminBackupDir,log:()=>{}});
 }finally{await fs.rm(adminBackupDir,{recursive:true,force:true});}
 console.log('PASS legacy upload removal preserves the current upload and local Scenario Admin edits');

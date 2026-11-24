@@ -37,21 +37,46 @@ const flows = {
 
 export function simulationSections(files, dataset) {
   if (files.length !== 1 || !/\.html?$/i.test(files[0].name)) return [];
-  return dataset?.template.filter(section => {
-    const flow = flows[section.number];
-    return (flow?.heading ?? flow?.intent)?.test(section.title);
-  }) ?? [];
+  const seen = new Set();
+  const sections = (dataset?.template ?? []).filter(({number}) => {
+    if (!number || seen.has(number)) return false;
+    seen.add(number);
+    return true;
+  });
+  const standard = Object.entries(flows).every(([number, flow]) =>
+    sections.some(section => section.number === Number(number) && (flow.heading ?? flow.intent).test(section.title)));
+  if (standard) return sections.filter(({number}) => Object.hasOwn(flows, number));
+  return sections.map(section => ({...section, custom: true}));
+}
+
+export function simulationOpening(dataset, sections) {
+  if (!sections.length) return undefined;
+  const turns = dataset.template.find(section => !section.number)?.turns ?? [];
+  const prompts = turns.filter(turn => turn.role === 'assistant' && turn.text.trim()).map(turn => turn.text);
+  if (!sections[0].custom && prompts.length === 5 && /選語言/.test(prompts[0]) &&
+    /電話持有人/.test(prompts[1]) && /員工編號後\s*[3三]\s*碼/.test(prompts[2]) &&
+    /直屬主管/.test(prompts[3]) && /回報什麼/.test(prompts[4])) return undefined;
+  const language = /\p{Script=Han}/u.test(prompts.join(' ') || sections[0].title) ? 'zh' : 'en';
+  if (!prompts.length) prompts.push(language === 'zh' ? '請問您需要什麼協助？' : 'What can I help you with?');
+  return {prompts, language};
+}
+
+export function explicitSimulationNumber(text) {
+  const token = text.trim().match(/^(?:請|我要|我想)?\s*(?:(?:啟動|選擇|進入)\s*)?(?:情境|scenario)\s*(\d{1,3}|[一二三四五六七八九])(?=$|[^\d])/i)?.[1] ??
+    text.trim().match(/^(\d{1,3})[.。]?$/)?.[1];
+  return token === undefined ? undefined : (/^\d+$/.test(token) ? Number(token) : '一二三四五六七八九'.indexOf(token) + 1);
 }
 
 export function chooseSimulationSection(sections, raw) {
   const text = normalizeCallText(raw.normalize('NFKC')).trim();
-  const explicit = text.match(/^(?:請|我要|我想)?\s*(?:(?:啟動|選擇|進入)\s*)?(?:情境|scenario)\s*([1-8一二三四五六七八])(?=$|[^\d])/i);
-  if (explicit) {
-    const number = Number(explicit[1]) || '一二三四五六七八'.indexOf(explicit[1]) + 1;
+  const number = explicitSimulationNumber(text);
+  if (number !== undefined) {
     return sections.find(section => section.number === number);
   }
-  const named = sections.find(section => text.toLowerCase().includes(section.title.toLowerCase()) && section.number !== 2);
+  const named = sections.find(section => text.toLowerCase().includes(section.title.toLowerCase()) &&
+    (section.custom || section.number !== 2));
   if (named) return named;
+  if (sections[0]?.custom) return undefined;
   const report = /回報|report\b/i.test(text) && !/查詢|\b(?:lookup|look up)\b/i.test(text);
   const candidates = report || (flows[3].intent.test(text) && !/查詢|查一下|意思|是什麼|\b(?:lookup|look up|what does)\b/i.test(text))
     ? [3, 2, 7, 4, 5, 6, 1] : [6, 4, 5, 7, 1, 3, 2];
@@ -63,11 +88,16 @@ export function chooseSimulationSection(sections, raw) {
 }
 
 export function simulationGuidance(section) {
+  if (section.custom) return {number:section.number,title:section.title,custom:true,retrieval:true};
   const flow = flows[section.number];
+  const firstTurn = section.turns?.[0];
+  const dispatchReminder = section.number === 1 && firstTurn?.role === 'assistant'
+    ? firstTurn.text.replace(/\s+/g, ' ').trim() : '';
   return {
     number: section.number,
     title: section.title,
     steps: flow.steps,
     ...(flow.retrieval ? {retrieval:true} : {}),
+    ...(dispatchReminder ? {dispatchReminder} : {}),
   };
 }

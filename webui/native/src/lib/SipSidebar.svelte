@@ -1,15 +1,16 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { jsonRequest } from './api';
-  import type { SipSettings, SipLive } from './sip';
+  import { isSipServerIp, sipServerIp, withSipServerIp, type SipSettings, type SipLive } from './sip';
 
   export let onsettings: (settings: SipSettings) => void = () => {};
   export let onstatus: (status: SipLive) => void = () => {};
   export let browserBusy = false;
   let settings: SipSettings | null = null;
-  let secret = '', error = '', message = '';
+  let secret = '', error = '', message = '', serverIp = '';
   let loading = true, saving = false, dirty = false;
   let form: HTMLFormElement;
+  let serverIpInput: HTMLInputElement;
   let live: SipLive = { live: false, status: null };
   let alive = true;
   let controller: AbortController;
@@ -18,9 +19,25 @@
     const data = await jsonRequest<SipSettings>('/v1/ui/sip', { cache: 'no-store' }, controller.signal);
     if (data.schema_version !== 2) throw new Error('Update the audio.cpp server to enable the SIP sidebar and live call monitor.');
     if (!alive) return;
-    if (!dirty) settings = data;
+    if (!dirty) {
+      settings = data;
+      serverIp = sipServerIp(data.proxy);
+      serverIpInput?.setCustomValidity('');
+    }
     else if (settings) settings.worker_running = data.worker_running;
     onsettings(data);
+  }
+  function updateServerIp(event: Event) {
+    const input = event.currentTarget as HTMLInputElement;
+    serverIp = input.value;
+    const ip = serverIp.trim();
+    const valid = isSipServerIp(ip);
+    input.setCustomValidity(ip && !valid ? 'Enter a valid IPv4 address.' : '');
+    if (settings && valid) settings = withSipServerIp(settings, ip);
+  }
+  function updateIpFromProxy(event: Event) {
+    serverIp = sipServerIp((event.currentTarget as HTMLInputElement).value);
+    serverIpInput.setCustomValidity('');
   }
   async function poll() {
     try {
@@ -99,7 +116,11 @@
         </select>
         <p class="muted">{settings.mode === 'tts' ? 'Dial 521 from 520. Press #1, #2 or #3 for TTS. Echo mode has no caller transcription.' : 'Phone audio runs through VAD → ASR → LLM → TTS. Replies play back into the same SIP call; transcripts and events appear in the demo.'}</p>
         <h3>Connection</h3>
-        <label for="demo-sip-proxy">SIP gateway / proxy</label><input id="demo-sip-proxy" bind:value={settings.proxy} required spellcheck="false" />
+        <label for="demo-sip-server-ip">SIP server IP</label>
+        <input id="demo-sip-server-ip" bind:this={serverIpInput} value={serverIp} on:input={updateServerIp}
+          inputmode="decimal" placeholder="106.104.104.38" spellcheck="false" aria-describedby="demo-sip-ip-help" />
+        <small id="demo-sip-ip-help">Fills the proxy, account URI, and matching public Contact hostname.</small>
+        <label for="demo-sip-proxy">SIP gateway / proxy</label><input id="demo-sip-proxy" bind:value={settings.proxy} on:input={updateIpFromProxy} required spellcheck="false" />
         <label for="demo-sip-account">Account URI</label><input id="demo-sip-account" bind:value={settings.account} required spellcheck="false" />
         <label for="demo-sip-auth">Authentication username</label><input id="demo-sip-auth" bind:value={settings.auth_user} required autocomplete="off" />
         <label for="demo-sip-secret">Password</label><input id="demo-sip-secret" type="password" bind:value={secret} autocomplete="new-password" required={!settings.has_secret} placeholder={settings.has_secret ? 'Leave blank to keep saved password' : 'SIP account password'} />
@@ -107,7 +128,7 @@
         <h3>Network & audio</h3>
         <label for="demo-sip-interface">Network interface</label><input id="demo-sip-interface" bind:value={settings.interface} placeholder="Auto, e.g. eno1" spellcheck="false" />
         <label for="demo-sip-listen">Local SIP address</label><input id="demo-sip-listen" bind:value={settings.listen} placeholder="192.168.2.111:15061" spellcheck="false" />
-        <label for="demo-sip-contact">Public Contact hostname</label><input id="demo-sip-contact" bind:value={settings.contact_host} placeholder="175.180.90.33.nip.io" spellcheck="false" />
+        <label for="demo-sip-contact">Public Contact hostname</label><input id="demo-sip-contact" bind:value={settings.contact_host} placeholder="106.104.104.38.nip.io" spellcheck="false" />
         <label for="demo-sip-rtp">RTP port range</label><input id="demo-sip-rtp" bind:value={settings.rtp_ports} required placeholder="49160-49200" />
         <label for="demo-sip-codec">Codec</label><select id="demo-sip-codec" bind:value={settings.codec}><option value="PCMU">PCMU · G.711 μ-law</option><option value="OPUS">Opus</option></select>
         <label for="demo-sip-dtmf">DTMF</label><select id="demo-sip-dtmf" bind:value={settings.dtmf_mode}><option value="rtp">RTP telephone-event</option><option value="info">SIP INFO</option></select>

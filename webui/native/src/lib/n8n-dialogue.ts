@@ -29,7 +29,7 @@ export function isN8nIntake(text: string, messages: ReadonlyArray<{role: string;
   return !history.some(message => /回報工單|增加工單|新增工單|建立工單|工單回報/.test(normalize(message.content)));
 }
 
-// The agent, MCP client and session memory run inside GeoVision · Workflow.
+// The direct knowledge steps, model and session memory run inside GeoVision · Workflow.
 // Browser and SIP callers share this transport and never run a second LLM loop.
 export async function n8nDialogue(
   input: {

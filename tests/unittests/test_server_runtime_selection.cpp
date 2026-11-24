@@ -4,6 +4,7 @@
 #include "server_ui.h"
 #include "server_protocol.h"
 #include "demo_settings.h"
+#include "demo_call_logs.h"
 #include "sip_settings.h"
 #include "engine/framework/io/json.h"
 
@@ -51,6 +52,46 @@ int main() {
             if (edited.status != 200 || json::parse(edited.body).require("settings").require("vad_threshold").as_number() != 0.7)
                 throw std::runtime_error("manual YAML edits were not read on restart");
             std::cout << "global demo model settings persistence passed\n";
+        }
+
+        {
+            namespace srv = minitts::server;
+            namespace fs = std::filesystem;
+            const auto root = fs::temp_directory_path() /
+                ("demo-call-log-test-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+            struct Cleanup { fs::path path; ~Cleanup() { fs::remove_all(path); } } cleanup{root};
+            srv::HttpRequest request;
+            request.method = "POST";
+            request.path = "/v1/ui/demo-call-log";
+            const auto submit = [&](std::string id, int index, std::string entries, bool management = true) {
+                request.body = "{\"session_id\":\"" + id + "\",\"started_at_ms\":" +
+                    std::to_string(1700000000000LL + index) + ",\"entries\":" + entries + "}";
+                return srv::demo_call_log_response(request, management, root).status;
+            };
+            const std::string turn = R"([{"role":"Caller","text":"查詢\n庫存"},{"role":"AI","text":"已收到"}])";
+            if (submit("demo-test", 0, turn, false) != 403 || fs::exists(root))
+                throw std::runtime_error("Call logs bypassed management guard");
+            if (submit("demo-../test", 0, turn) != 400 || fs::exists(root))
+                throw std::runtime_error("Call logs accepted an invalid session path");
+            for (int i = 0; i < 12; ++i) {
+                const auto id = (i % 2 ? "sip-" : "demo-") + std::to_string(i);
+                if (submit(id, i, turn) != 200) throw std::runtime_error("Could not save a demo call log");
+            }
+            if (submit("demo-0", 0, turn) != 200 ||
+                submit("sip-11", 11, R"([{"role":"AI","text":"補充回覆"}])") != 200)
+                throw std::runtime_error("Call log could not accept a late turn");
+            const auto directory = root / "ui-settings/call-logs";
+            const auto recent = directory / "2023-11-14T22-13-20.011Z-sip-11-log.txt";
+            std::ifstream input(recent);
+            const std::string transcript(std::istreambuf_iterator<char>(input), {});
+            if (std::distance(fs::directory_iterator(directory), fs::directory_iterator()) != 10 ||
+                fs::exists(directory / "2023-11-14T22-13-20.000Z-demo-0-log.txt") ||
+                fs::exists(directory / "2023-11-14T22-13-20.001Z-sip-1-log.txt") ||
+                transcript.find("Caller: 查詢 庫存\n") == std::string::npos ||
+                transcript.find("AI: 已收到\n") == std::string::npos ||
+                transcript.find("AI: 補充回覆\n") == std::string::npos)
+                throw std::runtime_error("Call log rotation or transcript append failed");
+            std::cout << "demo call log persistence and rotation passed\n";
         }
 
         {

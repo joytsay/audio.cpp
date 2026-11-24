@@ -120,7 +120,7 @@ all downloaded audio and LLM weights.
 - `https://HOST:8084/` opens the full interface with HTTPS.
 - All four host ports use Caddy; the native audio server stays inside the container.
 - Caddy serves the Svelte bundle and forwards `/llm/*` to the internal llama.cpp
-  worker on port 8082, `/n8n/webhook/*` and `/n8n/mcp/*` to n8n, `/sip-ws` to
+  worker on port 8082, `/n8n/webhook/*` to n8n, `/sip-ws` to
   Asterisk, and the audio and RAG APIs to audio.cpp. The HTTP demo uses port 8083's
   `/llm/*` gateway for LLM requests; HTTPS requests stay on the same origin.
 - The embedding worker on port 8084 and rag-cpp on port 8083 remain internal
@@ -216,6 +216,11 @@ Save the account and network settings there; edits restart registration and end
 an active phone call. Hiding the sidebar does not stop SIP. The server and worker
 must share `audiocpp-sip-data` and run matching updated images.
 
+Enter **SIP server IP** to fill the proxy and account URI while keeping their
+ports and account ID. The panel also fills an empty or matching public Contact
+hostname. Use **Local SIP address** for the address bound to the server's network
+interface, then click **Save SIP settings**.
+
 During a SIP call, the demo shows live call events, actual received/transmitted
 PCM levels, and the native worker's conversation text. Test echo has no caller
 transcription; Use IVR shows ASR results and assistant replies. Audio stays on
@@ -223,7 +228,7 @@ the phone. The browser's microphone and scenario controls are disabled in SIP
 mode. VAD/ASR/TTS use the native worker's configured models. Dialogue source
 and the LLM model come from the saved demo settings on each SIP turn. Choosing
 **Dialogue source → n8n** while Use SIP is enabled saves that source immediately;
-use **Save model settings** for other model changes. The same shared n8n/MCP
+use **Save model settings** for other model changes. The same shared n8n
 dialogue code handles browser and SIP turns, and tool events appear in Events.
 Source changes take effect on the next turn without restarting the SIP call.
 
@@ -234,7 +239,7 @@ controls the caller/assistant waveforms and phone call status.
 The sidebar groups controls into **VAD**, **ASR**, **LLM**, and **TTS** sections,
 each with an On/Off switch. System prompt and its save button are in **LLM**.
 
-In **ASR**, **Transcript post-processing** defaults to On with **S1-mini-Chinese-1106 · BF16**. It cleans browser microphone and audio-file transcriptions before dialogue. Use **Save model settings** to keep the switch and model selection. Other installed text models appear in the dropdown.
+In **ASR**, **Transcript post-processing** defaults to On with **S1-mini-Chinese-1106 · BF16**. It cleans browser microphone, audio-file, and SIP inputs before dialogue. Use **Save model settings** to keep the switch and model selection. SIP reads those settings on each typed or spoken turn and attempts correction for any nonempty transcript. Events show the raw speech or typed input and the final Traditional Chinese transcript separately. Other installed text models appear in the dropdown.
 
 The default model runs in a dedicated llama.cpp worker. Put the BF16 GGUF in
 `llama-models/.asr-postprocess/s1-mini/S1-mini-Chinese-1106-BF16.gguf`
@@ -466,9 +471,9 @@ knowledge-service permissions change.
 `SIP_DIALOGUE_URL=http://127.0.0.1:8086/dialogue` connects the native SIP worker
 to this handler. It reads `/v1/ui/demo-settings` for every recognized utterance,
 loads the saved LLM if necessary, and follows `dialogue_source` (`prompt.csv` or
-`n8n`). n8n mode uses the same maintenance tool allowlist, ASR-bound context,
-read-only RAG tools and no-tool fallback as browser calls. MCP events and the
-actual source/model stream back into the SIP monitor; failures are reported
+`n8n`). n8n mode sends the caller transcript through the same direct work-order and
+retrieval workflow as browser calls. Completed n8n steps and the source/model
+stream back into the SIP monitor; failures are reported
 instead of silently routing through the prompt-only path.
 
 When deploying this change, recreate **n8n** as well as rebuilding **sip** and
@@ -620,23 +625,13 @@ and capacitance values. Missing fields are requested instead of filled from
 examples; the final confirmation uses the work-order title from this call.
 Unrecognized letters in a part number are preserved, not guessed from hotwords.
 
-### n8n MCP tools for the voice assistant
+### Direct n8n workflows for the voice assistant
 
-Compose includes `ivr-n8n` and a document extraction/local work-order service. Automatic
-setup imports **GeoVision · Workflow**, grouping **IVR Input → AI Agent → IVR Output**,
-**KnowledgeMCP**, and **RAG** on one canvas. The agent uses the MCP RAG tool and
-session-scoped Simple Memory. Existing workflows are backed up before merging;
-custom credentials and retrieval settings are preserved. Startup automatically publishes
-the current workflow after owner setup; set `N8N_AUTO_PUBLISH_WORKFLOW=false` to keep
-publishing manual. Select **Dialogue source → n8n**. Both browser and SIP turns enter
-the n8n AI Agent webhook; fresh MCP retrieval runs before every answer. The two
-tools retrieve knowledge and save work orders in a native n8n Data Table. New
-reports get one follow-up question, then the next reply is saved even with missing fields. Replies stay on one conversational line. ASR/TTS stay in audio.cpp;
-scenario documents come from your uploads. See the [n8n setup guide](n8n/README.md).
-
-The demo Scenarios dropdown also offers **Add New Scenario**. Upload PDF, DOCX,
-XLSX, CSV, TXT or Markdown documents to create persistent Q/A reference knowledge and
-run RAG indexing through n8n. Saved scenarios remain in the dropdown after reloads.
+Select **Dialogue source → n8n** for the standard IVR. The webhook sends
+registered caller turns directly to the work-order and retrieval sub-workflow.
+For an uploaded HTML simulation, the selected file supplies the call opening
+and scenario definitions. Document RAG retrieves evidence from the selected
+scenario on each turn. See the [n8n setup guide](n8n/README.md).
 
 `ivr-knowledge` starts with an empty document store and uses scenarios uploaded
 through **Add New Scenario**. Documents and Q/A persist in

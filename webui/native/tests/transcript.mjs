@@ -149,3 +149,30 @@ console.log('PASS Traditional Chinese/digits for n8n ASR and optional raw transc
 assert.equal(normalizeTranscript('2026年11月12號 A 一二三四五。'),'2026年11月12號 A12345。');
 assert.equal(normalizeTranscript('A 一 二 三 四 五，FAN 兩個。'),'A12345，FAN 2個。');
 assert.equal(normalizeTranscript('A 12345，A 一樣。'),'A12345，A 一樣。');
+
+const correctionCompiled = buildSync({
+  entryPoints: [fileURLToPath(new URL("../src/lib/asr-postprocess.ts", import.meta.url))],
+  bundle: true, platform: "node", format: "esm", write: false,
+});
+const { correctAsrTranscript, DEFAULT_ASR_POSTPROCESS_MODEL } = await import(
+  `data:text/javascript;base64,${Buffer.from(correctionCompiled.outputFiles[0].text).toString("base64")}`
+);
+const correct = text => correctAsrTranscript(
+  text, DEFAULT_ASR_POSTPROCESS_MODEL, "", "", new AbortController().signal,
+);
+try {
+  const originalText = "请维修设备 C1-VFD-12CC04，故障码 010。";
+  let output = "请检查设备 C1-VFD-12CC04，故障码 010。";
+  globalThis.fetch = async (_url, request) => {
+    const { messages } = JSON.parse(request.body);
+    assert.match(messages[0].content, /Traditional Chinese/);
+    return Response.json({ choices: [{ finish_reason: "stop", message: { content: output } }] });
+  };
+  assert.equal(await correct(originalText), "請檢查設備 C1-VFD-12CC04，故障碼 010。");
+  output = "请检查设备 C1-VFD-12CC04，故障码 011。";
+  assert.equal(await correct(originalText), "請維修設備 C1-VFD-12CC04，故障碼 010。");
+  assert.equal(await correct("确认"), "確認");
+} finally {
+  globalThis.fetch = previousFetch;
+}
+console.log("PASS ASR post-processing output and fallbacks use Traditional Chinese");

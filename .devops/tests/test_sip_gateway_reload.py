@@ -9,7 +9,7 @@ import time
 
 
 def wait_for(predicate, message):
-    deadline = time.monotonic() + 8
+    deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
         if predicate():
             return
@@ -29,9 +29,13 @@ with tempfile.TemporaryDirectory(prefix="sip-gateway-reload-") as directory:
 [ -z "${SIP_INTERFACE+x}" ] && [ -z "${SIP_MODE+x}" ] || exit 6
 # Compose credentials must not shadow the settings file.
 [ -z "${SIP_ACCOUNT+x}" ] && [ -z "${SIP_SECRET+x}" ] || exit 3
-cat "$2" >> "$TEST_CALLS"
+settings=$(cat "$2")
+case "$settings" in
+    *first.test*) trap '' TERM ;;
+    *) trap 'exit 0' TERM ;;
+esac
+printf '%s\\n' "$settings" >> "$TEST_CALLS"
 printf 'started\\n' >> "$TEST_CALLS"
-trap 'exit 0' TERM
 while :; do sleep 0.1; done
 ''')
     client.chmod(0o755)
@@ -67,9 +71,10 @@ while :; do sleep 0.1; done
         output, errors = process.communicate(timeout=5)
         assert process.returncode == 0, errors.decode()
         assert not (settings / "worker.heartbeat").exists(), "heartbeat survived shutdown"
+        assert b"Worker did not stop within four seconds" in output
         assert b"old-secret" not in output + errors
     finally:
         if process.poll() is None:
             process.send_signal(signal.SIGTERM)
             process.communicate(timeout=5)
-print("PASS: shared settings, credential precedence, reload, heartbeat and clean shutdown")
+print("PASS: shared settings, reload after a stuck worker, heartbeat and clean shutdown")

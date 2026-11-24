@@ -3,7 +3,7 @@ Requires Linux Docker and the already installed n8n image. Never touches live
 containers, workflows, credentials or source documents; builds no images.
 """
 import json, pathlib, threading, http.server, urllib.request, urllib.error
-import http.cookiejar, time, subprocess, socket, uuid, os
+import base64, http.cookiejar, time, subprocess, socket, uuid, os
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 IMAGE = os.environ.get('N8N_TEST_IMAGE', 'docker.n8n.io/n8nio/n8n:2.46.6')
@@ -23,24 +23,64 @@ subprocess.run(['docker', 'run', '--pull=never', '--rm', '-d', '--name', CONTAIN
  '-e', 'N8N_SECURE_COOKIE=false', '-e', 'N8N_DIAGNOSTICS_ENABLED=false',
  '-e', 'N8N_PERSONALIZATION_ENABLED=false', IMAGE], check=True, stdout=subprocess.DEVNULL)
 knowledge_url=f'http://127.0.0.1:{knowledge_port}'
-knowledge_code="import{createKnowledgeServer,createKnowledgeStore}from './server.mjs';import{createWorkOrderStore}from './work-orders.mjs';const orders=createWorkOrderStore({root:'/tmp/ivr-workflow-orders',now:()=>new Date('2026-11-12T04:00:00Z')});createKnowledgeServer(createKnowledgeStore({root:'/workspace',orders,pdf:async()=>({text:'Synthetic OCR excerpt; verify source handwriting.',extraction:'ocr'})})).listen("+str(knowledge_port)+",'127.0.0.1');"
+knowledge_code="import{createKnowledgeServer,createKnowledgeStore}from './server.mjs';import{createWorkOrderStore}from './work-orders.mjs';const orders=createWorkOrderStore({root:'/tmp/ivr-workflow-orders',now:()=>new Date('2026-11-12T04:00:00Z')});createKnowledgeServer(createKnowledgeStore({root:'/workspace',orders,ragUrl:'http://127.0.0.1:"+str(port)+"/webhook/ivr-document-rag',pdf:async()=>({text:'Synthetic OCR excerpt; verify source handwriting.',extraction:'ocr'})})).listen("+str(knowledge_port)+",'127.0.0.1');"
 subprocess.run(['docker','run','--pull=never','--rm','-d','--name',KNOWLEDGE_CONTAINER,'--network','host',
  '-v',str(ROOT)+':/workspace:ro','-v',str(ROOT/'examples/docker/agx-one-container/knowledge')+':/app/code:ro',
+ '-e','IVR_RAG_EMBED_DIMENSIONS=4',
  '-w','/app/code','ivr-knowledge:local','node','--input-type=module','-e',knowledge_code],check=True,stdout=subprocess.DEVNULL)
 
-def knowledge_api(path,body=None):
+def knowledge_api(path,body=None,method=None):
  from urllib.parse import quote
- request=urllib.request.Request(knowledge_url+path,data=json.dumps(body,ensure_ascii=False).encode() if body is not None else None,headers={'Content-Type':'application/json'})
+ request=urllib.request.Request(knowledge_url+path,data=json.dumps(body,ensure_ascii=False).encode() if body is not None else None,headers={'Content-Type':'application/json'},method=method)
  with urllib.request.urlopen(request,timeout=30) as response:return json.load(response)
 
 calls=[];embedding=[];scenario_removed=False
+points={}; collections=set(); vision_calls=[]
 class Mock(http.server.BaseHTTPRequestHandler):
  def log_message(self,*a):pass
  def send(self,data,status=200):
   raw=json.dumps(data,ensure_ascii=False).encode();self.send_response(status);self.send_header('Content-Type','application/json');self.send_header('Content-Length',str(len(raw)));self.end_headers();self.wfile.write(raw)
- def do_GET(self):return self.send({'data':[{'id':'fixture-model','object':'model'}]})
+ def do_GET(self):
+  if self.path.endswith('/exists'):return self.send({'result':{'exists':self.path.split('/')[2] in collections}})
+  return self.send({'data':[{'id':'fixture-model','object':'model'}]})
+ def do_PUT(self):
+  body=json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+  if self.path.endswith('/points?wait=true'):
+   points.update({p['id']:p for p in body['points']})
+   return self.send({'status':'ok','result':{'status':'completed'}})
+  assert self.path.startswith('/collections/')
+  collections.add(self.path.split('/')[2])
+  return self.send({'status':'ok','result':True})
  def do_POST(self):
   body=json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+  if self.path.endswith('/points'):
+   return self.send({'result':[{'id':id} for id in body['ids'] if id in points]})
+  if self.path.endswith('/points/query'):
+   ids=body['filter']['must'][0]['has_id']
+   def rank(row):
+    similarity=sum(a*b for a,b in zip(row['vector'],body['query']))
+    return (-similarity,row['payload']['kind']!='image')
+   ranked=sorted((points[id] for id in ids),key=rank)
+   return self.send({'result':{'points':[{**row,'score':1.0} for row in ranked[:body['limit']]]}})
+  if self.path=='/embedding':
+   embedding.append(body)
+   return self.send([{'index':i,'embedding':[[0.0,1.0,0.0,0.0] if 'LAB-ZETA' in str(item) else [1.0,0.0,0.0,0.0]]}
+                     for i,item in enumerate(body['content'])])
+  if self.path=='/vision':
+   vision_calls.append(body)
+   system=body['messages'][0]['content']
+   content=body['messages'][1]['content']
+   evidence='\n'.join(part['text'] for part in content if part['type']=='text')
+   if 'Select the IVR scenario' in system:
+    assert 'Returns and exchanges' in evidence and 'Delivery windows' in evidence,evidence
+    answer='8' if 'send it back' in evidence else 'NONE'
+   elif 'Continue the selected IVR simulation' in system:
+    assert 'Returns and exchanges' in evidence and 'Delivery windows' not in evidence,evidence
+    assert any(part['type']=='image_url' for part in content)
+    answer='For order LIVE-28, the reference allows 45 days.' if 'LIVE-28' in evidence else 'What is your order number?'
+   else:
+    answer='LAB-ZETA 每週三回收，聯絡分機 7654。' if '每週三回收' in evidence else '沒有查到 LAB-ZETA 的服務資料。'
+   return self.send({'choices':[{'message':{'content':answer}}]})
   if self.path=='/v1/embeddings':
    embedding.append(body);inputs=body['input'];inputs=inputs if isinstance(inputs,list) else [inputs]
    return self.send({'object':'list','model':'fixture-embedding','data':[{'object':'embedding','index':i,'embedding':([0.0,1.0,0.0] if 'LAB-ZETA' in str(inputs[i]) else [1.0,0.25,0.5])} for i in range(len(inputs))],'usage':{'prompt_tokens':10,'total_tokens':10}})
@@ -105,6 +145,42 @@ def check_scenario_report(table):
   assert (len(calls),len(embedding))==inference_before_report
   print('PASS HTML troubleshooting confirmation, exact readings, native Data Table write, and idempotent retry without inference')
 
+def check_uploaded_script():
+  png='iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jrJ0AAAAASUVORK5CYII='
+  html=f'''<html><body>
+    <p>Assistant: Welcome to the service desk. Which service do you need?</p>
+    <h2>Scenario 8: Returns and exchanges</h2>
+    <p>Caller: I want to return my order.</p><p>Assistant: What is your order number?</p>
+    <p>Caller: SAMPLE-123</p><p>Assistant: The return window is 45 days.</p>
+    <img src="data:image/png;base64,{png}">
+    <h2>Scenario 9: Delivery windows</h2>
+    <p>Caller: When will my delivery arrive?</p><p>Assistant: Deliveries take seven days.</p>
+  </body></html>'''
+  added=knowledge_api('/scenarios',{'fileMode':True,'files':[{
+   'name':'fresh-ivr-script.html','data':base64.b64encode(html.encode()).decode(),
+  }]})['scenario']
+  id=added['id']
+  assert added['opening']=={'prompts':['Welcome to the service desk. Which service do you need?'],'language':'en'}
+  knowledge_api('/scenario-imports/'+id,{'ready':True,'tables':[]},'PUT')
+  initial=knowledge_api('/rag/index',{'id':id})
+  assert initial['indexed']==4 and sum(point['payload']['kind']=='image' and
+   point['payload']['source']=='fresh-ivr-script.html' for point in points.values())==1
+  before=len(embedding)
+  assert knowledge_api('/rag/index',{'id':id})==initial
+  assert len(embedding)==before,'existing vectors must be reused'
+  select={'id':id,'text':'I need to send it back','language':'en'}
+  scenario=knowledge_api('/ivr-simulation',select)['scenario']
+  assert scenario=={'number':8,'title':'Returns and exchanges','custom':True,'retrieval':True}
+  assert knowledge_api('/ivr-simulation',{**select,'text':'Please help'})=={'scenario':None}
+  first=knowledge_api('/ivr-simulation',{**select,'number':8})
+  assert first['answer']=='What is your order number?'
+  followup=knowledge_api('/ivr-simulation',{**select,'number':8,'text':'My order is LIVE-28.',
+   'history':[{'role':'user','content':select['text']},{'role':'assistant','content':first['answer']}]})
+  assert followup['answer']=='For order LIVE-28, the reference allows 45 days.'
+  assert all('Returns and exchanges' in source['locator'] for source in followup['sources'])
+  knowledge_api('/scenarios/'+id,method='DELETE')
+  print('PASS new HTML opening, vision-assisted routing, section-scoped multimodal RAG, vector reuse and live follow-up')
+
 if __name__=='__main__':
  try:
   for attempt in range(120):
@@ -117,14 +193,25 @@ if __name__=='__main__':
   try:api('/rest/owner/setup',{'email':'workflow-check@example.com','firstName':'Local','lastName':'Check','password':'LocalWorkflowCheck9!Secure'})
   except RuntimeError:api('/rest/login',{'emailOrLdapLoginId':'workflow-check@example.com','password':'LocalWorkflowCheck9!Secure'})
   data=api('/rest/api-keys',{'label':'Isolated workflow check '+str(time.time()),'expiresAt':int(time.time())+3600,'scopes':['workflow:list','workflow:create','workflow:read','workflow:update','workflow:activate','credential:create','execution:read','execution:list','dataTable:list','dataTable:create','dataTableColumn:read','dataTableColumn:create','dataTableRow:read','dataTableRow:create']});key=data['data']['rawApiKey']
-  workflow=json.loads((ROOT / 'examples/docker/agx-one-container/n8n/workflow.json').read_text())
+  workflows=json.loads(subprocess.check_output(['node','--input-type=module','-e',"""
+   import {readFileSync} from 'node:fs';
+   import {splitManagedWorkflow} from './examples/docker/agx-one-container/n8n/workflow-layout.mjs';
+   const template=JSON.parse(readFileSync('./examples/docker/agx-one-container/n8n/workflow.json','utf8'));
+   console.log(JSON.stringify(splitManagedWorkflow(template)));
+  """],cwd=ROOT,text=True))
+  workflow=next(item for item in workflows if item['id']=='ivrWorkflow')
   cred=api('/api/v1/credentials',{'name':'Local test models','type':'openAiApi','data':{'apiKey':'local','url':mock+'/v1'}})
-  for n in workflow['nodes']:
+  for n in [node for item in workflows for node in item['nodes']]:
    if 'credentials' in n:n['credentials']={'openAiApi':{'id':cred['id'],'name':cred['name']}}
    if n['name']=='Local Embeddings':n['parameters']['options']['baseURL']=mock+'/v1'
-   if n['name'] in ['KnowledgeMCP','Retrieve current turn']:n['parameters']['endpointUrl']=base+'/mcp/ivr-maintenance'
    if n['name']=='Read saved scenarios':n['parameters']['url']=knowledge_url+'/scenarios'
    if n['name']=='Load knowledge files':n['parameters']['url']=knowledge_url+'/documents'
+   if n['name']=='Retrieve guidance':n['parameters']['url']=knowledge_url+'/rag'
+   if n['name']=='Prepare document RAG':
+    n['parameters']['jsCode']=n['parameters']['jsCode'].replace('http://knowledge:6333',mock).replace('http://voice-ai:8088',mock)
+   if n['id']=='document-rag-vision':n['parameters']['url']=mock+'/vision'
+   if n['id'] in ['document-rag-load-evidence','document-rag-load-prompts']:
+    n['parameters']['url']=n['parameters']['url'].replace('http://knowledge:8085',knowledge_url)
    if n['name']=='Delete scenario files and Q/A':n['parameters']['url']="={{ '"+knowledge_url+"/scenarios/' + $json.id }}"
    if n['name']=='Register caller turn':n['parameters']['url']=knowledge_url+'/call-turn'
    if n['name']=='Prepare work-order row':n['parameters']['url']=knowledge_url+'/work-order-draft'
@@ -132,6 +219,10 @@ if __name__=='__main__':
    subprocess.run(['docker','exec','-i',CONTAINER,'node','-e','require("node:fs").writeFileSync("/tmp/workflow-id-fixture.json",require("node:fs").readFileSync(0))'],input=json.dumps(data),text=True,check=True)
    imported=subprocess.run(['docker','exec',CONTAINER,'n8n','import:workflow','--input=/tmp/workflow-id-fixture.json'],text=True,capture_output=True)
    assert imported.returncode==0,imported.stderr+imported.stdout
+  dependencies=[item for item in workflows if item['id']!=workflow['id']]
+  import_fixture(dependencies)
+  for item in dependencies:
+   api('/api/v1/workflows/'+item['id']+'/publish',{})
   # Reproduce an installed workflow with the old ID and active webhook paths.
   old=json.loads(json.dumps(workflow));old['id']='ivrMaintenanceMcp'
   for node in old['nodes']:
@@ -181,7 +272,7 @@ if __name__=='__main__':
    return result
   # Reproduce an existing table from revision 5, preserving its schema/rows.
   inverse={'派工單號':'reference_number','派工日期':'dispatch_date','工單名稱':'title','設備編號':'equipment_number','維修內容':'maintenance_items','FAN數量':'quantity','備註':'notes','起機測試':'test_result'}
-  columns=next(n for n in workflow['nodes'] if n['name']=='Ensure work_orders')['parameters']['columns']['column']
+  columns=next(n for item in workflows for n in item['nodes'] if n['name']=='Ensure work_orders')['parameters']['columns']['column']
   oldTable=api('/api/v1/data-tables',{'name':'work_orders','columns':[{**c,'name':inverse.get(c['name'],c['name'])} for c in columns if c['name']!='results']})
   historical={'order_id':'GV-HISTORIC','report_key':'historic-key','session_id':'historic-spaced','dispatch_date':'2026-11-12','transcripts':json.dumps(['回要回報工單。','2026年11月12號 A >一二三四五。'],ensure_ascii=False)}
   api('/api/v1/data-tables/'+oldTable['id']+'/rows',{'data':[historical]})
@@ -195,6 +286,7 @@ if __name__=='__main__':
   assert 'reference_number' in [c['name'] for c in renamed]
   if os.environ.get('N8N_SCENARIO_REPORT_ONLY')=='1':
    check_scenario_report(oldTable)
+   check_uploaded_script()
    raise SystemExit(0)
   utterances=['我增加工单。','二零二六年十一月十二号，名称是台积电，工单名称，呃设备编号是一二三四，维修项目五六七八，数量八个。','测试正常。']
   before_intake=(len(calls),len(embedding));intake_started=time.monotonic()
@@ -204,7 +296,7 @@ if __name__=='__main__':
   assert initial['reply'].count('？')==1 and '日期' in initial['reply'] and '編號' in initial['reply']
   tables=api('/api/v1/data-tables')['data']
   table=next(t for t in tables if t['name']=='work_orders')
-  def rows():return [r for r in api('/api/v1/data-tables/'+table['id']+'/rows')['data'] if r['session_id']!='historic-spaced']
+  def rows():return [r for r in api('/api/v1/data-tables/'+table['id']+'/rows')['data'] if r['session_id'] not in {'historic-spaced','fixture-dispatch'}]
   assert rows()==[],'the opener asks once and must not insert an empty row yet'
   details=turn('report-call',utterances[1],'add_work_order')
   records=rows();assert len(records)==1
@@ -217,6 +309,10 @@ if __name__=='__main__':
   assert knowledge_api('/work-orders')['work_orders']==[],'new saves must not create a JSON store'
   saved=turn('report-call',utterances[2],'add_work_order')
   assert len(rows())==1 and rows()[0]['order_id']==record['order_id']
+  api('/api/v1/data-tables/'+table['id']+'/rows',{'data':[{
+   'order_id':'GV-FIXTURE-OLDEST','report_key':'fixture-dispatch','session_id':'fixture-dispatch',
+   'reference_number':'YCS-16860','dispatch_date':'2026-10-30',
+  }]})
   before=len(calls)
   oldest=turn('report-call','可以列出最旧的工单吗？')
   assert 'YCS-16860' in oldest['reply']
@@ -245,8 +341,6 @@ if __name__=='__main__':
   assert '已新增' in incomplete['reply'] and '？' not in incomplete['reply']
   repeat=turn('incomplete-report','不知道。','add_work_order')
   assert len(rows())==2,'retry must upsert the same Data Table row'
-  inserts=[batch for batch in embedding if any('Q:' in str(item) for item in batch['input'])]
-  assert inserts and all('Q:' in str(item) and 'A:' in str(item) for batch in inserts for item in batch['input']),'Q/A pairs must stay together'
   turn('example-call','我要新增工單。',None)
   example='十一月十二号A一二三五年一维，Fan两个。'
   exampleReply=turn('example-call',example,'add_work_order')
@@ -265,7 +359,6 @@ if __name__=='__main__':
    assert '已新增' not in answer['reply'] and len(rows())==count
    if 'F15P1' in question:assert 'F15P1/2_ME' in answer['reply'] and '14' in answer['reply']
    if question=='FAN幾個':assert '14' in answer['reply'] and '強排 4 個' in answer['reply'] and '間面 10 個' in answer['reply']
-  import base64
   assert api('/webhook/ivr-scenarios')['scenarios']==[]
   content='\ufeffQuestion,Answer\r\nLAB-ZETA 包材何時回收？,"LAB-ZETA 每週三回收，聯絡分機 7654。"\r\n'
   scenarioUpload={'name':'LAB-ZETA 上傳測試','files':[{'name':'服務.csv','data':base64.b64encode(content.encode()).decode()}]}
@@ -275,6 +368,8 @@ if __name__=='__main__':
   assert api('/webhook/ivr-scenarios')['scenarios'][0]['id']==added['scenario']['id']
   knowledgeAnswer=turn('uploaded-scenario-call','LAB-ZETA 包材何時回收？')
   assert '7654' in knowledgeAnswer['reply'] and '每週三' in knowledgeAnswer['reply']
+  assert any('Q:' in item and 'A:' in item and '每週三回收' in item
+             for batch in embedding for item in batch.get('content',[]) if isinstance(item,str))
   removed=api('/webhook/ivr-delete-scenario',{'id':added['scenario']['id']})
   assert removed['removed'] is True and api('/webhook/ivr-scenarios')['scenarios']==[]
   assert api('/webhook/ivr-delete-scenario',{'id':added['scenario']['id']})['alreadyRemoved'] is True
@@ -284,6 +379,7 @@ if __name__=='__main__':
   assert '7654' not in removedAnswer['reply'] and '沒有查到' in removedAnswer['reply']
   print('PASS native n8n removal webhook: persisted list, source documents and fresh RAG retrieval exclude deleted scenario; retries are safe')
   check_scenario_report(table)
+  check_uploaded_script()
   print('PASS workflow ID migration and isolated n8n with real knowledge service: split spoken-number report, one follow-up question then native Data Table upsert even with missing fields, table-backed retrieval and enrichment despite model refusing tools, persisted record/retry, simplified Chinese lookups, month filtering/date follow-ups, direct one-line answers and isolated call memory (synthetic LLM/embeddings/PDF OCR).')
 
  except Exception:

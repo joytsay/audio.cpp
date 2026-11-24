@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { installMcpFixture } from "./mcp-browser-fixture.mjs";
 import { createRequire } from "node:module";
 import path from "node:path";
 const require = createRequire(
@@ -26,6 +25,7 @@ const { chromium } = require("playwright");
     ],
   });
   const context = await browser.newContext({
+    ignoreHTTPSErrors: process.env.UI_ALLOW_SELF_SIGNED === "1",
     permissions: ["microphone"],
     viewport: { width: 1584, height: 920 },
   });
@@ -34,7 +34,7 @@ const { chromium } = require("playwright");
     requests = [];
   let sharedSettings = null,
     voxAvailable = false;
-  let transcriptionText = "語音測試",
+  let transcriptionText = "语音测试",
     replyText = "您好，請問需要什麼協助？";
   let longStreamAudio = false;
   let vadCalls = 0,
@@ -96,7 +96,9 @@ const { chromium } = require("playwright");
       assert.equal(body.model, "s1-mini-chinese-1106-bf16");
       assert.equal(body.chat_template_kwargs.enable_thinking, false);
       const utterance = body.messages.at(-1).content.split("\n").slice(1).join("\n");
-      return route.fulfill({json:{choices:[{finish_reason:"stop",message:{content:utterance}}]}});
+      const content = utterance === "語音測試" ? "语音测试已修正。"
+        : utterance === "中文，就是，嗯，我要選中文。" ? "我要選中文。" : utterance;
+      return route.fulfill({json:{choices:[{finish_reason:"stop",message:{content}}]}});
     }
     if (
       checkingAudioHighlights &&
@@ -391,6 +393,12 @@ const { chromium } = require("playwright");
       },
     });
   });
+  if (process.env.UI_S1_ONLY === "1") {
+    await page.route("**/n8n/webhook/ivr-scenarios", route => route.fulfill({json:{scenarios:[{
+      id:"scenario-opening", name:"Opening test", simulation:true, qaCount:1,
+      files:[{name:"opening.html",size:1,sha256:"fixture"}],
+    }]}}));
+  }
   await page.goto(
     (process.env.UI_BASE_URL || "http://127.0.0.1:4173/").replace(/\/$/, "") +
       "/#/demo",
@@ -402,8 +410,28 @@ const { chromium } = require("playwright");
   assert.equal(await page.getByLabel("Post-processing model").inputValue(),"s1-mini-chinese-1106-bf16");
 
   await page.getByLabel("LLM", { exact: true }).selectOption(llmId);
-  if (process.env.UI_MCP_ONLY === "1") {
-    const fixture = await installMcpFixture(page);
+  if (process.env.UI_S1_ONLY === "1") {
+    await page.getByRole("switch", {name:"Enable ASR",exact:true}).uncheck();
+    await page.getByRole("switch", {name:"Enable TTS",exact:true}).uncheck();
+    assert.equal(await page.getByRole("switch", {name:"Enable transcript post-processing"}).isEnabled(),true);
+    await page.getByLabel("Scenario",{exact:true}).selectOption("scenario:scenario-opening");
+    await page.getByRole("button",{name:"Start call",exact:true}).click();
+    await page.getByText("請先選語言：中文 1、英文 2。",{exact:true}).waitFor();
+    await page.getByLabel("Message",{exact:true}).fill("中文，就是，嗯，我要選中文。");
+    await page.getByRole("button",{name:"Send message",exact:true}).click();
+    await page.getByText("請進行身分驗證：請問此電話持有人名字是？",{exact:true}).waitFor();
+    const corrections=requests.filter(r=>r.path==="/asr-postprocess/v1/chat/completions");
+    assert.equal(corrections.length,1);
+    assert.match(corrections[0].body.messages.at(-1).content,/中文，就是，嗯，我要選中文。/);
+    assert.equal(await page.locator(".transcript article.user").last().innerText().then(text=>text.includes("我要選中文。")),true);
+    assert.ok(await page.getByText("ASR_POSTPROCESS_COMPLETED",{exact:true}).count());
+    assert.ok(!requests.some(r=>r.path==="/llm/v1/chat/completions"||r.path==="/n8n/webhook/ivr-agent"));
+    assert.deepEqual(errors,[]);
+    await browser.close();
+    console.log("PASS browser text reaches S1 and advances the fixed language selection");
+    return;
+  }
+  if (process.env.UI_N8N_ONLY === "1") {
     await page.getByRole('switch', {name:'Enable ASR',exact:true}).uncheck();
     await page.getByLabel('Scenario',{exact:true}).selectOption('audio');
     await page.getByLabel('Dialogue source',{exact:true}).selectOption('n8n');
@@ -412,19 +440,27 @@ const { chromium } = require("playwright");
     const compiled=buildSync({entryPoints:[new URL('../src/lib/maintenance-scenario.ts',import.meta.url).pathname],bundle:true,format:'esm',write:false});
     const {maintenanceScenarioSteps}=await import('data:text/javascript;base64,'+Buffer.from(compiled.outputFiles[0].text).toString('base64'));
     const turns=maintenanceScenarioSteps.map(step=>({text:step.message,expected:step.expected}));
+    const calls=[];
+    await page.route('**/n8n/webhook/ivr-agent',async route=>{
+      const input=route.request().postDataJSON();
+      calls.push(input);
+      const turn=turns.find(item=>item.text===input.text);
+      assert.ok(turn,'the current transcript must reach the direct webhook');
+      await route.fulfill({json:{reply:turn.expected,tools:['retrieve_knowledge']}});
+    });
     for (const [turnIndex, turn] of turns.entries()) {
       await page.getByLabel('Message',{exact:true}).fill(turn.text);
       await page.getByRole('button',{name:'Send message',exact:true}).click();
       await page.waitForFunction(expected=>document.querySelector('.transcript article:not(.user):last-child p')?.textContent===expected, turn.expected.replace('有兩個','有2個'));
       await page.waitForFunction(expected=>[...document.querySelectorAll('.event-scroll td')].filter(cell=>cell.textContent==='TURN_COMPLETED').length>=expected, turnIndex+1);
     }
-    assert.equal(fixture.calls.length,6);
-    assert.equal(fixture.completions.length,9);
+    assert.equal(calls.length,turns.length);
+    assert.equal(new Set(calls.map(call=>call.sessionId)).size,1);
     assert.ok(requests.some(r=>r.path==='/v1/audio/speech'&&r.body.input.includes('已輸入完成')));
-    assert.ok(await page.getByText('MCP_TOOL_COMPLETED',{exact:true}).count());
+    assert.ok(await page.getByText('N8N_STEP_COMPLETED',{exact:true}).count());
     assert.deepEqual(errors,[]);
     await browser.close();
-    console.log('PASS browser voice assistant: local LLM → MCP discovery/tools → three maintenance replies → TTS and tool events');
+    console.log('PASS browser voice assistant: direct n8n dialogue → three maintenance replies → TTS and step events');
     return;
   }
 
@@ -555,7 +591,7 @@ const { chromium } = require("playwright");
   );
   await page
     .locator("article")
-    .filter({ hasText: "語音測試" })
+    .filter({ hasText: "語音測試已修正。" })
     .waitFor()
     .catch(async (cause) => {
       console.error(
@@ -672,6 +708,8 @@ const { chromium } = require("playwright");
   const timedEvents = await page.evaluate(() =>
     JSON.parse(localStorage.getItem("geovision.demo.events.v1")),
   );
+  assert.ok(timedEvents.some(event => event.type === "ASR_COMPLETED" && event.summary === "语音测试"));
+  assert.ok(timedEvents.some(event => event.type === "ASR_POSTPROCESS_COMPLETED" && event.summary === "語音測試已修正。"));
   for (const type of [
     "VAD_COMPLETED",
     "ASR_COMPLETED",

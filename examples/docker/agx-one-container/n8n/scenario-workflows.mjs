@@ -3,15 +3,11 @@ import {setTimeout as delay} from 'node:timers/promises';
 import {pathToFileURL} from 'node:url';
 import {isDeepStrictEqual} from 'node:util';
 import {withN8nApi} from './unpublish-workflow.mjs';
-import {ensureWorkflowPublished} from './publish-workflow.mjs';
-import {knowledgeToolsId,scenarioToolPosition} from './workflow-layout.mjs';
 import {lookupScenario} from './scenario-lookup.mjs';
 import {dispatchDate} from '../knowledge/conversation.mjs';
 
-const workflowRoute='/workflows/'+knowledgeToolsId;
 const importRoute=id=>`/scenario-imports/${id}`;
 const tableRoute=id=>`/data-tables/${encodeURIComponent(id)}`;
-const toolId=id=>`scenario-file-${id}`;
 const legacyMetadataColumns=['source_key','source_row','source_section','source_extraction'];
 const headerAliases=new Map(Object.entries({
   派工單號:'dispatch_number',派工日期:'dispatch_date',負責人:'assigned_to',客戶名稱:'customer_name',
@@ -40,8 +36,7 @@ export function tableColumns(headers){
   });
 }
 
-const scopes=[
-  'workflow:list','workflow:read','workflow:create','workflow:update','workflow:activate','workflow:deactivate','workflow:delete',
+const tableScopes=[
   'dataTable:list','dataTable:create','dataTable:delete','dataTableColumn:delete','dataTableRow:read','dataTableRow:create',
 ];
 const missing=async promise=>{
@@ -135,77 +130,6 @@ async function repairTableDates(api,table){
   }
 }
 
-const names=['query','sheet'];
-const inputSchema=names.map(name=>({
-  id:name,displayName:name,type:'string',required:false,defaultMatch:false,display:true,canBeUsedToMatch:true,
-}));
-const edge=(node,type='main')=>({node,type,index:0});
-
-export function compileScenarioWorkflow(record,tables){
-  const start='Scenario request';
-  const nodes=[{
-    id:toolId(record.id),name:start,type:'n8n-nodes-base.executeWorkflowTrigger',typeVersion:1.1,position:[0,0],
-    parameters:{inputSource:'workflowInputs',workflowInputs:{values:names.map(name=>({name,type:'string'}))}},
-  }];
-  for(const [index,table] of tables.entries()){
-    nodes.push({
-      id:`read-table-${index+1}`,name:`Read ${table.name}`,type:'n8n-nodes-base.dataTable',typeVersion:1.1,
-      position:[220*(index+1),0],alwaysOutputData:true,executeOnce:true,
-      parameters:{
-        resource:'row',operation:'get',dataTableId:{__rl:true,mode:'id',value:table.id},
-        matchType:'allConditions',filters:{conditions:[]},returnAll:true,
-      },
-    });
-  }
-  const readers=nodes.slice(1).map(node=>node.name);
-  const script=`const input=$(${JSON.stringify(start)}).first().json;
-const tables=${JSON.stringify(tables)};
-const rows=[${readers.map(name=>`$(${JSON.stringify(name)}).all().map(item=>item.json)`).join(',')}];
-tables.forEach((table,index)=>{table.rows=rows[index]});
-return [{json:(${lookupScenario.toString()})(input,tables,${JSON.stringify(record.dataset.template)},${JSON.stringify(record.files[0].name)})}];`;
-  nodes.push({
-    id:'scenario-result',name:'Return scenario guidance and matches',type:'n8n-nodes-base.code',typeVersion:2,
-    position:[220*nodes.length,0],parameters:{jsCode:script},
-  });
-  const connections=Object.fromEntries(nodes.slice(0,-1).map((node,index)=>[node.name,{main:[[edge(nodes[index+1].name)]]}]));
-  return {name:record.name,nodes,connections,settings:{executionOrder:'v1'}};
-}
-
-function toolNode(record,tables,workflowId,name,position){
-  const headings=tables.map(table=>`${table.name} (${table.columns.map(column=>column.header).join('、')})`).join('；');
-  const topics=record.dataset.template.map(section=>section.title).join('、');
-  return {
-    id:toolId(record.id),name,type:'@n8n/n8n-nodes-langchain.toolWorkflow',typeVersion:2.1,position,
-    notes:record.name,notesInFlow:name!==record.name,
-    parameters:{
-      name,source:'database',workflowId:{__rl:true,mode:'id',value:workflowId},
-      description:`${record.name} · 查詢已上傳檔案的最新資料。資料表：${headings.slice(0,600)}。${topics?`語音對話情境：${topics.slice(0,400)}。`:''} 請提供關鍵字、姓名、編號或情境名稱。`,
-      workflowInputs:{
-        mappingMode:'defineBelow',schema:inputSchema,matchingColumns:[],attemptToConvertTypes:false,convertFieldsToString:false,
-        value:{
-          query:"={{ $fromAI('query','Keywords or intent from the current caller turn','string','') }}",
-          sheet:"={{ $fromAI('sheet','Exact worksheet name if specified, otherwise empty','string','') }}",
-        },
-      },
-    },
-  };
-}
-function workflowBody({name,nodes,connections,settings}){return {name,nodes,connections,settings};}
-
-export function refreshScenarioLookup(workflow) {
-  const node=workflow.nodes.find(item=>item.id==='scenario-result'&&item.type==='n8n-nodes-base.code');
-  const script=node?.parameters.jsCode;
-  if(typeof script!=='string')return false;
-  const marker='\nreturn [{json:(';
-  const start=script.indexOf(marker);
-  const end=script.indexOf(')(input,tables,',start+marker.length);
-  if(start<0||end<=start||!script.startsWith(marker+'function lookupScenario(',start))return false;
-  const next=script.slice(0,start+marker.length)+lookupScenario.toString()+script.slice(end);
-  if(next===script)return false;
-  node.parameters.jsCode=next;
-  return true;
-}
-
 async function deleteScenarioWorkflow(api,workflowId){
   const route=`/workflows/${encodeURIComponent(workflowId)}`;
   const workflow=await missing(api(route));
@@ -222,27 +146,6 @@ async function deleteScenarioWorkflow(api,workflowId){
     }
     await delay(1000);
   }
-}
-
-async function registerTool(api,record,tables,state){
-  const parent=await api(workflowRoute);
-  const trigger=parent.nodes.find(node=>node.id==='maintenance-mcp-trigger');
-  if(!trigger)throw new Error('Scenario MCP Server is missing from Knowledge Tools');
-  const id=toolId(record.id);
-  const existing=parent.nodes.find(node=>node.id===id);
-  const count=parent.nodes.filter(node=>node.id.startsWith('scenario-file-')).length;
-  const isWireName=/^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(record.name);
-  const name=existing?.name||state.toolName||(isWireName&&!parent.nodes.some(node=>node.name===record.name)?record.name:`scenario_${record.id}`);
-  const node=toolNode(record,tables,state.workflowId,name,existing?.position??scenarioToolPosition(count));
-  const connection={ai_tool:[[edge(trigger.name,'ai_tool')]]};
-  if(!isDeepStrictEqual(existing,node)||!isDeepStrictEqual(parent.connections[name],connection)){
-    parent.nodes=parent.nodes.filter(node=>node.id!==id);
-    parent.nodes.push(node);
-    parent.connections[name]=connection;
-    await api(workflowRoute,workflowBody(parent),'PUT');
-  }
-  await ensureWorkflowPublished(api,knowledgeToolsId);
-  return name;
 }
 
 export function createScenarioManager({withApi=withN8nApi,knowledgeUrl='http://knowledge:8085'}={}){
@@ -263,7 +166,7 @@ export function createScenarioManager({withApi=withN8nApi,knowledgeUrl='http://k
   };
   const registeredTables=async()=>{
     const {scenarios}=await knowledge('/scenarios');
-    const imports=scenarios.filter(scenario=>scenario.tool&&scenario.tables?.length);
+    const imports=scenarios.filter(scenario=>scenario.tables?.length);
     const tables=[];
     for(const {id,name} of imports){
       const record=await missing(knowledge(importRoute(id)));
@@ -272,7 +175,7 @@ export function createScenarioManager({withApi=withN8nApi,knowledgeUrl='http://k
         const id=record.resources.tables[index]?.id;
         if(!id)return;
         tables.push({
-          id,workflowId:record.resources.workflowId,scenario:name,name:table.name,sheet:table.sheet,columns:tableColumns(table.headers),
+          id,scenario:name,name:table.name,sheet:table.sheet,columns:tableColumns(table.headers),
           ocr:table.records.some(row=>row.extraction==='ocr'),
         });
       });
@@ -280,23 +183,6 @@ export function createScenarioManager({withApi=withN8nApi,knowledgeUrl='http://k
     return tables;
   };
   return {
-    async refreshDirectoryWorkflows(){
-      const tables=await registeredTables();
-      const ids=new Set(tables.filter(({columns})=>
-        columns.some(({header})=>/姓名|中文名|聯絡人|^(?:chinese[ _]|employee[ _]|full[ _])?name$/i.test(header))&&
-        columns.some(({header})=>/分[機机]|部門|\bext(?:ension)?\b|department/i.test(header))
-      ).map(table=>table.workflowId).filter(Boolean));
-      if(!ids.size)return;
-      return withApi(['workflow:read','workflow:update','workflow:activate'],async api=>{
-        for(const id of ids){
-          const route=`/workflows/${encodeURIComponent(id)}`;
-          const workflow=await missing(api(route));
-          if(!workflow||!refreshScenarioLookup(workflow))continue;
-          await api(route,workflowBody(workflow),'PUT');
-          if(workflow.active)await ensureWorkflowPublished(api,id);
-        }
-      },{expiresIn:600});
-    },
     async repairDispatchDates(){
       const tables=(await registeredTables()).filter(table=>table.columns.some(isDispatchDate));
       if(!tables.length)return;
@@ -338,39 +224,18 @@ export function createScenarioManager({withApi=withN8nApi,knowledgeUrl='http://k
         const added=await knowledge('/scenarios','POST',{files:[document],attachments,fileMode:true});
         const record=await knowledge(importRoute(added.scenario.id));
         const state=record.resources||{tables:[]};
+        state.tables??=[];
         const save=()=>knowledge(importRoute(record.id),'PUT',state);
-        const scenario=await withApi(scopes,async api=>{
-          const tables=[];
-          for(const [index,table] of record.dataset.tables.entries()){
-            const entry=state.tables[index]??={};
-            tables.push(await ensureTable(api,table,entry,save));
-          }
-          const compiled=compileScenarioWorkflow(record,tables);
-          const workflowId=state.workflowId||record.workflow?.workflowId;
-          let workflow=workflowId&&await missing(api(`/workflows/${encodeURIComponent(workflowId)}`));
-          if(!workflow){
-            const previous=await list(api,'/workflows');
-            workflow=previous.find(item=>item.nodes?.some(node=>node.id===toolId(record.id)));
-          }
-          if(!workflow)workflow=await api('/workflows',compiled);
-          else if(workflow.id===record.workflow?.workflowId&&!workflow.nodes.some(node=>node.id===toolId(record.id))){
-            await api(`/workflows/${workflow.id}`,{...compiled,settings:{...compiled.settings,...workflow.settings}},'PUT');
-          }
-          else if(tables.some((table,index)=>workflow.nodes.some(node=>node.id===`read-table-${index+1}`&&node.parameters.dataTableId?.value!==table.id))){
-            // Reconnect a recreated table without replacing edits to the rest of the workflow.
-            for(const [index,table] of tables.entries()){
-              const node=workflow.nodes.find(node=>node.id===`read-table-${index+1}`);
-              if(node?.parameters.dataTableId)node.parameters.dataTableId.value=table.id;
+        if (record.dataset.tables.length) {
+          await withApi(tableScopes,async api=>{
+            for(const [index,table] of record.dataset.tables.entries()){
+              const entry=state.tables[index]??={};
+              await ensureTable(api,table,entry,save);
             }
-            await api(`/workflows/${workflow.id}`,workflowBody(workflow),'PUT');
-          }
-          state.workflowId=workflow.id;
-          await save();
-          await ensureWorkflowPublished(api,workflow.id);
-          state.toolName=await registerTool(api,record,tables,state);
-          state.ready=true;
-          return save();
-        },{expiresIn:600});
+          },{expiresIn:600});
+        }
+        state.ready=true;
+        const scenario=await save();
         if (process.env.IVR_RAG_INDEX_UPLOADS === 'true' && !/\.(?:csv|xlsx)$/i.test(document.name)) {
           // Allow the first query to retry indexing if the inference workers are still warming up.
           void knowledge('/rag/index','POST',{id:scenario.id}).catch(error=>{
@@ -386,15 +251,9 @@ export function createScenarioManager({withApi=withN8nApi,knowledgeUrl='http://k
         const record=await missing(knowledge(importRoute(id)));
         if(record?.dataset&&record.resources){
           const state=record.resources;
-          await withApi(scopes,async api=>{
-            const parent=await api(workflowRoute);
-            const node=parent.nodes.find(node=>node.id===toolId(id));
-            if(node){
-              parent.nodes=parent.nodes.filter(item=>item.id!==node.id);
-              delete parent.connections[node.name];
-              await api(workflowRoute,workflowBody(parent),'PUT');
-            }
-            await ensureWorkflowPublished(api,knowledgeToolsId);
+          const scopes = ['dataTable:delete'];
+          if (state.workflowId) scopes.push('workflow:read','workflow:deactivate','workflow:delete');
+          if (state.workflowId || state.tables.some(row=>row.id)) await withApi(scopes,async api=>{
             if(state.workflowId)await deleteScenarioWorkflow(api,state.workflowId);
             for(const row of state.tables){
               if(row.id)await missing(api(tableRoute(row.id),undefined,'DELETE'));

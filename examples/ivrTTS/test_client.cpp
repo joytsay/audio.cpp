@@ -256,10 +256,20 @@ private:
                 respond(streaming_tts ? R"({"model":"streaming-test","streaming":true})" : R"({"model":"test-tts","streaming":false})");
                 return;
             }
-            if (route == "/normalize") { respond(body); return; }
+            if (route == "/normalize") {
+                auto input = parse(body);
+                json_object* postprocess = nullptr;
+                if (json_object_object_get_ex(input.get(), "postprocess", &postprocess) && json_object_get_boolean(postprocess)) {
+                    respond(field(input.get(), "text") == "查" ? R"({"text":"查詢","postprocess":"completed"})"
+                                                               : R"({"text":"Where is the main office?","postprocess":"completed"})");
+                } else respond(body);
+                return;
+            }
             if (route == "/dialogue") {
                 auto input = parse(body);
-                check(field(input.get(), "text") == "Where is the office?", "SIP transcript missing from shared dialogue request");
+                const auto transcript = field(input.get(), "text");
+                check(transcript == "Where is the office?" || transcript == "Where is the main office?" || transcript == "查詢",
+                      "SIP transcript missing from shared dialogue request");
                 check(!field(input.get(), "sessionId").empty(), "SIP call session missing from dialogue request");
                 send_all(fd, "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: application/x-ndjson\r\n\r\n");
                 const std::string events = R"({"type":"configuration","source":"n8n","model":"saved-llm"})" "\n"
@@ -816,7 +826,14 @@ void test_sip(const std::string& executable) {
             played_before_completion=audio.stream_first&&sip.voiced_packets>60;
             audio.stream_hold=false;
         });
-        const auto exit_code=client.finish(16);stream_gate.join();
+        int exit_code;
+        try {
+            exit_code = client.finish(16);
+        } catch (const std::exception& error) {
+            stream_gate.join();
+            throw std::runtime_error(std::string(error.what()) + ": " + client.output);
+        }
+        stream_gate.join();
         check(exit_code == 0, "incoming Use IVR failed: " + client.output);
         check(played_before_completion,"SIP RTP did not play the first audio chunk before the TTS response completed");
         sip.verify();
@@ -826,12 +843,12 @@ void test_sip(const std::string& executable) {
         check(client.output.find("echoing audio") == std::string::npos,
               "Use IVR echoed caller audio instead of running the conversation pipeline");
         const auto requests = audio.pipeline_requests();
-        const std::vector<std::string> stages{"/v1/tasks/run", "/v1/audio/transcriptions/details", "/dialogue", "/v1/audio/speech"};
+        const std::vector<std::string> stages{"/v1/tasks/run", "/v1/audio/transcriptions/details", "/normalize", "/dialogue", "/v1/audio/speech"};
         size_t stage = 0;
         for (const auto& request : requests) {
             if (stage < stages.size() && request.first == stages[stage]) ++stage;
             if (request.first == "/dialogue")
-                check(request.second.find("Where is the office?") != std::string::npos, "SIP ASR transcript was not sent to shared dialogue");
+                check(request.second.find("Where is the main office?") != std::string::npos, "Corrected SIP transcript was not sent to shared dialogue");
         }
         check(stage == stages.size(), "Use IVR did not execute VAD -> ASR -> LLM -> TTS in order");
         check(std::any_of(requests.begin(), requests.end(), [&](const auto& request) {
@@ -847,7 +864,7 @@ void test_sip(const std::string& executable) {
             check(std::string(events).find(event) != std::string::npos, std::string("SIP demo event missing: ") + event);
         check(field(snapshot.get(), "dialogue_source") == "n8n", "SIP monitor did not report the actual dialogue source");
         const std::string messages = json_object_to_json_string(message_array);
-        check(messages.find("Where is the office?") != std::string::npos && messages.find("The office is on floor 3.") != std::string::npos,
+        check(messages.find("Where is the main office?") != std::string::npos && messages.find("The office is on floor 3.") != std::string::npos,
               "SIP conversation text missing from demo monitor");
         unsetenv("SIP_MONITOR_DIR"); unsetenv("SIP_CONTINUOUS"); unsetenv("SIP_GREETING");
         setenv("SIP_WAIT_FOR_MEDIA", "0", 1);
@@ -993,6 +1010,8 @@ void test_pipeline() {
         const auto opening = server.pipeline_requests();
         check(opening.size() == start + 2 && opening[start].first == "/tts-config" && opening[start + 1].first == "/v1/audio/speech",
               "SIP did not load the saved greeting before speech synthesis");
+        const auto welcome_session = field(parse(opening[start].second).get(), "sessionId");
+        check(!welcome_session.empty(), "SIP greeting request did not identify the scenario call");
         const auto welcome = parse(opening[start + 1].second);
         check(field(welcome.get(), "input") == "您好，這裡是 GeoVision IVR。" && field(welcome.get(), "model") == "demo-selected-tts",
               "SIP did not synthesize the saved greeting with the selected TTS model");
@@ -1021,15 +1040,40 @@ void test_pipeline() {
             check(requests[i].first != "/v1/chat/completions", "shared n8n dialogue was bypassed by direct LLM call");
             if (requests[i].first != "/dialogue") continue;
             auto body = parse(requests[i].second); json_object* history = nullptr;
+            check(field(body.get(), "text") == "Where is the main office?", "Dialogue did not get the corrected SIP transcript");
+            check(field(body.get(), "sessionId") == welcome_session, "SIP greeting and dialogue used different scenario sessions");
             check(json_object_object_get_ex(body.get(), "messages", &history), "dialogue history missing");
             check(json_object_array_length(history) == turns * 2, "dialogue lost the SIP call history");
             check(requests[i].second.find("正在查詢") == std::string::npos, "lookup notice leaked into dialogue history"); ++turns;
         }
         check(turns == 2, "SIP turns did not use shared dialogue");
         pipeline.resume();
-        check(pipeline.submit_text("Where is the office?"), "typed SIP turn rejected while listening");
+        check(pipeline.submit_text("查"), "typed SIP turn rejected while listening");
         check(!pipeline.submit_text("Duplicate"), "typed SIP turn bypassed busy guard");
         reply(pipeline);
+        const auto typed_requests = server.pipeline_requests();
+        const auto typed_dialogue = std::find_if(typed_requests.rbegin(), typed_requests.rend(), [](const auto& request) {
+            return request.first == "/dialogue";
+        });
+        check(typed_dialogue != typed_requests.rend() && field(parse(typed_dialogue->second).get(), "text") == "查詢",
+              "Dialogue did not get the corrected typed SIP turn");
+        SipMonitor::get().publish();
+        auto transcript_snapshot = parse(read_file(monitor.path / "live.json"));
+        json_object* event_array = nullptr;
+        check(json_object_object_get_ex(transcript_snapshot.get(), "events", &event_array), "SIP monitor has no events");
+        bool saw_raw = false, saw_corrected = false, saw_typed = false, saw_corrected_typed = false;
+        for (size_t i = 0; i < json_object_array_length(event_array); ++i) {
+            auto* event = json_object_array_get_idx(event_array, i);
+            const auto type = field(event, "type");
+            const auto summary = field(event, "summary");
+            saw_raw |= type == "ASR_COMPLETED" && summary == "Where is the office?";
+            saw_corrected |= type == "ASR_POSTPROCESS_COMPLETED" && summary == "Where is the main office?";
+            saw_typed |= type == "TEXT_INPUT" && summary == "查";
+            saw_corrected_typed |= type == "ASR_POSTPROCESS_COMPLETED" && summary == "查詢";
+            check(type != "ASR_COMPLETED" || summary != "查", "Typed SIP input was logged as speech recognition");
+        }
+        check(saw_raw && saw_corrected, "SIP ASR events must show raw and corrected transcripts separately");
+        check(saw_typed && saw_corrected_typed, "SIP typed turns must show the typed input and the correction separately");
         server.dialogue_progress = true;
         pipeline.resume(); send_turn(pipeline);
         auto progress_deadline = Clock::now() + 8s;

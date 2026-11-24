@@ -121,7 +121,8 @@ try{
  const html=encoded('情境範例.HTML',`
   <head><title>Metadata</title><style>p { color: red }</style></head>
   <body><p>AI：請先選語言</p><p>維修人員：中文</p>
-  <p>情境 <b>1</b>：Call Out 系統主動通知派工</p><p>AI：請確認派工。</p>
+  <p>情境 <b>1</b>：Call Out 系統主動通知派工</p>
+  <p>AI：2026年8月5日下午14:00，陳大雄，台積電<b>F12P8</b>變頻器例行性維修保養，請記得前往。</p>
   <p>情境 <b>2</b>：工單回報</p><p>維修人員：例行保養。</p><p>AI：以上是否正確？</p>
   <p>情境 <b>3</b>：現場查修</p><p>維修人員：查修過載。</p><p>AI：請提供馬達銘牌。</p>
   <p>情境 <b>4</b>：庫存查詢</p><p>維修人員：查庫存 A01</p><p>AI：庫存&nbsp;2 個。<!-- hidden note --></p><img src="inventory%20figure.png">
@@ -145,6 +146,8 @@ try{
  ].entries()){
   const {scenario}=await scenarioStore.simulation({id:htmlId,text});
   assert.equal(scenario.number,index+1,text);
+  assert.equal(scenario.dispatchReminder,index===0
+   ? '2026年8月5日下午14:00，陳大雄，台積電F12P8變頻器例行性維修保養，請記得前往。' : undefined);
   if(index===3){
    assert.equal(scenario.retrieval,true);
    assert.equal(scenario.reference,undefined);

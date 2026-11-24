@@ -17,7 +17,8 @@ struct SipTtsConfig {
 };
 enum class SipTtsPurpose { Reply, Welcome, Keypad };
 SipTtsConfig resolve_sip_tts(const std::string& dialogue_url, const std::string& model, const std::string& voice,
-                            const std::atomic<bool>& stopping, SipTtsPurpose purpose = SipTtsPurpose::Reply);
+                            const std::atomic<bool>& stopping, SipTtsPurpose purpose = SipTtsPurpose::Reply,
+                            const std::string& session_id = {});
 
 struct SipPipelineConfig {
     std::string audio_url, llm_url, llm_model, rag_url, dialogue_url;

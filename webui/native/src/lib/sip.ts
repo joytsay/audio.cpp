@@ -20,6 +20,34 @@ export type SipSettings = {
   greeting2: string;
   greeting3: string;
 };
+
+const sipUri = /^(sip:(?:[^@;?\s]+@)?)(\[[^\]]+\]|[^:;?\s]+)(.*)$/i;
+
+export function isSipServerIp(value: string): boolean {
+  return /^(?:0|[1-9]\d{0,2})(?:\.(?:0|[1-9]\d{0,2})){3}$/.test(value) &&
+    value.split('.').every(octet => Number(octet) <= 255);
+}
+
+export function sipServerIp(proxy: string): string {
+  const host = sipUri.exec(proxy)?.[2] ?? '';
+  return isSipServerIp(host) ? host : '';
+}
+
+export function withSipServerIp(settings: SipSettings, ip: string): SipSettings {
+  const proxy = sipUri.exec(settings.proxy);
+  const account = sipUri.exec(settings.account);
+  const previousHost = proxy?.[2];
+  let contactHost = settings.contact_host;
+  if (contactHost === previousHost) contactHost = ip;
+  else if (!contactHost || contactHost === `${previousHost}.nip.io`) contactHost = `${ip}.nip.io`;
+  return {
+    ...settings,
+    proxy: proxy ? proxy[1] + ip + proxy[3] : `sip:${ip}:9900`,
+    account: account?.[1].endsWith('@') ? account[1] + ip + account[3] : `sip:${settings.auth_user}@${ip}`,
+    contact_host: contactHost,
+  };
+}
+
 export type SipLive = {
   live: boolean;
   status: null | {

@@ -4,7 +4,7 @@ import {createHash,randomUUID} from 'node:crypto';
 import {inflateRawSync} from 'node:zlib';
 import {qaDocument} from './qa.mjs';
 import {dialogueTemplate,fileDataset,scenarioExamples,scenarioFileName} from './scenario-files.mjs';
-import {simulationSections} from './scenario-simulation.mjs';
+import {simulationOpening,simulationSections} from './scenario-simulation.mjs';
 import {imageType} from './rag-assets.mjs';
 
 const maxBytes=10*1024*1024;
@@ -105,11 +105,16 @@ export function createScenarioStore({root=path.join(process.env.KNOWLEDGE_DATA_R
   }
   return items.sort((a,b)=>a.createdAt.localeCompare(b.createdAt));
  }
- const metadata=({documents,dataset,resources,...record})=>({
-  ...record,qaCount:documents.length,examples:scenarioExamples(record.name,dataset,documents),
-  ...(simulationSections(record.files,dataset).length?{simulation:true}:{}),
-  ...(dataset?{tables:dataset.tables.map(({name,sheet,records})=>({name,sheet,rowCount:records.length})),tool:resources?.toolName}:{}),
- });
+ const metadata=({documents,dataset,resources,...record})=>{
+  const sections=simulationSections(record.files,dataset);
+  const opening=simulationOpening(dataset,sections);
+  return {
+   ...record,qaCount:documents.length,examples:scenarioExamples(record.name,dataset,documents),
+   ...(sections.length?{simulation:true}:{}),
+   ...(opening?{opening}:{}),
+   ...(dataset?{tables:dataset.tables.map(({name,sheet,records})=>({name,sheet,rowCount:records.length}))}:{}),
+  };
+ };
  async function get(id){
   if(typeof id!=='string'||!/^[a-f0-9]{24}$/.test(id))throw fail('Invalid uploaded scenario ID');
   try{return JSON.parse(await fs.readFile(path.join(root,id,'scenario.json'),'utf8'));}

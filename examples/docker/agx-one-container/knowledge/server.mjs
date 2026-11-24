@@ -1,6 +1,6 @@
 import {createScenarioStore} from './scenarios.mjs';
 import {htmlScenarioText,uniqueHeaders} from './scenario-files.mjs';
-import {chooseSimulationSection,simulationGuidance,simulationSections} from './scenario-simulation.mjs';
+import {chooseSimulationSection,explicitSimulationNumber,simulationGuidance,simulationSections} from './scenario-simulation.mjs';
 import {readScenarioImage} from './scenario-image.mjs';
 import {createServer} from 'node:http';
 import {promises as fs} from 'node:fs';
@@ -194,20 +194,40 @@ export function createKnowledgeStore({root=process.env.KNOWLEDGE_ROOT,pdf=extrac
     addScenario:input=>scenarios.add(input),
     embeddingInputs:args=>rag.embeddingInputs(args),
     evidence:args=>rag.evidence(args),
-    async simulation({id,text,number,language,previous=''}={}){
-      if(typeof text!=='string'||!text.trim()||text.length>20000)throw Object.assign(Error('Invalid simulation request'),{status:400});
+    async simulation({id,text,number,language='zh',previous='',history=[]}={}){
+      if(typeof text!=='string'||!text.trim()||text.length>8000||
+        !['zh','en'].includes(language)||typeof previous!=='string'||previous.length>1000||
+        !Array.isArray(history)||history.length>12||history.some(turn=>!['user','assistant'].includes(turn?.role)||
+          typeof turn.content!=='string'||turn.content.length>1000))
+        throw Object.assign(Error('Invalid simulation request'),{status:400});
       const record=await scenarios.get(id);
       const sections=simulationSections(record.files,record.dataset);
       if(!record.resources?.ready||!sections.length)throw Object.assign(Error('Scenario simulation not found'),{status:404});
       if(number!==undefined){
-        if(![4,5,7].includes(number)||!sections.some(section=>section.number===number)||!['zh','en'].includes(language)||
-          typeof previous!=='string'||previous.length>1000||text.length>8000)
+        const section=sections.find(section=>section.number===number);
+        if(!section||(!section.custom&&![4,5,7].includes(number)))
           throw Object.assign(Error('Invalid scenario lookup'),{status:400});
         const records=await scenarios.corpus(id);
         const docs=record.documents.filter(document=>belongsToSection(document.section,number));
-        return rag.run({query:text,previous,language,items:ragItems(docs,await visualAssets(records,number))});
+        const simulation=section.custom?{
+          mode:'dialogue',title:section.title.slice(0,200),
+          example:section.turns.map(({role,text})=>`${role}: ${text}`).join('\n').slice(0,2400),
+          history:history.slice(-8).map(({role,content})=>({role,content})),
+        }:undefined;
+        return rag.run({query:text,previous,language,simulation,items:ragItems(docs,await visualAssets(records,number))});
       }
-      const section=chooseSimulationSection(sections,text);
+      const exact=chooseSimulationSection(sections,text);
+      if(exact)return {scenario:simulationGuidance(exact)};
+      if(!sections[0].custom||explicitSimulationNumber(text.normalize('NFKC'))!==undefined)return {scenario:null};
+
+      const candidates=sections.map(({number,title})=>({number,title:title.slice(0,200)}));
+      const docs=record.documents.filter(document=>sections.some(section=>belongsToSection(document.section,section.number)));
+      if(!docs.length)return {scenario:null};
+      const result=await rag.run({
+        items:ragItems(docs,[]), query:text, language, simulation:{mode:'route',candidates},
+      });
+      const selected=String(result.answer??'').trim();
+      const section=/^\d{1,3}$/.test(selected)&&sections.find(section=>section.number===Number(selected));
       return {scenario:section?simulationGuidance(section):null};
     },
     readScenario:id=>scenarios.get(id),

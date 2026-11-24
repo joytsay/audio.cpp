@@ -42,19 +42,21 @@ export function createRagBridge({
     });
   }
   return {
-    async run({items,query='',previous='',language='zh',index=false}) {
+    async run({items,query='',previous='',language='zh',index=false,simulation}) {
       if(items.length>2200)throw fail('RAG corpus exceeds 2,200 items',413);
       const documents=new Map(items.map(item=>[uuid(hash(item)),item]));
       const scope=hash([...documents.keys()].sort());
       const snapshot=active.get(scope)??{documents,users:0};
       active.set(scope,snapshot);
       snapshot.users++;
+      const queryText=previous?`Previous question: ${previous}\nQuestion: ${query}`:query;
+      const searchText=simulation?.title?`${simulation.title}\n${queryText}`:queryText;
       try{
         const response=await fetchImpl(workflowUrl,{
           method:'POST',headers:{'Content-Type':'application/json'},
           body:JSON.stringify({
-            scope,collection,dimensions:embeddingDimensions,query,previous,language,index,
-            query_prompt:query?prompt(previous?`Previous question: ${previous}\nQuestion: ${query}`:query,'',true):'',
+            scope,collection,dimensions:embeddingDimensions,query,previous,language,index,simulation,
+            query_prompt:query?prompt(searchText,'',true):'',
             documents:[...documents].map(([id,{kind}])=>({id,kind})),
           }),
           signal:AbortSignal.timeout(240000),

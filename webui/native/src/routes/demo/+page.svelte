@@ -1,8 +1,8 @@
 <script lang="ts">
   import { onMount, onDestroy, tick } from "svelte";
   import { n8nDialogue, type DialogueSource } from "$lib/n8n-dialogue";
-  import {answerSimulationRag,importScenarioFiles,listKnowledgeScenarios,matchSimulation,removeKnowledgeScenario,type KnowledgeScenario} from "$lib/knowledge-scenarios";
-  import {advanceSimulationOpening,createSimulation,languagePrompt,simulationClarification,simulationPrompt} from "$lib/scenario-simulation";
+  import {answerSimulationRag,importScenarioFiles,listKnowledgeScenarios,matchSimulation,removeKnowledgeScenario,type KnowledgeScenario,type SimulationTurn} from "$lib/knowledge-scenarios";
+  import {advanceSimulationOpening,createSimulation,simulationOpeningComplete,simulationOpeningPrompt,simulationClarification,simulationPrompt} from "$lib/scenario-simulation";
   import SipSidebar from "$lib/SipSidebar.svelte";
   import type { SipSettings, SipLive } from "$lib/sip";
   import PanelDivider from "$lib/PanelDivider.svelte";
@@ -201,6 +201,7 @@
     if (typeof saved.vad_end_silence_ms === "number") endSilenceMs = savedEndSilenceMs = saved.vad_end_silence_ms;
     if (saved.dialogue_source === "n8n" || saved.dialogue_source === "prompt.csv")
       dialogueSource = saved.dialogue_source;
+    savedSipScenarioId = saved.sip_scenario_id;
     if (saved.llm_model !== undefined) {
       const selected =
         llmModels.find((model) => model.id === saved.llm_model) ||
@@ -309,6 +310,7 @@
         vad_end_silence_ms: endSilenceMs,
         llm_model: llm,
         dialogue_source: dialogueSource,
+        sip_scenario_id: savedSipScenarioId,
         lookup_notice_delay_seconds: lookupNoticeDelaySeconds,
         tts_streaming: streamingTts,
         tts_playback_rate: ttsPlaybackRate,
@@ -495,10 +497,21 @@
   }
   let scenarioMode: "audio" | "add-scenario" | `scenario:${string}` = "add-scenario";
   let knowledgeScenarios: KnowledgeScenario[] = [];
+  let savedSipScenarioId: string | undefined;
+  let restoreScenarioOnLoad = true;
   let newScenarioFiles: File[] = [], knowledgeUploading = false, knowledgeDeleting = false, knowledgeStatus = "";
   let knowledgeAborter: AbortController | null = null;
   let simulation: ReturnType<typeof createSimulation> | null = null;
   $: selectedKnowledgeScenario = knowledgeScenarios.find(scenario => scenarioMode === `scenario:${scenario.id}`);
+  $: if (restoreScenarioOnLoad && !settingsLoading && knowledgeScenarios.length)
+    restoreScenarioSelection();
+  function restoreScenarioSelection() {
+    const scenario = savedSipScenarioId === undefined
+      ? knowledgeScenarios.findLast(scenario => scenario.simulation)
+      : knowledgeScenarios.find(scenario => scenario.simulation && scenario.id === savedSipScenarioId);
+    if (scenario) scenarioMode = `scenario:${scenario.id}`;
+    restoreScenarioOnLoad = false;
+  }
   async function refreshKnowledgeScenarios() {
     try { knowledgeScenarios = await listKnowledgeScenarios(); }
     catch (cause) { if (scenarioMode === "add-scenario") knowledgeStatus = String(cause); }
@@ -520,27 +533,25 @@
   }
   function chooseKnowledgeFiles(files: FileList | null) {
     newScenarioFiles = Array.from(files || []);
+    if (newScenarioFiles.length) restoreScenarioOnLoad = false;
     knowledgeStatus = "";
   }
   async function uploadKnowledgeScenario() {
     if (knowledgeUploading) return;
     knowledgeUploading = true; knowledgeAborter = new AbortController();
-    knowledgeStatus = "Creating n8n tables and Scenario MCP tools…";
+    knowledgeStatus = "Importing scenario references…";
     const imported: KnowledgeScenario[] = [];
     try {
       await importScenarioFiles(newScenarioFiles,AbortSignal.any([knowledgeAborter.signal,AbortSignal.timeout(900000)]),scenario=>{
         imported.push(scenario);
         knowledgeScenarios=[...knowledgeScenarios.filter(saved=>saved.id!==scenario.id),scenario];
-        record("SCENARIO_ADDED", `${scenario.name} added to Scenario MCP`);
+        record("SCENARIO_ADDED", `${scenario.name} imported`);
       });
-      const scenario=imported.at(-1);
+      const scenario=imported.findLast(scenario=>scenario.simulation) ?? imported.at(-1);
       if(!scenario)return;
-      knowledgeStatus = `Imported ${imported.length} ${imported.length===1?"file":"files"} into Scenario MCP.`;
+      knowledgeStatus = `Imported ${imported.length} ${imported.length===1?"file":"files"}.`;
       scenarioMode = `scenario:${scenario.id}`;
-      if (!scenario.simulation) {
-        dialogueSource = "n8n";
-        await saveCallOption({dialogue_source:"n8n"});
-      }
+      await saveScenarioSelection(scenario);
       newScenarioFiles = [];
     } catch (cause) {
       if (!knowledgeAborter.signal.aborted) knowledgeStatus = cause instanceof Error ? cause.message : String(cause);
@@ -569,16 +580,24 @@
     scenarioToken = 0;
   let playbackRole: "assistant" | "technician" | "caller" = "assistant";
   $: isAudioScenario = scenarioMode === "audio";
-  function changeScenario() {
+  async function saveScenarioSelection(scenario?: KnowledgeScenario) {
+    const sipScenarioId = scenario?.simulation ? scenario.id : "";
+    const changes: Partial<DemoSettings> = { sip_scenario_id: sipScenarioId };
+    if (scenario && !scenario.simulation) {
+      dialogueSource = "n8n";
+      changes.dialogue_source = "n8n";
+    }
+    if (await saveCallOption(changes)) savedSipScenarioId = sipScenarioId;
+  }
+  function changeScenario(mode: typeof scenarioMode = scenarioMode) {
+    scenarioMode = mode;
+    restoreScenarioOnLoad = false;
     knowledgeStatus = "";
     setScenarioFile(null);
     if (scenarioUploadInput) scenarioUploadInput.value = "";
     scenarioStatus = "";
     if (scenarioMode === "add-scenario") void refreshKnowledgeScenarios();
-    if (knowledgeScenarios.some(scenario => scenarioMode === `scenario:${scenario.id}` && !scenario.simulation)) {
-      dialogueSource = "n8n";
-      void saveCallOption({dialogue_source:"n8n"});
-    }
+    void saveScenarioSelection(knowledgeScenarios.find(scenario => scenarioMode === `scenario:${scenario.id}`));
   }
   let events: Event[] = [],
     messages: DemoMessage[] = [];
@@ -1155,6 +1174,25 @@
     utterance: Float32Array[] = [],
     preRoll: Float32Array | null = null;
   const historyKey = "geovision.demo.events.v1";
+  let callLog: {id: string; started: number; pending: Promise<void>} | null = null;
+  function saveCallLog(role: "Caller" | "AI" | "Call", text: string) {
+    const session = callLog;
+    if (!session || !text.trim()) return;
+    // Start the fetches in transcript order, even when turns finish back-to-back.
+    session.pending = session.pending.then(async () => {
+      await endpointJson("", "ui/demo-call-log", {
+        method: "POST",
+        keepalive: true,
+        body: JSON.stringify({
+          session_id: session.id,
+          started_at_ms: session.started,
+          entries: [{role, text}],
+        }),
+      }, AbortSignal.timeout(5000));
+    }).catch(cause => {
+      if (callLog === session) record("CALL_LOG_ERROR", String(cause));
+    });
+  }
   // HTTPS uses Caddy's same-origin proxy; the native HTTP server has no /llm route.
   const llmBase = () => location.protocol === "https:"
     ? new URL("/llm/v1/", location.href).toString()
@@ -1395,8 +1433,10 @@
             }),
           },
           signal,
+          { preserveTranscript: true },
         );
-        text = normalizeTranscript(result.text || "", hotwords).trim();
+        const originalTranscript = result.text || "";
+        text = normalizeTranscript(originalTranscript, hotwords).trim();
         if (!text) {
           record(
             "ASR_EMPTY",
@@ -1412,25 +1452,26 @@
         }
         record(
           "ASR_COMPLETED",
-          text,
+          originalTranscript,
           performance.now() - operationStarted,
           reportedRtf(result),
         );
-        if (useAsrPostprocess && [...text].length >= 3) {
-          const correctionStarted = performance.now();
-          status = "Correcting transcript";
-          try {
-            text = await correctAsrTranscript(text, asrPostprocessModel, hotwords, llmBase(), signal);
-            if (signal.aborted || generation !== epoch) return;
-            record("ASR_POSTPROCESS_COMPLETED", text, performance.now() - correctionStarted);
-          } catch {
-            if (signal.aborted || generation !== epoch) return;
-            record("ASR_POSTPROCESS_FALLBACK", "Using original transcription", performance.now() - correctionStarted);
-          }
+      }
+      if (signal.aborted || generation !== epoch) return;
+      if (useSip) { await sendSipText(normalizeTranscript(text, hotwords), signal); return; }
+      const textLength = [...text].length;
+      if (useAsrPostprocess && textLength >= 3 && textLength <= 1200 && text.trim()) {
+        const correctionStarted = performance.now();
+        status = "Correcting transcript";
+        try {
+          text = await correctAsrTranscript(text, asrPostprocessModel, hotwords, llmBase(), signal);
+          if (signal.aborted || generation !== epoch) return;
+          record("ASR_POSTPROCESS_COMPLETED", text, performance.now() - correctionStarted);
+        } catch {
+          if (signal.aborted || generation !== epoch) return;
+          record("ASR_POSTPROCESS_FALLBACK", text, performance.now() - correctionStarted);
         }
       }
-      if (generation !== epoch) return;
-      if (useSip) { await sendSipText(normalizeTranscript(text, hotwords), signal); return; }
       if (audioMessageId)
         messages = messages.map((message) =>
           message.audioId === audioMessageId
@@ -1438,6 +1479,7 @@
             : message,
         );
       else messages = [...messages, { role: "user", content: text }];
+      saveCallLog("Caller", text);
       record("CONVERSATION_ITEM_ADDED", `USER · ${text}`);
       let reply = text;
       if (simulation) {
@@ -1445,16 +1487,19 @@
         const openingReply = advanceSimulationOpening(active, text);
         if (openingReply !== null) {
           reply = openingReply;
-          if (active.step === 4) active.startIndex = messages.length + 1;
+          if (simulationOpeningComplete(active)) active.startIndex = messages.length + 1;
         } else {
           status = "Thinking";
           record("AGENT_STATE_CHANGED", "listening → thinking");
           operationStarted = performance.now();
-          const scenario = active.scenario || await matchSimulation(active.id, text, signal);
+          const scenario = active.scenario || await matchSimulation(active.id, text, signal, active.language);
           if (generation !== epoch || signal.aborted) return;
           if (active.workOrderId) {
             reply = active.language === "en" ? `Work order ${active.workOrderId} is saved.` : `工單 ${active.workOrderId} 已儲存。`;
-          } else if (scenario?.number === 2 || scenario?.number === 3) {
+          } else if (!active.scenario && active.language === "zh" && scenario?.dispatchReminder) {
+            active.scenario = scenario;
+            reply = scenario.dispatchReminder;
+          } else if (scenario && !scenario.custom && (scenario.number === 2 || scenario.number === 3)) {
             active.scenario = scenario;
             reply = await n8nDialogue({
               sessionId: active.sessionId,
@@ -1466,16 +1511,20 @@
                 .map(({role, content}) => ({role, content})),
             }, signal, {
               onWorkflow: state => record(`N8N_WORKFLOW_${state.toUpperCase()}`, "GeoVision · Workflow"),
-              onTool: (name, state) => record(`MCP_TOOL_${state.toUpperCase()}`, name),
+              onTool: (name, state) => record(`N8N_STEP_${state.toUpperCase()}`, name),
               onWorkOrderSaved: id => { active.workOrderId = id; },
             });
             if (generation !== epoch || signal.aborted) return;
           } else if (scenario?.retrieval) {
-            active.scenario = scenario;
             const previous = messages.slice(active.startIndex, -1)
               .findLast(message => message.role === "user")?.content.slice(0, 1000) || "";
-            reply = await answerSimulationRag(active.id, scenario.number, active.language, text, previous, signal);
+            const history = scenario.custom ? messages.slice(active.startIndex, -1)
+              .flatMap<SimulationTurn>(({role, content, progressNotice}) =>
+                !progressNotice && content.trim() && (role === "user" || role === "assistant")
+                  ? [{role, content: content.slice(0, 1000)}] : []).slice(-8) : undefined;
+            reply = await answerSimulationRag(active.id, scenario.number, active.language, text, previous, signal, history);
             if (generation !== epoch || signal.aborted) return;
+            active.scenario = scenario;
             record("RAG_COMPLETED", scenario.title, performance.now() - operationStarted);
           } else if (scenario) {
             const response = await completeLocalTurn(
@@ -1531,11 +1580,11 @@
           record(`N8N_WORKFLOW_${state.toUpperCase()}`, "GeoVision · Workflow");
         }, onTool: (name, state) => {
           if (generation !== epoch || signal.aborted) return;
-          status = `n8n MCP · ${name} · ${state}`;
-          record(`MCP_TOOL_${state.toUpperCase()}`, name);
+          status = `n8n · ${name} · ${state}`;
+          record(`N8N_STEP_${state.toUpperCase()}`, name);
         } });
         if (generation !== epoch || signal.aborted) return;
-        record("LLM_COMPLETED", "Local LLM + n8n MCP tools", performance.now() - operationStarted);
+        record("LLM_COMPLETED", "n8n dialogue completed", performance.now() - operationStarted);
       } else if (useLlm) {
         status = "Thinking";
         record("AGENT_STATE_CHANGED", "listening → thinking");
@@ -1563,6 +1612,7 @@
       }
       if (!simulation) reply = normalizeTranscript(reply, hotwords);
       messages = [...messages, { role: "assistant", content: reply }];
+      saveCallLog("AI", reply);
       record("CONVERSATION_ITEM_ADDED", `ASSISTANT · ${reply}`);
       operationStarted = performance.now();
       await speakReply(reply, generation, signal);
@@ -1624,6 +1674,40 @@
       playbackMs = await playAudio(synthesis.audio, generation, "assistant", signal);
     }
     if (generation === epoch && !signal.aborted) record("PLAYBACK_COMPLETED", "Assistant reply played", playbackMs);
+  }
+  async function playSimulationOpening(generation: number, signal: AbortSignal) {
+    const active = simulation;
+    if (!active) return;
+    if (!useTts && greeting.trim() && !messages.length)
+      messages = [{ role: "assistant", content: greeting }];
+    const prompt = simulationOpeningPrompt(active);
+    messages = [...messages, { role: "assistant", content: prompt }];
+    if (simulationOpeningComplete(active)) active.startIndex = messages.length;
+    saveCallLog("AI", prompt);
+    record("CONVERSATION_ITEM_ADDED", `ASSISTANT · ${prompt}`);
+    await speakReply(prompt, generation, signal);
+  }
+  // A loaded scenario can become selected after the browser call has started.
+  $: if (selectedKnowledgeScenario?.simulation && useLlm && connected && !useSip &&
+    !simulation && !starting && !busy && !speaking && !detecting && !manualRecording && !scenarioRunning)
+    void startSimulationDuringCall(selectedKnowledgeScenario);
+  async function startSimulationDuringCall(scenario: KnowledgeScenario) {
+    const signal = controller?.signal, generation = epoch;
+    if (!signal || signal.aborted) return;
+    simulation = createSimulation(scenario.id, scenario.opening);
+    busy = true;
+    error = "";
+    reset();
+    try {
+      await playSimulationOpening(generation, signal);
+    } catch (cause) {
+      if (generation === epoch && !signal.aborted) fail(cause);
+    } finally {
+      if (generation === epoch) {
+        busy = false;
+        if (!error) status = idleStatus();
+      }
+    }
   }
   async function loadCsvFiles() {
     try {
@@ -2266,7 +2350,7 @@
     releaseChatAudio();
     messages = [];
     simulation = useLlm && selectedKnowledgeScenario?.simulation
-      ? createSimulation(selectedKnowledgeScenario.id) : null;
+      ? createSimulation(selectedKnowledgeScenario.id, selectedKnowledgeScenario.opening) : null;
     controller = new AbortController();
     try {
       if (useAsr && (!window.isSecureContext || !navigator.mediaDevices))
@@ -2312,6 +2396,8 @@
         gain.connect(context.destination);
       }
       connected = true;
+      callLog = {id: `demo-${createLocalId()}`, started: Date.now(), pending: Promise.resolve()};
+      saveCallLog("Call", "Started");
       muted = false;
       status = idleStatus();
       record(
@@ -2393,6 +2479,7 @@
       };
       draw();
       if (useTts && greeting.trim()) {
+        saveCallLog("AI", greeting);
         record("GREETING_REQUESTED", greeting);
         let playbackMs: number | null;
         if (
@@ -2438,10 +2525,7 @@
         record("GREETING_PLAYED", greeting, playbackMs);
       }
       if (simulation) {
-        if (!useTts && greeting.trim()) messages = [{ role: "assistant", content: greeting }];
-        messages = [...messages, { role: "assistant", content: languagePrompt }];
-        record("CONVERSATION_ITEM_ADDED", `ASSISTANT · ${languagePrompt}`);
-        await speakReply(languagePrompt, generation, controller.signal);
+        await playSimulationOpening(generation, controller.signal);
         if (generation !== epoch) return;
       }
       busy = false;
@@ -2456,6 +2540,8 @@
     }
   }
   function hangup(log = true) {
+    saveCallLog("Call", "Ended");
+    callLog = null;
     simulation = null;
     scenarioToken++;
     scenarioRunning = false;
@@ -2799,11 +2885,10 @@
           starting ||
           discovering ||
           cloneRecording ||
-          cloneBusy ||
-          !useAsr}
+          cloneBusy}
       >
         <label
-          >ASR<select aria-label="ASR" bind:value={asrKey}
+          >ASR<select aria-label="ASR" bind:value={asrKey} disabled={!useAsr}
             ><option value="" disabled>No installed ASR models</option
             >{#each asrModels as model}<option value={model.key}
                 >{model.label}</option
@@ -3448,9 +3533,9 @@
           <label
             ><select
               aria-label="Scenario"
-              bind:value={scenarioMode}
-              disabled={scenarioRunning || knowledgeUploading || knowledgeDeleting || !!simulation}
-              on:change={changeScenario}
+              value={scenarioMode}
+              disabled={scenarioRunning || knowledgeUploading || knowledgeDeleting || savingSettings || !!simulation}
+              on:change={(event) => changeScenario(event.currentTarget.value as typeof scenarioMode)}
               >
               <option value="audio">Audio input</option>
               {#each knowledgeScenarios as scenario}<option value={`scenario:${scenario.id}`}>{scenario.name}</option>{/each}
@@ -3470,9 +3555,11 @@
             </button>
             <p role="status">{knowledgeStatus}</p>
           {:else if selectedKnowledgeScenario}
-            <p><strong>{selectedKnowledgeScenario.name}</strong>{selectedKnowledgeScenario.tool ? " · Scenario MCP" : ` · ${selectedKnowledgeScenario.qaCount} Q/A pairs`}</p>
+            <p><strong>{selectedKnowledgeScenario.name}</strong> · {selectedKnowledgeScenario.qaCount} Q/A pairs</p>
             {#if selectedKnowledgeScenario.simulation}
-              <small>Start a browser call with LLM enabled to run the scenario simulation.</small>
+              <small>{useSip
+                ? "The simulation starts after the greeting on the next SIP IVR call."
+                : "The simulation starts after the greeting when LLM is enabled."}</small>
             {/if}
             {#each selectedKnowledgeScenario.files as file}<p>{file.name}</p>{/each}
             {#each selectedKnowledgeScenario.attachments ?? [] as file}<p>{file.name}</p>{/each}

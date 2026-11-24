@@ -1,6 +1,6 @@
 import {withN8nApi} from './unpublish-workflow.mjs';
 
-// Publish through the running server so production webhooks and MCP routes
+// Publish through the running server so production webhooks
 // become available immediately, including after a versioned template upgrade.
 export async function ensureWorkflowPublished(api,workflowId='ivrWorkflow'){
   const route='/workflows/'+encodeURIComponent(workflowId);

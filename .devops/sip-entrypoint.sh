@@ -18,11 +18,24 @@ if [[ -n "${SIP_SETTINGS_DIR:-}" ]]; then
     export IVRTTS_VOICE_DIR="${IVRTTS_VOICE_DIR:-/opt/sip/share/voices}"
     export BARESIP_MODULE_PATH="${BARESIP_MODULE_PATH:-/opt/sip/lib/baresip/modules}"
     sip_pid=""
+    terminate_shared_worker() {
+        [[ -n "$sip_pid" ]] || return 0
+        kill -TERM "$sip_pid" 2>/dev/null || return 0
+        local attempt
+        for attempt in {1..4}; do
+            if ! kill -0 "$sip_pid" 2>/dev/null; then return 0; fi
+            sleep 1
+        done
+        if kill -0 "$sip_pid" 2>/dev/null; then
+            echo "[sip] Worker did not stop within four seconds; forcing it to exit"
+            kill -KILL "$sip_pid" 2>/dev/null || true
+        fi
+    }
     stop_shared_sip() {
         trap - EXIT INT TERM
         rm -f "$heartbeat"
         if [[ -n "$sip_pid" ]]; then
-            kill -TERM "$sip_pid" 2>/dev/null || true
+            terminate_shared_worker
             wait "$sip_pid" 2>/dev/null || true
         fi
         exit 0
@@ -40,12 +53,15 @@ if [[ -n "${SIP_SETTINGS_DIR:-}" ]]; then
             -u SIP_RTP_PORTS -u SIP_CODEC -u SIP_DTMF_MODE -u TTS_MODEL -u DTMF_1 -u DTMF_2 -u DTMF_3 \
             stdbuf -oL -eL /opt/sip/bin/exampleSIP --env "$settings" &
         sip_pid=$!
+        reloading=false
         while kill -0 "$sip_pid" 2>/dev/null; do
             touch "$heartbeat"
             sleep 1
             if [[ "$(sha256sum "$settings")" != "$revision" ]]; then
                 echo "[sip] Gateway settings changed; restarting SIP registration"
-                kill -TERM "$sip_pid" 2>/dev/null || true
+                rm -f "$heartbeat"
+                reloading=true
+                terminate_shared_worker
                 break
             fi
         done
@@ -55,7 +71,9 @@ if [[ -n "${SIP_SETTINGS_DIR:-}" ]]; then
         set -e
         sip_pid=""
         rm -f "$heartbeat"
-        if (( status != 0 )); then echo "[sip] Worker exited ($status); retrying in two seconds"; fi
+        if (( status != 0 )) && [[ "$reloading" == false ]]; then
+            echo "[sip] Worker exited ($status); retrying"
+        fi
         sleep 1
     done
 fi

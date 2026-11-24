@@ -7,7 +7,7 @@ const originalFetch=globalThis.fetch;
 const scenario={id:'a'.repeat(24),name:'新情境',qaCount:3,files:[{name:'政策.txt',size:12,sha256:'hash'}],createdAt:new Date().toISOString()};
 try{
  const content='Q: 新情境怎麼申請？\nA: 請聯絡分機 7654。\n'.repeat(1000);
- const importedScenario={...scenario,tool:'scenario_fixture',tables:[]};
+ const importedScenario={...scenario,tables:[]};
  const requests=[];
  globalThis.fetch=async(url,options)=>{
   assert.equal(url,'/n8n/webhook/ivr-import-scenario');
@@ -23,7 +23,7 @@ try{
  await assert.rejects(importFiles([new File(['data'],'bad.exe')]),/Choose PDF/);
  await assert.rejects(importFiles([new File([new Uint8Array(10*1024*1024+1)],'big.txt')]),/10 MiB/);
  const html='<!doctype html><p>情境 1：派工</p><p>AI：請確認派工。</p>';
- const htmlScenario={...scenario,simulation:true,tool:'scenario_html',tables:[]};
+ const htmlScenario={...scenario,simulation:true,tables:[]};
  globalThis.fetch=async(url,options)=>{
   assert.equal(url,'/n8n/webhook/ivr-import-scenario');
   assert.equal(options.method,'POST');

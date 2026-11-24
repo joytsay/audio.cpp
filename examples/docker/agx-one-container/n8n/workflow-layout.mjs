@@ -6,7 +6,7 @@ const sections = [
   { id: ivrWorkflowId, anchors: ['ivr-input', 'scenario-report-input', 'workflow-group-1'] },
   {
     id: knowledgeToolsId, name: 'GeoVision · Knowledge Tools',
-    anchors: ['maintenance-mcp-trigger', 'rag-tool-input', 'manual-rag-test', 'workflow-group-2', 'workflow-group-3'],
+    anchors: ['rag-tool-input', 'manual-rag-test', 'workflow-group-3'],
   },
   {
     id: scenarioAdminId, name: 'GeoVision · Scenario Admin', offset: 1990,
@@ -15,10 +15,9 @@ const sections = [
   { id: 'ivrDocumentRag', name: 'GeoVision · Document RAG', offset: 2580, anchors: ['document-rag-input'] },
 ];
 
-// Publish the main draft first so n8n releases the production paths that moved.
-export const managedWorkflowIds = sections.map(section => section.id);
-export const workflowLayoutRevision = 25;
-export const scenarioToolPosition = index => [630 + 260 * index, 370];
+// Execute Sub-workflow validates that its target is published first.
+export const managedWorkflowIds = [knowledgeToolsId, ivrWorkflowId, scenarioAdminId, 'ivrDocumentRag'];
+export const workflowLayoutRevision = 27;
 const scenarioAdminRevision = 26;
 
 export function removeLegacyScenarioUpload(workflow) {
@@ -66,20 +65,11 @@ return [{json:{...input,collectionUrl,embeddingUrl,ids:input.documents.map(d=>d.
 
 function layoutKnowledge(workflow) {
   const positions = {
-    'maintenance-mcp-trigger': [220, 150],
-    'lookup-maintenance-guidance': [70, 370],
-    'add-work-order': [350, 370],
-    'workflow-group-2': [0, 0],
     'workflow-group-3': [0, 550],
   };
-  let scenarioTools = 0;
   for (const node of workflow.nodes) {
     if (positions[node.id]) node.position = positions[node.id];
-    else if (node.id.startsWith('scenario-file-')) node.position = scenarioToolPosition(scenarioTools++);
     else node.position[1] -= 320;
-    if (node.id === 'workflow-group-2') Object.assign(node.parameters, {
-      width: 590, height: 510, content: '## Scenario MCP\nCall tools and tools registered by scenario imports.',
-    });
     if (node.id === 'workflow-group-3') Object.assign(node.parameters, {
       width: 2190, height: 780, content: '## Knowledge and work orders\nRead or save native Data Table rows and retrieve source evidence.',
     });

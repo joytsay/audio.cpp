@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {Readable} from 'node:stream';
 import {runInNewContext} from 'node:vm';
-import {compileScenarioWorkflow,createScenarioManager,createScenarioServer,refreshScenarioLookup,tableColumns} from '../../../examples/docker/agx-one-container/n8n/scenario-workflows.mjs';
+import {createScenarioManager,createScenarioServer,tableColumns} from '../../../examples/docker/agx-one-container/n8n/scenario-workflows.mjs';
 
 const base=new URL('../../../examples/docker/agx-one-container/n8n/',import.meta.url);
 const workflow=JSON.parse(await readFile(new URL('workflow.json',base)));
@@ -114,7 +114,7 @@ try{
  })[0].json;
  const reply=(loaded,matches,decision={})=>{
   const facts=run('Return scenario records',matches,{'Load knowledge files':loaded});
-  const context=run('Prepare agent context',{content:[{text:JSON.stringify(facts)}]},{
+  const context=run('Prepare agent context',facts,{
    'Prepare IVR input':{text:'查詢測試'},
    'Register caller turn':{tool:'retrieve_knowledge',...decision},
   });
@@ -189,29 +189,6 @@ try{
  assert.equal(hrMatch.matched_rows,1);
  assert.equal(reply({scenario_lookup:hr},hrMatch),hrReply);
 
- const directory=compileScenarioWorkflow({id:'directory',name:'通訊錄',files:[{name:'directory.csv'}],dataset:{template:[]}},[
-  {...tables[3],id:'directory-table',columns:tableColumns(tables[3].headers)},
- ]);
- const directoryNode=directory.nodes.find(node=>node.id==='scenario-result');
- const directoryCode=directoryNode.parameters.jsCode;
- directoryNode.parameters.jsCode=directoryCode.replace('function lookupScenario(input,tables,template,source) {','function lookupScenario(input,tables,template,source) { /* old generated code */');
- assert.equal(refreshScenarioLookup(directory),true);
- assert.equal(directoryNode.parameters.jsCode,directoryCode);
- assert.equal(refreshScenarioLookup(directory),false);
- const directoryToolResult=query=>runInNewContext(`(function(){${directoryCode}})()`,{
-  $:name=>name==='Scenario request'?{first:()=>({json:{query}})}
-   :{all:()=>directoryRows.map(json=>({json}))},
- })[0].json;
- const cai=directoryToolResult('我要查詢 蔡哲');
- assert.equal(cai.matched_rows,1);
- assert.equal(cai.records[0].directory_reply,'蔡哲，分機 321，英文名 Test Name，部門 軟體組。');
- const english=directoryToolResult('我要查詢 LOUIS  WANG');
- assert.equal(english.matched_rows,1);
- assert.equal(english.records[0].directory_reply,englishReply);
- assert.equal(directoryToolResult('我要查詢 Chung').records[0].directory_reply,chungReply);
- assert.equal(directoryToolResult('我要查詢 hr').records[0].directory_reply,hrReply);
- assert.equal(directoryToolResult('我要找HR').records[0].directory_reply,hrReply);
- assert.equal(directoryToolResult('IT Support').records[0].fields['部門/團隊'],'IT Support');
  assert.match(workOrderReply('YCS-16862',await lookup({reference:'YCS-16862'})),/YCS-16862.*五年一維/);
  const catalog={kind:'catalog',term:'CSD'};
  const readsBefore=readRoutes.length;
@@ -226,3 +203,33 @@ try{
  globalThis.fetch=fetchBefore;
 }
 console.log('PASS direct work-order, site and employee lookups using imported tables');
+
+const importedHtml={id:'fresh-script',simulation:true,tables:[]};
+const uploadedFile={name:'fresh-script.html',data:Buffer.from('<p>Assistant: Welcome</p>').toString('base64')};
+const importCalls=[];
+const htmlManager=createScenarioManager({
+ knowledgeUrl:'http://knowledge.test',
+ withApi:async()=>assert.fail('HTML with no tables must not modify n8n resources'),
+});
+globalThis.fetch=async(url,options)=>{
+ const route=new URL(url).pathname;
+ importCalls.push([options.method,route]);
+ if(route==='/scenarios'){
+  assert.deepEqual(JSON.parse(options.body),{fileMode:true,files:[uploadedFile]});
+  return Response.json({scenario:importedHtml,duplicate:false});
+ }
+ if(route==='/rag/index')return Response.json({indexed:1});
+ assert.equal(route,'/scenario-imports/fresh-script');
+ if(options.method==='GET')return Response.json({id:importedHtml.id,dataset:{tables:[]}});
+ assert.deepEqual(JSON.parse(options.body),{ready:true,tables:[]});
+ return Response.json(importedHtml);
+};
+try{
+ assert.deepEqual(await htmlManager.import(uploadedFile),{scenario:importedHtml,duplicate:false});
+ assert.deepEqual(importCalls.filter(([,route])=>route!=='/rag/index'),[
+  ['POST','/scenarios'],['GET','/scenario-imports/fresh-script'],['PUT','/scenario-imports/fresh-script'],
+ ]);
+}finally{
+ globalThis.fetch=fetchBefore;
+}
+console.log('PASS HTML import persists the scenario without creating an n8n workflow or tool');

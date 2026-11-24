@@ -14,13 +14,6 @@
 	}
 
 	# Only production webhooks use this prefix. Open the editor on port 5678.
-	handle /n8n/mcp/* {
-		uri strip_prefix /n8n
-		reverse_proxy n8n:5678 {
-			flush_interval -1
-		}
-	}
-
 	handle /n8n/webhook/ivr-document-rag* {
 		respond 404
 	}

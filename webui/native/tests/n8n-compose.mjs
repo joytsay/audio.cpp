@@ -9,7 +9,7 @@ assert.deepEqual(n8n.entrypoint,['/bin/sh','/templates/start-n8n.sh']);
 assert.ok(n8n.volumes.some(v=>v.target==='/templates'&&v.read_only),'startup scripts/templates must be mounted');
 assert.ok(n8n.volumes.some(v=>v.target==='/home/node/.n8n'&&v.source==='audiocpp-n8n-data'),'existing n8n database volume must be preserved');
 assert.ok(!n8n.volumes.some(v=>v.target.startsWith('/files')),'document mounts belong on knowledge, not on n8n');
-for(const name of ['n8n-dialogue.ts','mcp-http.ts'])assert.ok(n8n.volumes.some(v=>v.target==='/dialogue/'+name&&v.read_only),'shared dialogue modules must be read-only');
+for(const name of ['n8n-dialogue.ts','greetings.ts'])assert.ok(n8n.volumes.some(v=>v.target==='/dialogue/'+name&&v.read_only),'shared dialogue modules must be read-only');
 assert.ok(n8n.ports.some(p=>p.target===8086&&p.host_ip==='127.0.0.1'),'SIP dialogue port must only be exposed on loopback');
 assert.equal(config.services.sip.environment.SIP_DIALOGUE_URL,'http://127.0.0.1:8086/dialogue');
 assert.equal(config.services.sip.depends_on.n8n.condition,'service_healthy');
