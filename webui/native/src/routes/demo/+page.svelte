@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy, tick } from "svelte";
-  import { ivrDialogue, type DialogueSource } from "$lib/n8n-dialogue";
+  import { DEFAULT_NOTICE_DELAY_SECONDS, ivrDialogue, type DialogueSource } from "$lib/n8n-dialogue";
   import {importScenarioFiles,listKnowledgeScenarios,removeKnowledgeScenario,type KnowledgeScenario} from "$lib/knowledge-scenarios";
   import SipSidebar from "$lib/SipSidebar.svelte";
   import type { SipSettings, SipLive } from "$lib/sip";
@@ -213,6 +213,8 @@
     }
     if (typeof saved.tts_streaming === "boolean")
       ttsStreaming = saved.tts_streaming;
+    if (typeof saved.lookup_notice_delay_seconds === "number")
+      noticeDelaySeconds = savedNoticeDelaySeconds = saved.lookup_notice_delay_seconds;
     if (typeof saved.tts_playback_rate === "number")
       ttsPlaybackRate = saved.tts_playback_rate;
     if (saved.tts_voice_id !== undefined) {
@@ -309,6 +311,7 @@
         llm_model: llm,
         dialogue_source: dialogueSource,
         sip_scenario_id: savedSipScenarioId,
+        lookup_notice_delay_seconds: noticeDelaySeconds,
         tts_streaming: streamingTts,
         tts_playback_rate: ttsPlaybackRate,
         tts_voice_id: savedVoiceId,
@@ -476,6 +479,8 @@
     rtf?: number | null;
   };
   type DemoMessage = ChatMessage & {
+    // A wait notice is shown and spoken but is not part of the dialogue.
+    progressNotice?: boolean;
     audioId?: string;
     audioUrl?: string;
     audioName?: string;
@@ -487,8 +492,8 @@
   // Rejoin consecutive same-role bubbles so model history keeps one message per turn.
   function chatHistory(list: DemoMessage[]): ChatMessage[] {
     const turns: ChatMessage[] = [];
-    for (const { role, content } of list) {
-      if (!content.trim()) continue;
+    for (const { role, content, progressNotice } of list) {
+      if (progressNotice || !content.trim()) continue;
       const last = turns.at(-1);
       if (last && last.role === role)
         last.content += (/[\u3000-\u9fff\uff00-\uffef]$/.test(last.content) ? "" : " ") + content.trim();
@@ -894,6 +899,49 @@
   let hotwords = "",
     savingHotwords = false,
     hotwordsStatus = "";
+  // Wait notice: spoken when an IVR turn is still running after this delay.
+  let noticeDelaySeconds = DEFAULT_NOTICE_DELAY_SECONDS, savedNoticeDelaySeconds = DEFAULT_NOTICE_DELAY_SECONDS;
+  async function saveNoticeDelay() {
+    const value = noticeDelaySeconds;
+    if (!Number.isInteger(value) || value < 1 || value > 60) {
+      noticeDelaySeconds = savedNoticeDelaySeconds;
+      settingsStatus = "Wait notice delay must be a whole number from 1 to 60 seconds.";
+      return;
+    }
+    savingSettings = true;
+    try {
+      const current = await endpointJson<{settings: DemoSettings | null}>("", "ui/demo-settings", {cache: "no-store"});
+      await endpointJson("", "ui/demo-settings", {method: "POST", body: JSON.stringify({settings: {...(current.settings || {schema_version: 1}), lookup_notice_delay_seconds: value}})});
+      savedNoticeDelaySeconds = value;
+      settingsStatus = "Wait notice delay saved · applies to the next turn";
+    } catch (cause) {
+      noticeDelaySeconds = savedNoticeDelaySeconds;
+      settingsStatus = `Could not save wait notice delay: ${cause instanceof Error ? cause.message : cause}`;
+    } finally { savingSettings = false; }
+  }
+  // Wait phrases are synthesized as soon as the turn's intent is known and
+  // kept for the session, so a notice plays at once when it is due.
+  const noticeSpeech = new Map<string, Promise<Blob>>();
+  function noticeBody(phrase: string, id: string): Record<string, unknown> {
+    const body: Record<string, unknown> = {model: id, input: phrase, response_format: "wav"};
+    if (referencePath && supportsReference) { body.voice_ref = referencePath; body.reference_text = referenceText; }
+    else body.voice = voice;
+    return body;
+  }
+  function prepareNotice(phrase: string): Promise<Blob> | undefined {
+    if (!useTts) return undefined;
+    const key = JSON.stringify([ttsKey, voice, referencePath, ttsPlaybackRate, phrase]);
+    let speech = noticeSpeech.get(key);
+    if (!speech) {
+      speech = load(ttsKey, new AbortController().signal, true, ttsRunMode)
+        .then(id => synthesizeSpeech(noticeBody(phrase, id), AbortSignal.timeout(30000)))
+        .then(result => result.audio);
+      speech.catch(() => noticeSpeech.delete(key));
+      noticeSpeech.set(key, speech);
+      if (noticeSpeech.size > 60) noticeSpeech.delete(noticeSpeech.keys().next().value!);
+    }
+    return speech;
+  }
   let ttsStreaming = false,
     ttsPlaybackRate = 0.9;
   $: ttsRunMode = streamingTts ? "streaming" : "offline";
@@ -1365,6 +1413,9 @@
     options: {
       playInputAudio?: boolean;
       audioName?: string;
+      // A mock-call line: its text is the script's own words, so ASR and
+      // transcript correction are skipped and only its speech is played.
+      scripted?: boolean;
     } = {},
   ) {
     if (useSip && (!controller || controller.signal.aborted)) controller = new AbortController();
@@ -1406,7 +1457,7 @@
         );
         operationStarted = performance.now();
       }
-      if (audio && useAsr) {
+      if (audio && useAsr && !options.scripted) {
         const asrId = await load(asrKey, signal);
         const path = await uploadWav(
           await browserDecodeToWav(new File([audio], "turn.wav"), 16000, 1),
@@ -1459,7 +1510,7 @@
       if (signal.aborted || generation !== epoch) return;
       if (useSip) { await sendSipText(normalizeTranscript(text, hotwords), signal); return; }
       const textLength = [...text].length;
-      if (useAsrPostprocess && textLength >= 3 && textLength <= 1200 && text.trim()) {
+      if (!options.scripted && useAsrPostprocess && textLength >= 3 && textLength <= 1200 && text.trim()) {
         const correctionStarted = performance.now();
         status = "Correcting transcript";
         try {
@@ -1486,6 +1537,25 @@
         record("AGENT_STATE_CHANGED", "listening → thinking");
         operationStarted = performance.now();
         const result = await ivrDialogue({sessionId: simulation.sessionId, text, scenarioId: simulation.scenarioId}, signal, {
+          noticeDelaySeconds,
+          onNoticeReady: phrase => { prepareNotice(phrase)?.catch(() => undefined); },
+          onNotice: async (phrase, noticeSignal) => {
+            if (generation !== epoch || noticeSignal.aborted) return;
+            messages = [...messages, {role: "assistant", content: phrase, progressNotice: true}];
+            status = phrase;
+            record("WAIT_NOTICE", phrase, performance.now() - operationStarted);
+            try {
+              const speech = prepareNotice(phrase);
+              if (speech) {
+                const audio = await speech;
+                if (generation === epoch && !noticeSignal.aborted) await playAudio(audio, generation, "assistant", noticeSignal);
+              }
+            } catch (cause) {
+              if (!noticeSignal.aborted && generation === epoch) record("WAIT_NOTICE_FAILED", String(cause));
+            } finally {
+              if (generation === epoch && !noticeSignal.aborted) status = "Thinking";
+            }
+          },
           onWorkflow: state => {
             if (generation !== epoch || signal.aborted) return;
             record(`N8N_WORKFLOW_${state.toUpperCase()}`, "GeoVision · Workflow");
@@ -2169,6 +2239,119 @@
     scenarioAudioName = file?.name || "";
     scenarioPreviewUrl = file ? URL.createObjectURL(file) : "";
   }
+  // Mock call: plays the caller's side of the uploaded call script — the
+  // opening answers, then each selected 情境's caller lines. Each line is
+  // spoken with TTS, sent as the caller's turn, and the next line waits until
+  // the reply has been spoken.
+  let mockSections: number[] = [], mockScenarioId = "", mockRunning = false, mockToken = 0, mockStatus = "", mockLine = -1;
+  $: mockCall = selectedKnowledgeScenario?.simulation ? selectedKnowledgeScenario.mockCall : undefined;
+  $: if ((selectedKnowledgeScenario?.id || "") !== mockScenarioId) {
+    mockScenarioId = selectedKnowledgeScenario?.id || "";
+    mockSections = mockCall?.sections.filter(section => section.outbound).map(section => section.number) ?? [];
+    mockVaried = null;
+    mockStatus = "";
+  }
+  // Lines of the current run: the script's own until a run starts, then the
+  // run's fresh names and numbers.
+  let mockVaried: NonNullable<KnowledgeScenario["mockCall"]> | null = null;
+  $: mockSource = mockVaried ?? mockCall;
+  $: mockLines = mockSource ? [
+    ...mockSource.opening.map(text => ({text, label: "Opening"})),
+    ...mockSource.sections.filter(section => mockSections.includes(section.number))
+      .flatMap(section => section.lines.map(text => ({text, label: `情境 ${section.number}`}))),
+  ] : [];
+  async function variedMockCall(scenarioId: string, sections: number[]) {
+    const response = await fetch("/n8n/webhook/ivr-mock-call", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({scenarioId, sections}), signal: AbortSignal.timeout(180000),
+    });
+    const result = await response.json().catch(() => undefined);
+    if (!response.ok || !Array.isArray(result?.opening) || !Array.isArray(result?.sections))
+      throw new Error(result?.message || result?.error || `HTTP ${response.status}`);
+    return result as NonNullable<KnowledgeScenario["mockCall"]>;
+  }
+  function toggleMockSection(number: number, on: boolean) {
+    mockSections = on ? [...new Set([...mockSections, number])].sort((a, b) => a - b) : mockSections.filter(item => item !== number);
+    mockVaried = null;
+  }
+  async function whenIdle(token: number) {
+    let quiet = 0;
+    while (token === mockToken && quiet < 3) {
+      quiet = connected && !starting && !busy && !speaking ? quiet + 1 : 0;
+      await new Promise(resolve => setTimeout(resolve, 150));
+    }
+  }
+  // The mock caller speaks with a saved voice of its own (default tsaiK…),
+  // used as the TTS speaker reference; its uploaded reference is reused.
+  let callerVoiceId = "";
+  const callerReferences = new Map<string, Promise<string>>();
+  $: if (!savedVoices.some(item => item.id === callerVoiceId)) {
+    const named = (pattern: RegExp) => savedVoices.find(item => pattern.test(item.name));
+    callerVoiceId = (named(/^tsaiky$/i) ?? named(/^tsaik[^-]*$/i) ?? named(/^tsaik/i) ?? savedVoices[0])?.id ?? "";
+  }
+  async function mockCallerSpeech(line: string, signal: AbortSignal): Promise<Blob | undefined> {
+    if (!useTts) return undefined;
+    const id = await load(ttsKey, signal, true, ttsRunMode);
+    const caller = savedVoices.find(item => item.id === callerVoiceId);
+    let body: Record<string, unknown>;
+    if (caller && supportsReference) {
+      let reference = callerReferences.get(caller.id);
+      if (!reference) {
+        reference = browserDecodeToWav(new File([caller.audio], `${caller.name}.wav`, {type: "audio/wav"}), 24000, 1).then(wav => uploadWav(wav, signal));
+        reference.catch(() => callerReferences.delete(caller.id));
+        callerReferences.set(caller.id, reference);
+      }
+      body = {model: id, input: line, response_format: "wav", voice_ref: await reference, reference_text: caller.transcript};
+    } else {
+      const builtin = caller?.id.startsWith("preset-") ? caller.id.slice(7) : undefined;
+      body = builtin && (selectedTts?.builtin_voices ?? []).includes(builtin) ? {model: id, input: line, response_format: "wav", voice: builtin} : noticeBody(line, id);
+    }
+    return (await synthesizeSpeech(body, signal)).audio;
+  }
+  // Speak one caller line with the caller voice and send it as the caller's
+  // turn; resolves after the reply has been spoken.
+  async function sendCallerLine(text: string, label: string) {
+    const speech = await mockCallerSpeech(text, controller?.signal ?? new AbortController().signal);
+    await respond(text, speech, epoch, {playInputAudio: !!speech, audioName: `Mock caller · ${label}`, scripted: true});
+  }
+  async function runMockCall() {
+    if (!mockCall || mockRunning || useSip || scenarioRunning || starting) return;
+    const token = ++mockToken;
+    mockRunning = scenarioRunning = true;
+    error = "";
+    try {
+      // Each run speaks new names and numbers; the script's own lines are
+      // used if the variation is unavailable.
+      mockStatus = "Preparing new names and numbers…";
+      try { mockVaried = await variedMockCall(selectedKnowledgeScenario!.id, mockSections); }
+      catch (cause) { mockVaried = null; record("MOCK_CALL_VARIATION_FAILED", String(cause)); }
+      await tick();
+      if (token !== mockToken) return;
+      const lines = mockLines;
+      if (!connected) await call();
+      for (const [index, line] of lines.entries()) {
+        await whenIdle(token);
+        if (token !== mockToken || !connected) break;
+        mockLine = index;
+        mockStatus = `Q${index + 1}/${lines.length} · ${line.label}`;
+        await sendCallerLine(line.text, `Q${index + 1} · ${line.label}`);
+        if (error) break;
+      }
+      if (token === mockToken) mockStatus = error ? `Mock call stopped: ${error}` : !connected ? "Mock call ended with the call" : `Mock call complete · ${lines.length} lines`;
+    } catch (cause) {
+      if (token === mockToken) { fail(cause); mockStatus = `Mock call stopped: ${error}`; }
+    } finally {
+      if (token === mockToken) { mockRunning = scenarioRunning = false; mockLine = -1; }
+    }
+  }
+  // Stop scenario and Hang up both end a running mock call.
+  function stopMockCall() {
+    if (!mockRunning) return;
+    mockToken++;
+    mockLine = -1;
+    mockRunning = false;
+    mockStatus = "Mock call stopped";
+  }
   async function runScenario() {
     if (scenarioRunning || busy || detecting || starting) return;
     if (!isAudioScenario || !scenarioFile || !useAsr) return;
@@ -2199,6 +2382,7 @@
     }
   }
   function stopScenario() {
+    stopMockCall();
     if (starting) {
       hangup();
       scenarioStatus = "Scenario stopped";
@@ -2234,10 +2418,25 @@
     throw new Error("SIP text turn timed out");
   }
   let messageInput: HTMLTextAreaElement;
-  async function draftScenarioQuestion(question: string) {
-    input = question;
-    await tick();
-    if (messageInput && !messageInput.disabled) messageInput.focus();
+  // A mockup question is spoken with the caller voice and sent at once
+  // (connecting the call first when needed).
+  async function sendScenarioQuestion(question: string, index: number) {
+    if (mockRunning || useSip || scenarioRunning || starting) return;
+    const token = ++mockToken;
+    mockRunning = scenarioRunning = true;
+    error = "";
+    try {
+      if (!connected) await call();
+      await whenIdle(token);
+      if (token !== mockToken || !connected) return;
+      mockStatus = `Q${index + 1}: ${question}`;
+      await sendCallerLine(question, `Q${index + 1}`);
+      if (token === mockToken) mockStatus = error ? `Stopped: ${error}` : `Q${index + 1} answered`;
+    } catch (cause) {
+      if (token === mockToken) { fail(cause); mockStatus = `Stopped: ${error}`; }
+    } finally {
+      if (token === mockToken) mockRunning = scenarioRunning = false;
+    }
   }
   function send() {
     const text = input.trim();
@@ -2450,6 +2649,7 @@
     }
   }
   function hangup(log = true) {
+    stopMockCall();
     saveCallLog("Call", "Ended");
     callLog = null;
     simulation = null;
@@ -2834,6 +3034,18 @@
       {#if !useAsr}<small
           >ASR skipped. Type messages instead of using the microphone.</small
         >{/if}
+    </section>
+    <section class="stage-settings" aria-label="Wait notice settings">
+      <div class="stage-heading"><h2>Wait notice</h2></div>
+      <fieldset disabled={settingsLoading || savingSettings}>
+        <label>Speak a wait notice after (seconds)<input
+          aria-label="Wait notice delay (seconds)"
+          type="number" min="1" max="60" step="1" required
+          bind:value={noticeDelaySeconds}
+          on:change={saveNoticeDelay}
+        /></label>
+        <small>When an IVR turn takes longer, the caller hears what is being done, e.g. 「好的，我幫您查一下庫存，請稍等。」 Browser and SIP. Default: 2 seconds.</small>
+      </fieldset>
     </section>
     <section class="stage-settings" aria-label="LLM settings">
       <div class="stage-heading">
@@ -3467,20 +3679,48 @@
             {#each selectedKnowledgeScenario.files as file}<p>{file.name}</p>{/each}
             {#each selectedKnowledgeScenario.attachments ?? [] as file}<p>{file.name}</p>{/each}
             {#each selectedKnowledgeScenario.tables ?? [] as table}<p>{table.name} · {table.rowCount} rows</p>{/each}
+            <label>Caller voice<select aria-label="Caller voice" bind:value={callerVoiceId} disabled={mockRunning || !savedVoices.length}>
+              {#each savedVoices as item}<option value={item.id}>{item.name}</option>{/each}
+            </select></label>
             {#if selectedKnowledgeScenario.examples?.length}
               <div class="scenario-examples" role="group" aria-labelledby="scenario-examples-title">
                 <h3 id="scenario-examples-title">Mockup questions:</h3>
                 {#each selectedKnowledgeScenario.examples as question, index}
-                  <button type="button" disabled={knowledgeDeleting} on:click={() => draftScenarioQuestion(question)}>
+                  <button type="button" disabled={knowledgeDeleting || mockRunning || useSip || busy || starting} on:click={() => sendScenarioQuestion(question, index)}>
                     <strong>Q{index + 1}:</strong> <span>{question}</span>
                   </button>
                 {/each}
               </div>
-              {#if !scenarioConnected}<small>Connect a call to send your question.</small>{/if}
+              <small>Click a question to speak it with the caller voice and send it{scenarioConnected ? "" : " (starts the call)"}.</small>
             {:else}
               <small>Speak or type a question during a call.</small>
             {/if}
-            <button title="Remove this scenario and its imported data" disabled={knowledgeDeleting || knowledgeUploading || !!simulation} on:click={removeSelectedKnowledgeScenario}><Trash2 size={14} /> {knowledgeDeleting ? "Removing scenario…" : "Remove scenario"}</button>
+            {#if mockCall}
+              <div class="scenario-examples mock-call" role="group" aria-labelledby="mock-call-title">
+                <h3 id="mock-call-title">Mock call:</h3>
+                <small>Speaks the opening answers, then each selected 情境's caller lines, waiting for every reply. Every run uses new names and numbers.</small>
+                <div class="mock-columns">
+                  <div class="mock-choices">
+                    {#each mockCall.sections as section}
+                      <label class="mock-section"><input type="checkbox" aria-label={`Mock 情境 ${section.number}`}
+                        checked={mockSections.includes(section.number)} disabled={mockRunning}
+                        on:change={(event) => toggleMockSection(section.number, event.currentTarget.checked)} /> 情境 {section.number}：{section.title}</label>
+                    {/each}
+                  </div>
+                  <ol class="mock-lines">
+                    {#each mockLines as line, index}<li class:current={index === mockLine}><strong>Q{index + 1}</strong> {line.text}</li>{/each}
+                  </ol>
+                </div>
+                {#if useSip}<small>Mock calls run in the browser; turn SIP off.</small>{/if}
+                {#if mockStatus}<small role="status">{mockStatus}</small>{/if}
+              </div>
+            {/if}
+            <div class="scenario-actions">
+              {#if mockCall}
+                <button type="button" disabled={mockRunning || useSip || busy || starting || knowledgeDeleting} on:click={runMockCall}>{mockRunning ? "Mock call running…" : "Run mock call"}</button>
+              {/if}
+              <button title="Remove this scenario and its imported data" disabled={knowledgeDeleting || knowledgeUploading || !!simulation || mockRunning} on:click={removeSelectedKnowledgeScenario}><Trash2 size={14} /> {knowledgeDeleting ? "Removing scenario…" : "Remove scenario"}</button>
+            </div>
             <p role="status">{knowledgeStatus}</p>
           {:else if isAudioScenario}
             <div class="scenario-upload">
@@ -4110,6 +4350,67 @@
     text-align: left;
     white-space: normal;
     overflow-wrap: anywhere;
+  }
+  .demo .scenario-examples label.mock-section {
+    display: flex;
+    align-items: flex-start;
+    justify-content: flex-start;
+    gap: 8px;
+    margin: 2px 0;
+    text-align: left;
+    font-size: inherit;
+    color: var(--text);
+    overflow-wrap: anywhere;
+    cursor: pointer;
+  }
+  .demo .scenario-examples label.mock-section input {
+    display: inline-block;
+    flex: none;
+    width: auto;
+    margin: 2px 0 0;
+    padding: 0;
+  }
+  .mock-columns {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 10px;
+    align-items: start;
+  }
+  .mock-choices {
+    display: grid;
+    gap: 2px;
+  }
+  .scenario-actions {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(0, 1fr));
+    gap: 8px;
+    margin-top: 10px;
+  }
+  .demo .scenario-actions button {
+    width: 100%;
+    margin: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+  }
+  .mock-lines {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    display: grid;
+    gap: 3px;
+    max-height: 220px;
+    overflow-y: auto;
+    font-size: 0.9em;
+  }
+  .mock-lines li {
+    padding: 2px 6px;
+    border-radius: 6px;
+    overflow-wrap: anywhere;
+  }
+  .mock-lines li.current {
+    background: var(--accent-soft, rgba(80, 140, 255, 0.15));
   }
   .scenario-upload {
     display: flex;

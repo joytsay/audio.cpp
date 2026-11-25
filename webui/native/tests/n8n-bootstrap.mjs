@@ -32,8 +32,15 @@ assert.equal(installedMain.name,'GeoVision · Workflow');
 assert.equal(installedMain.meta.ivrWorkflowRevision,workflowLayoutRevision);
 assert.deepEqual(installedMain.nodes.map(node=>node.name).sort(),['1 · IVR call','IVR Input','Ensure work_orders','Read work orders · Data Table','Add saved work orders',
  'IVR call engine','IVR Output','Work order to save?','Extract work orders','One row per work order','Save work order · Data Table',
- 'Call session record','Ensure call_sessions columns','Save call session · Data Table'].sort());
+ 'Call session record','Ensure call_sessions columns','Save call session · Data Table',
+ 'IVR Intent Input','What is the caller asking?','IVR Intent Output',
+ 'Mock Call Input','Vary the caller script','Mock Call Output'].sort());
+assert.match(installedMain.nodes.find(node=>node.name==='Vary the caller script').parameters.jsonBody,/mock:true/);
+assert.equal(installedMain.nodes.find(node=>node.name==='IVR Intent Input').parameters.path,'ivr-intent');
+assert.match(installedMain.nodes.find(node=>node.name==='What is the caller asking?').parameters.jsonBody,/intent:true/);
 const next=name=>installedMain.connections[name].main.map(edges=>edges.map(edge=>edge.node));
+assert.deepEqual(next('IVR Intent Input'),[['What is the caller asking?']]);
+assert.deepEqual(next('What is the caller asking?'),[['IVR Intent Output']]);
 assert.deepEqual(next('IVR Input'),[['Ensure work_orders']]);
 assert.deepEqual(next('Ensure work_orders'),[['Read work orders · Data Table']]);
 assert.deepEqual(next('Read work orders · Data Table'),[['Add saved work orders']]);

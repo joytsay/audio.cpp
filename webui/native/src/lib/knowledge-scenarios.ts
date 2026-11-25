@@ -5,6 +5,8 @@ export type KnowledgeScenario = {
   qaCount: number;
   simulation?: boolean;
   examples?: string[];
+  // The caller's side of an HTML call script, for the demo's mock call.
+  mockCall?: {opening: string[]; sections: {number: number; title: string; outbound: boolean; lines: string[]}[]};
   tables?: {name: string; sheet: string; rowCount: number}[];
   files: {name: string; size: number; sha256: string}[];
   attachments?: {name: string; size: number; sha256: string}[];

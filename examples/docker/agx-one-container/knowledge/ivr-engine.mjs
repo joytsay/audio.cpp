@@ -10,6 +10,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {createHash} from 'node:crypto';
 import {htmlScenarioText} from './scenario-files.mjs';
+import {lineSignature, mockCallScript, scoreScale, varyNumbers} from './mock-call.mjs';
 import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
 
@@ -248,6 +249,8 @@ export function createIvrEngine({
   const locks = new Map();
   const scripts = new Map();
   const pendingFigures = new Map();
+  const routes = new Map();
+  const pendingWaits = new Map();
 
   async function llm(messages, schema, {maxTokens = 400, temperature = 0.1, timeout = 90_000, repeatPenalty} = {}) {
     const body = {model, messages, temperature, max_tokens: maxTokens, stream: false,
@@ -575,6 +578,21 @@ export function createIvrEngine({
   }
 
   // Returns {reply, status, section?}; records both turns in the history.
+  // Routing a request from the menu. The intent request (wait notice) and the
+  // turn itself route the same text, so they share one model call.
+  function menuRoute(loaded, session, text, lookup) {
+    const key = JSON.stringify([session.id, lookup, text]);
+    if (!routes.has(key)) {
+      const previous = session.history.slice(-2).map(({role, content}) => ({role, content}));
+      const followUp = session.history.at(-1)?.lookup ? session.workOrder ?? '' : '';
+      const routed = route(loaded, text, {previous, lookup, followUp});
+      routes.set(key, routed);
+      routed.catch(() => {});
+      setTimeout(() => routes.delete(key), 60_000).unref?.();
+    }
+    return routes.get(key);
+  }
+
   async function scenarioTurn(loaded, session, text, rows = []) {
     let section = loaded.sections.find(item => item.number === session.scenario);
     // Inside a scenario a bare number is an answer (a score, a quantity), so
@@ -584,9 +602,7 @@ export function createIvrEngine({
     const record = (role, content, current) => session.history.push(
       {role, content, scenario: current?.number ?? null, run: current ? session.scenarioRun : null});
     if (!section) {
-      const previous = session.history.slice(-2).map(({role, content}) => ({role, content}));
-      const followUp = session.history.at(-1)?.lookup ? session.workOrder ?? '' : '';
-      const routed = explicit ?? await route(loaded, text, {previous, lookup: Array.isArray(rows), followUp});
+      const routed = explicit ?? await menuRoute(loaded, session, text, Array.isArray(rows));
       if (routed) session.unclear = 0;
       if (routed === LOOKUP) {
         session.scenario = null;
@@ -708,6 +724,133 @@ export function createIvrEngine({
     });
   }
 
+  // Wait phrases: what a person would say while working on this kind of
+  // request (「好的，我幫您查一下庫存，請稍等。」). A few differently worded
+  // phrases per intent, written once per script by the model and cached.
+  function intentTask(loaded, id) {
+    if (id === 'lookup') return 'looking up saved work orders (查詢已儲存的工單)';
+    const section = loaded.sections.find(item => String(item.number) === id);
+    const first = role => section.turns.find(turn => turn.role === role)?.text.slice(0, 100) ?? '';
+    return `情境 ${section.number}：${section.title}. Example — caller: "${first('caller')}" AI: "${first('assistant')}"`;
+  }
+  async function waitPhrases(loaded, id) {
+    const key = sha(JSON.stringify(['waits-v2', intentTask(loaded, id)]));
+    const cached = (await cacheFile(loaded.id)).waits?.[key];
+    if (cached) return cached;
+    const flight = `${loaded.id}:${key}`;
+    if (!pendingWaits.has(flight)) pendingWaits.set(flight, (async () => {
+      const result = await llm([
+        {role: 'system', content: [
+          'Write 4 short things a friendly human phone agent says while working on this one caller request, in Traditional Chinese (zh) and the same 4 in natural English (en). All 4 are about the same task: the task of this call.',
+          'Each one has: a short acknowledgement (好的、嗯、了解、沒問題、OK), what you are doing for this call in plain general words, and a request to wait (請稍等、稍等一下、請稍候、麻煩等我一下).',
+          'Chinese: 8–18 characters, natural spoken Taiwanese Mandarin, ending with 。 — no ellipses. Every one worded differently.',
+          'Never mention details from the example: no part numbers, codes, values, names or results.',
+          'Style example for an unrelated train-ticket call: 好的，我幫您查一下班次，請稍等。 / 嗯，我看一下時刻表，稍等一下喔。',
+        ].join('\n')},
+        {role: 'user', content: intentTask(loaded, id)},
+      ], {type: 'object', properties: {
+        zh: {type: 'array', items: {type: 'string'}, minItems: 4, maxItems: 4},
+        en: {type: 'array', items: {type: 'string'}, minItems: 4, maxItems: 4},
+      }, required: ['zh', 'en']}, {maxTokens: 400, temperature: 0.7});
+      // Spoken text: no ellipses or stray spaces, one closing stop, no digits
+      // (they would be facts), and English without Chinese.
+      const clean = (items, size, han) => [...new Set(items.map(item => String(item)
+        .replace(/\.{2,}|…+/g, '').replace(/\s+/g, ' ').trim().replace(/[，,、\s]+$/, ''))
+        .filter(item => item && item.length <= size && !/\d/.test(item) && han === /\p{Script=Han}/u.test(item))
+        .map(item => /[。！？.!?]$/.test(item) ? item : item + (han ? '。' : '.')))];
+      const phrases = {zh: clean(result.zh, 24, true), en: clean(result.en, 80, false)};
+      await saveCache(loaded.id, current => ({waits: {...current.waits, [key]: phrases}}));
+      return phrases;
+    })().finally(() => pendingWaits.delete(flight)));
+    return pendingWaits.get(flight);
+  }
+  const intentIds = loaded => [...loaded.sections.map(section => String(section.number)), 'lookup'];
+
+  // What the next turn will be about, and the phrases to say while it runs.
+  // Inside a scenario no model call is needed; at the menu the routing call
+  // is shared with the turn. Phrases not yet written are left out.
+  async function intent({sessionId, text}) {
+    if (typeof sessionId !== 'string' || !sessionPattern.test(sessionId)) throw fail('Invalid sessionId');
+    if (typeof text !== 'string' || !text.trim() || text.length > 4000) throw fail('Caller text is required');
+    text = text.trim();
+    const session = await readSession(sessionId);
+    if (!session) return {intent: null, phrases: []};
+    const loaded = await script(session.scenarioId);
+    if (session.step < loaded.opening.length - 1) return {intent: 'opening', phrases: []};
+    let section = loaded.sections.find(item => item.number === session.scenario);
+    const explicit = explicitSection(text, loaded.sections, {bare: !section});
+    if (section && explicit && explicit.number !== section.number) section = undefined;
+    const routed = section ?? explicit ?? await menuRoute(loaded, session, text, true);
+    const id = routed === LOOKUP ? 'lookup' : routed ? String(routed.number) : null;
+    if (!id) return {intent: 'menu', phrases: []};
+    const ready = Promise.race([waitPhrases(loaded, id), new Promise(resolve => setTimeout(resolve, 300, undefined))]);
+    const phrases = await ready.catch(() => undefined);
+    return {intent: id, phrases: phrases?.[session.language] ?? []};
+  }
+
+  // Mock call: the caller's side of the script with fresh values for one
+  // test run. The model gives people new names; a renamed line that lost or
+  // changed a code or number keeps its original wording. Numbers are then
+  // randomized in code (same length and format, scores on the asked scale).
+  // The language digit and outbound titles are kept.
+  async function mock({scenarioId, sections: wanted, random = Math.random}) {
+    const id = scenarioId || await defaultScenarioId();
+    if (!id) throw fail('No HTML call script has been uploaded.', 404);
+    const record = await scenarios.get(id);
+    const template = record?.dataset?.template;
+    if (!Array.isArray(template)) throw fail('This scenario is not an HTML call script.', 400);
+    const base = mockCallScript(template);
+    const numbers = Array.isArray(wanted) ? new Set(wanted.map(Number)) : undefined;
+    const selected = base.sections.filter(section => !numbers || numbers.has(section.number));
+    const opening = template.find(section => !Number.isInteger(section.number));
+    const blocks = [
+      {turns: opening?.turns ?? [], lines: base.opening, fixed: base.opening.map((_, index) => index === 0 && /^\d$/.test(base.opening[0]))},
+      ...selected.map(section => ({turns: template.find(item => item.number === section.number)?.turns ?? [], lines: section.lines,
+        fixed: section.lines.map((_, index) => section.outbound && index === 0)})),
+    ];
+    const varied = [];
+    for (const block of blocks) {
+      const free = block.lines.filter((_, index) => !block.fixed[index]);
+      let renamed = free;
+      if (free.length) {
+        try {
+          const result = await llm([
+            {role: 'system', content: 'You make test data for an IVR phone call. Replace every person\'s name in the caller lines with a different realistic Taiwanese name; the same person gets the same new name. Change nothing else: keep every other word, code and number exactly. Return the same number of lines in the same order.'},
+            {role: 'user', content: JSON.stringify(free)},
+          ], {type: 'object', properties: {lines: {type: 'array', items: {type: 'string'}, minItems: free.length, maxItems: free.length}}, required: ['lines']},
+          {maxTokens: 60 + 80 * free.length, temperature: 0.9});
+          renamed = free.map((line, index) => {
+            const next = String(result.lines[index] ?? '').trim();
+            return next && lineSignature(next) === lineSignature(line) ? next : line;
+          });
+        } catch (error) { log(`[ivr-engine] Mock names unchanged: ${error.message}`); }
+      }
+      let next = 0, caller = 0;
+      const askedBefore = index => {
+        // The AI line before this caller line, for a score's scale.
+        let seen = -1, last = '';
+        for (const turn of block.turns) {
+          if (turn.role === 'caller' && ++seen === index) break;
+          if (turn.role === 'assistant') last = turn.text;
+        }
+        return last;
+      };
+      varied.push(block.lines.map((line, index) => {
+        if (block.fixed[index]) return line;
+        const callerIndex = caller++;
+        const scaleText = block.turns.filter(turn => turn.role === 'assistant').map(turn => turn.text).join(' ');
+        // A bare number is a score only when it lies on a scale the AI gave.
+        const scale = /^\d+$/.test(line) ? scoreScale(askedBefore(callerIndex)) ?? scoreScale(scaleText) : undefined;
+        const onScale = scale && Number(line) >= scale[0] && Number(line) <= scale[1] ? scale : undefined;
+        return varyNumbers(renamed[next++], {scale: onScale, random});
+      }));
+    }
+    return {
+      opening: varied[0],
+      sections: selected.map((section, index) => ({...section, lines: varied[index + 1]})),
+    };
+  }
+
   // Data Table column names for the opening questions (ASCII snake_case, as
   // n8n requires), named once per script by the model and cached.
   async function openingColumns(loaded) {
@@ -788,6 +931,8 @@ export function createIvrEngine({
     if (body?.end === true) return end(body);
     if (body?.records === true) return records(body);
     if (body?.call === true) return call(body);
+    if (body?.intent === true) return intent(body);
+    if (body?.mock === true) return mock({scenarioId: body.scenarioId, sections: body.sections});
     if (body?.start === true || typeof body?.text !== 'string' || !body.text.trim()) return start(body ?? {});
     return turn(body);
   }
@@ -796,10 +941,14 @@ export function createIvrEngine({
   async function warm() {
     for (const item of await scenarios.list()) {
       if (!item.simulation) continue;
-      try { warmFigures(await script(item.id)); }
+      try {
+        const loaded = await script(item.id);
+        warmFigures(loaded);
+        for (const id of intentIds(loaded)) await waitPhrases(loaded, id);
+      }
       catch (error) { log(`[ivr-engine] Cannot prepare ${item.name}: ${error.message}`); }
     }
   }
 
-  return {start, turn, end, records, call, handle, script, figureText, warm};
+  return {start, turn, end, records, call, intent, mock, handle, script, figureText, warm};
 }

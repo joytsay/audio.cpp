@@ -49,10 +49,13 @@ const fakeFetch = async (url, init) => {
   if (properties.option) content = {option: /最新|最舊|最早|上一張|它的/.test(text) ? 'lookup' : /庫存/.test(text) ? '3' : /回報/.test(text) ? '2' : 'none'};
   else if (properties.which) content = {which: /最舊|最早/.test(text) ? 'oldest' : /GB\d+/.test(text) ? 'number' : /它/.test(text) ? 'same' : 'latest', number: text.match(/GB\d+/)?.[0] ?? '',
     field: /維修內容/.test(text) ? 'work' : /設備/.test(text) ? 'equipment' : 'summary'};
+  else if (properties.zh) content = {zh: ['好的，我幫您查一下庫存，請稍等。', '嗯，我看一下系統，稍等喔', '了解，我查查看，請稍候。', '好的，我查一下，請稍等。'],
+    en: ['Sure, let me check the stock for you.', 'Okay, one moment while I look.', 'Got it, checking now.', 'Sure, let me check the stock for you.']};
   else if (properties.line) content = scenarioReply(body.messages);
   else if (properties.date) content = {date: '2026-06-02', reference: '', title: '測試工單', equipment: 'F8A-AHU-07', details: '更換強排FAN 3個', notes: '', test_result: '正常'};
   else if (properties.items && /database column/.test(body.messages[0].content)) content = {items: ['language', 'phone_holder_name', 'employee_id_last3', 'Service Request']};
   else if (properties.items) content = {items: JSON.parse(text).map(item => `EN:${item}`)};
+  else if (properties.lines) content = {lines: JSON.parse(text).map(item => item.replace('王怡文', '李小華').replace('F15P1H4K', 'X'))};
   else content = '| 料件 | 實際可用量 |\n| SKR9FAN2F23 | 7 |';
   return new Response(JSON.stringify({choices: [{message: {content: typeof content === 'string' ? content : JSON.stringify(content)}}]}),
     {status: 200, headers: {'Content-Type': 'application/json'}});
@@ -116,6 +119,12 @@ const store = createKnowledgeStore({fetchImpl: fakeFetch});
 const encode = (name, bytes) => ({name, data: Buffer.from(bytes).toString('base64')});
 const added = await store.addScenario({fileMode: true, files: [encode('情境模擬_test.html', html)], attachments: [encode('table.png', png)]});
 const scenarioId = added.scenario.id;
+await test('the scenario lists the caller side of the script for the demo mock call', () => {
+  const {mockCall} = added.scenario;
+  assert.deepEqual(mockCall.opening, ['1', '王怡文', '847'], 'language digit from the prompt, then the answers without the menu answer');
+  assert.deepEqual(mockCall.sections[0], {number: 1, title: 'Call Out系統主動通知派工', outbound: true, lines: ['Call Out系統主動通知派工']});
+  assert.deepEqual(mockCall.sections[1].lines, ['我要回報工單，F15P1H4K-GEX-EF-03 更換強排FAN 2個。F15P1H4K-GEX-EF-04 更換強排FAN 4個。', '正確，起機測試正常。']);
+});
 await store.saveScenarioImport(scenarioId, {tables: [], ready: true});
 const listed = (await store.listScenarios()).find(item => item.id === scenarioId);
 
@@ -257,6 +266,45 @@ await test('questions about saved work orders are answered from the Data Table r
   await say('lookup-1', '我要回報工單，F8A-AHU-07 更換強排FAN 3個。');
   assert.equal((await store.ivr({sessionId: 'lookup-1', text: '我想要查詢最新的工單。', work_orders: rows})).stage, 'lookup');
   await assert.rejects(store.ivr({sessionId: 'lookup-1', text: '最新', work_orders: 'x'}), /Invalid work_orders/);
+});
+
+await test('the intent request names the scenario and offers varied wait phrases, sharing the routing call', async () => {
+  await openCall('intent-1');
+  assert.deepEqual(await store.ivr({sessionId: 'intent-1', intent: true, text: '王怡文'}), {intent: 'menu', phrases: []}, 'an unclear request needs no notice');
+  const routed = () => calls.filter(call => call.kind === 'option').length;
+  const before = routed();
+  const text = '我想查詢風扇SKR9FAN2F23的庫存。';
+  const [peek, reply] = await Promise.all([store.ivr({sessionId: 'intent-1', intent: true, text}), say('intent-1', text)]);
+  assert.equal(peek.intent, '3');
+  assert.deepEqual(peek.phrases, ['好的，我幫您查一下庫存，請稍等。', '嗯，我看一下系統，稍等喔。', '了解，我查查看，請稍候。', '好的，我查一下，請稍等。'],
+    'phrases end with punctuation and repeat none');
+  assert.equal(reply.scenario.number, 3);
+  assert.equal(routed() - before, 1, 'the turn reuses the routing the intent request started');
+  const inside = await store.ivr({sessionId: 'intent-1', intent: true, text: '那另一個呢'});
+  assert.equal(inside.intent, '3', 'inside a scenario the intent is the current one, with no model call');
+  assert.equal(routed() - before, 1);
+});
+
+await test('a mock call varies names and numbers but keeps codes, choices and scales', async () => {
+  const {varyNumbers, scoreScale} = await import('./mock-call.mjs');
+  let seed = 1;
+  const random = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  const line = '我要回報工單，2026年6月2日下午14:00 F15P1H4K-GEX-EF-03 更換強排FAN 2個，PF753 Fault Code：010，電容值：6460MF，SN：14778725';
+  const varied = varyNumbers(line, {random});
+  for (const kept of ['F15P1H4K-GEX-EF-03', 'PF753', 'Fault Code：010']) assert.ok(varied.includes(kept), kept);
+  assert.match(varied, /^我要回報工單，20\d\d年([1-9]|1[0-2])月([1-9]|1\d|2[0-8])日下午1[2-7]:(00|15|30|45) /);
+  assert.match(varied, /FAN \d個，.*電容值：\d{4}MF，SN：\d{8}$/);
+  assert.notEqual(varied.match(/SN：(\d+)/)[1], '14778725');
+  for (let i = 0; i < 20; i++) assert.match(varyNumbers('5', {scale: scoreScale('以1-5為評分'), random}), /^[1-4]$/);
+  for (let i = 0; i < 30; i++) assert.match(varyNumbers('FAN 2個', {random}), /^FAN [1-9]個$/, 'a quantity never becomes 0');
+  const result = await store.ivr({mock: true, scenarioId, sections: [1, 2]});
+  assert.equal(result.opening[0], '1', 'the language choice is kept');
+  assert.equal(result.opening[1], '李小華', 'names come from the model');
+  assert.notEqual(result.opening[2], '847');
+  assert.match(result.opening[2], /^\d{3}$/);
+  assert.deepEqual(result.sections.map(section => section.number), [1, 2]);
+  assert.equal(result.sections[0].lines[0], 'Call Out系統主動通知派工', 'an outbound title selects its 情境 unchanged');
+  assert.ok(result.sections[1].lines[0].includes('F15P1H4K-GEX-EF-03'));
 });
 
 await test('English callers hear the translated opening', async () => {

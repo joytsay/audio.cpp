@@ -13,9 +13,9 @@
       ],
       "parameters": {
         "width": 2280,
-        "height": 500,
+        "height": 900,
         "color": 5,
-        "content": "## IVR call\nThe knowledge service runs the call from the uploaded HTML call script (opening, 情境 routing, dialogue, session memory). Saved work orders are passed in so callers can ask about them. The reply is returned first; a completed work order is then extracted and upserted into the work_orders Data Table."
+        "content": "## IVR call\nThe knowledge service runs the call from the uploaded HTML call script (opening, 情境 routing, dialogue, session memory). Saved work orders are passed in so callers can ask about them. The reply is returned first; a completed work order is then extracted and upserted into the work_orders Data Table, and the call (opening answers, conversation, duration) into call_sessions.\n\n**ivr-intent** (bottom) answers what a slow turn is about, with wait phrases such as 「好的，我幫您查一下庫存，請稍等。」.\n\n**ivr-mock-call** (bottom) returns the script's caller lines with new names and numbers for the demo's mock call."
       }
     },
     {
@@ -1196,6 +1196,110 @@
         },
         "options": {}
       }
+    },
+    {
+      "id": "ivr-intent-input",
+      "name": "IVR Intent Input",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        80,
+        560
+      ],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ivr-intent",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "webhookId": "ivr-intent"
+    },
+    {
+      "id": "ivr-intent-engine",
+      "name": "What is the caller asking?",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        300,
+        560
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://knowledge:8085/ivr",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ {intent:true,sessionId:$json.body.sessionId,text:$json.body.text} }}",
+        "options": {
+          "timeout": 30000
+        }
+      }
+    },
+    {
+      "id": "ivr-intent-output",
+      "name": "IVR Intent Output",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        520,
+        560
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "ivr-mock-input",
+      "name": "Mock Call Input",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        80,
+        760
+      ],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ivr-mock-call",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "webhookId": "ivr-mock-call"
+    },
+    {
+      "id": "ivr-mock-vary",
+      "name": "Vary the caller script",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        300,
+        760
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://knowledge:8085/ivr",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ {mock:true,scenarioId:$json.body.scenarioId,sections:$json.body.sections} }}",
+        "options": {
+          "timeout": 180000
+        }
+      }
+    },
+    {
+      "id": "ivr-mock-output",
+      "name": "Mock Call Output",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        520,
+        760
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {}
+      }
     }
   ],
   "connections": {
@@ -1716,6 +1820,50 @@
           }
         ]
       ]
+    },
+    "IVR Intent Input": {
+      "main": [
+        [
+          {
+            "node": "What is the caller asking?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "What is the caller asking?": {
+      "main": [
+        [
+          {
+            "node": "IVR Intent Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mock Call Input": {
+      "main": [
+        [
+          {
+            "node": "Vary the caller script",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Vary the caller script": {
+      "main": [
+        [
+          {
+            "node": "Mock Call Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     }
   },
   "active": false,
@@ -1726,6 +1874,6 @@
   "pinData": {},
   "tags": [],
   "meta": {
-    "ivrWorkflowRevision": 32
+    "ivrWorkflowRevision": 34
   }
 }

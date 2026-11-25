@@ -15,6 +15,8 @@ behaviour; nothing about the scenarios is hard-coded.
 | `{sessionId, start: true, scenarioId?}` | Starts a call; replies with the script's first opening prompt. |
 | `{sessionId, text, scenarioId?, work_orders?}` | Answers one caller turn. `work_orders`: saved rows, newest first (n8n sends them). |
 | `{sessionId, records: true}` | Extracts the work orders completed since the last request. |
+| `{sessionId, text, intent: true}` | Says what that turn will be about (`intent`: the 情境 number, `lookup`, `menu` or `opening`) and its wait phrases (see [wait notice](../n8n/README.md#wait-notice)). |
+| `{mock: true, scenarioId?, sections?}` | The caller's side of the script for the demo's mock call, with new names (model) and new numbers of the same length and format (code); part, model and fault codes, the language digit and outbound titles are kept, and scores stay on the asked scale. |
 | `{sessionId, call: true}` | Returns `{rows: [call_sessions row], columns}` for the call so far (see [call sessions](../n8n/README.md#call-sessions)). |
 | `{sessionId, end: true}` | Discards the call. |
 

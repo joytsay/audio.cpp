@@ -58,6 +58,23 @@ by the model when a script is first used (cached with the script); a name that i
 back to `opening_N`. **Ensure call_sessions columns** creates the table and any column a new
 script needs.
 
+## Wait notice
+
+When a caller turn is still running after the **Wait notice** delay (left panel, below ASR;
+default 2 seconds, shared by browser and SIP), the caller hears what is being done, e.g.
+「好的，我幫您查庫存，請稍等。」 or 「嗯，我查一下手冊，稍等一下喔。」.
+
+Alongside each turn the client posts `{sessionId, text}` to `POST /webhook/ivr-agent`'s sibling
+`POST /webhook/ivr-intent` (**IVR Intent Input → What is the caller asking? → IVR Intent Output**).
+The engine answers which 情境 the turn is about — at once inside a scenario, otherwise with the
+routing call the turn itself then reuses — and returns that scenario's wait phrases. The model
+writes four differently worded phrases per scenario (and for saved work-order lookups), in
+Chinese and English, once per script; they are cached and contain no facts. Consecutive notices
+in one call never repeat the same phrase. The browser synthesizes the phrase as soon as it is
+known, so it plays without delay when due; SIP speaks it as the turn's `progress` event. A turn
+that answers before the delay is not announced, and the notice is not part of the dialogue
+history.
+
 ## Browser, SIP and deployment
 
 VAD/ASR and TTS/caller audio remain in audio.cpp. The SIP bridge starts the call script with the

@@ -193,6 +193,9 @@ export function createDialogueServer({ dialogue, readGreetingCsv, normalizeTrans
         if (!dialogue) throw new Error('IVR dialogue client is unavailable');
         engine = await dialogue({sessionId: body.sessionId, text: body.text, scenarioId: call?.scenarioId}, signal, {
           workflowUrl,
+          // The SIP pipeline speaks the first progress event of a turn.
+          noticeDelaySeconds: saved.lookup_notice_delay_seconds,
+          onNotice: text => send({type: 'progress', text}),
           onWorkflow: state => send({ type: 'event', event: `N8N_WORKFLOW_${state.toUpperCase()}`, summary: 'GeoVision · Workflow' }),
         });
         // Only calls that started a call script stay on it; a call that reached

@@ -35,6 +35,7 @@ export interface DemoSettings {
   llm_model?: string;
   dialogue_source?: "prompt.csv" | "n8n";
   sip_scenario_id?: string;
+  lookup_notice_delay_seconds?: number;
   tts_streaming?: boolean;
   tts_playback_rate?: number;
   tts_voice_id?: string;

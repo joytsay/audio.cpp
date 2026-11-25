@@ -5,6 +5,7 @@ import {inflateRawSync} from 'node:zlib';
 import {qaDocument} from './qa.mjs';
 import {dialogueTemplate,fileDataset,scenarioExamples,scenarioFileName} from './scenario-files.mjs';
 import {imageType} from './rag-assets.mjs';
+import {mockCallScript} from './mock-call.mjs';
 
 const maxBytes=10*1024*1024;
 const extensions=new Set(['.pdf','.docx','.xlsx','.csv','.txt','.md','.html','.htm']);
@@ -110,7 +111,7 @@ export function createScenarioStore({root=path.join(process.env.KNOWLEDGE_DATA_R
    (dataset?.template??[]).some(section=>Number.isInteger(section.number)&&section.turns?.length);
   return {
    ...record,qaCount:documents.length,examples:scenarioExamples(record.name,dataset,documents),
-   ...(simulation?{simulation:true}:{}),
+   ...(simulation?{simulation:true,mockCall:mockCallScript(dataset.template)}:{}),
    ...(dataset?{tables:dataset.tables.map(({name,sheet,records})=>({name,sheet,rowCount:records.length}))}:{}),
   };
  };

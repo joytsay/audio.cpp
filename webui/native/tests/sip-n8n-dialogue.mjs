@@ -12,7 +12,7 @@ import { createDialogueServer, loadDialogue, loadGreetingReader } from '../../..
 const directory = fileURLToPath(new URL('../src/lib/', import.meta.url));
 const [dialogue, readGreetingCsv] = await Promise.all([loadDialogue(directory), loadGreetingReader(directory)]);
 let releaseLookup,holdLookup=false;
-let ttsStreaming=false,endSilenceMs=2000;
+let noticeDelaySeconds,intentRequests=[],ttsStreaming=false,endSilenceMs=2000;
 const ttsLoads=[];
 let ttsFamily='zipvoice',voiceId;
 let failTtsLoad=false;
@@ -28,7 +28,7 @@ const originalFetch = globalThis.fetch;
 const query = '如何確認維修起機測試流程？';
 const mockFetch = async (url, options = {}) => {
   url = String(url); options.signal?.throwIfAborted();
-  if (url === 'http://audio.test/v1/ui/demo-settings') return Response.json({ settings: { dialogue_source: source, llm_model: 'selected-demo-llm',tts_streaming:ttsStreaming,vad_end_silence_ms:endSilenceMs,tts_model_id:'zipvoice-test',tts_model_family:ttsFamily,tts_model_path:`/models/${ttsFamily}.gguf`,tts_model_task:ttsFamily==='bluemagpie'?'tts':'clon',tts_voice_id:voiceId, sip_scenario_id: sipScenarioId, asr_postprocess_enabled: asrPostprocessEnabled, asr_postprocess_model: asrModel } });
+  if (url === 'http://audio.test/v1/ui/demo-settings') return Response.json({ settings: { dialogue_source: source, llm_model: 'selected-demo-llm', lookup_notice_delay_seconds: noticeDelaySeconds,tts_streaming:ttsStreaming,vad_end_silence_ms:endSilenceMs,tts_model_id:'zipvoice-test',tts_model_family:ttsFamily,tts_model_path:`/models/${ttsFamily}.gguf`,tts_model_task:ttsFamily==='bluemagpie'?'tts':'clon',tts_voice_id:voiceId, sip_scenario_id: sipScenarioId, asr_postprocess_enabled: asrPostprocessEnabled, asr_postprocess_model: asrModel } });
   if (url === 'http://correction.test/v1/chat/completions' ||
       (url === 'http://llm.test/v1/chat/completions?autoload=true' && JSON.parse(options.body).model === 'alternate-model')) {
     const {model, messages}=JSON.parse(options.body);
@@ -45,6 +45,11 @@ const mockFetch = async (url, options = {}) => {
   if (url === 'http://audio.test/v1/ui/voices') return Response.json({voices:[{id:'my-clone',audio:'UklGRg==',transcript:''}]});
   if (url === 'http://llm.test/models') { modelDiscovery++; return Response.json({ data: [{ id: 'selected-demo-llm', loaded: modelReady, status: { value: modelReady ? 'loaded' : 'unloaded' } }] }); }
   if (url === 'http://llm.test/models/load') { modelLoads++; modelReady = true; return Response.json({}); }
+  if (url === 'http://n8n.test/webhook/ivr-intent') {
+    const body = JSON.parse(options.body); intentRequests.push(body);
+    assert.deepEqual(Object.keys(body).sort(), ['sessionId','text']);
+    return Response.json({intent:'5',phrases:['好的，我幫您查一下SOP，請稍等。']});
+  }
   if (url === 'http://n8n.test/webhook/ivr-agent') {
     // The IVR engine contract: {sessionId, text|start, scenarioId?} → reply + call state.
     const body = JSON.parse(options.body);
@@ -156,6 +161,7 @@ try {
   const events = await turn();
   assert.deepEqual(events[0], { type: 'configuration', source: 'n8n', model: 'selected-demo-llm' });
   assert.ok(events.some(e => e.event === 'N8N_WORKFLOW_STARTED'));
+  assert.ok(!events.some(e=>e.type==='progress'),'a fast turn has no notice');
   assert.equal(events.at(-1).reply, '參考資料中的維修流程。','script replies are not re-normalized');
   assert.equal(toolCalls.length, 1);
   assert.equal(requests.length,0,'SIP does not run a parallel LLM loop for the IVR engine');
@@ -177,13 +183,21 @@ try {
   assert.match(failed.at(-1).message, /IVR engine unavailable/);
   assert.ok(!failed.some(e => e.type === 'reply'), 'never silently replace n8n with prompt-only output');
   failTool=false;holdLookup=true;
-  // A slow turn sends no wait notice; the reply arrives when the engine answers.
+  // A slow turn speaks what it is doing after the saved delay, before the reply.
+  noticeDelaySeconds=1;
+  const lookupStarted=Date.now();
   const streaming=await originalFetch(`${base}/dialogue`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(input)});
-  await new Promise(resolve=>setTimeout(resolve,1200));
-  releaseLookup();
-  const slow=await streaming.text();
-  assert.ok(!slow.includes('"type":"progress"')&&!slow.includes('查詢中'),'no wait notice');
-  assert.ok(slow.includes('"type":"reply"'));holdLookup=false;
+  const reader=streaming.body.getReader();let before='';
+  while(!before.includes('"type":"progress"')){
+   const part=await reader.read();assert.equal(part.done,false);before+=new TextDecoder().decode(part.value);
+  }
+  assert.ok(Date.now()-lookupStarted>=900,'the notice waits the saved delay');
+  assert.ok(before.includes('好的，我幫您查一下SOP，請稍等。'),'the notice says what is being done');
+  assert.ok(!before.includes('"type":"reply"'));
+  assert.deepEqual(intentRequests.at(-1),{sessionId:'same-sip-call',text:query});
+  releaseLookup();let remaining='';
+  for(;;){const part=await reader.read();if(part.done)break;remaining+=new TextDecoder().decode(part.value);}
+  assert.ok(remaining.includes('"type":"reply"'));holdLookup=false;noticeDelaySeconds=undefined;
   // A call script starts with the welcome greeting and keeps answering that call,
   // even after the saved dialogue source changes.
   greetingsCsv='greeting\n"您好，這裡是 GeoVision IVR，請問需要什麼協助？"\n';
@@ -212,7 +226,7 @@ try {
   sipScenarioId='c'.repeat(24);
   await originalFetch(base+'/tts-config',{method:'POST',body:JSON.stringify({model:'zipvoice',welcomeGreeting:true,sessionId:'chosen-script'})});
   assert.deepEqual(engineStarts.at(-1),{sessionId:'chosen-script',start:true,scenarioId:'c'.repeat(24)});
-  console.log('PASS: shared IVR engine client, call-script opening with the welcome greeting, saved source/model, same-call source switching, no wait notice, streamed events and explicit errors');
+  console.log('PASS: shared IVR engine client, call-script opening with the welcome greeting, saved source/model, same-call source switching, intent wait notice, streamed events and explicit errors');
 } finally {
   globalThis.fetch = originalFetch;
   await new Promise(resolve => server.close(resolve));
