@@ -56,6 +56,9 @@ struct VoxCPM1Result {
 };
 
 struct VoxCPM1StreamingChunk {
+  // Patches to decode and emit. A first chunk with decode_patches == 0 carries
+  // only decoder context (the prompt's last patches): decode it as history,
+  // never as audio, exactly like the offline decode_trim_patches.
   std::vector<float> decode_features;
   int64_t decode_patches = 0;
   int64_t generated_patches = 0;

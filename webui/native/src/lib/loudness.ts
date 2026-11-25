@@ -40,15 +40,21 @@ export function normalizeBuffer(buffer: AudioBuffer, volume = DEFAULT_TTS_VOLUME
   return buffer;
 }
 
-// A limiter for live playback, so a raised voice never clips.
-export function createLimiter(ctx: BaseAudioContext): DynamicsCompressorNode {
-  const limiter = ctx.createDynamicsCompressor();
-  limiter.threshold.value = -3;
-  limiter.knee.value = 3;
-  limiter.ratio.value = 20;
-  limiter.attack.value = 0.002;
-  limiter.release.value = 0.12;
-  return limiter;
+// The same soft limiter for live playback, as a memoryless curve. A dynamics
+// compressor (fast attack) modulates the gain inside each waveform period;
+// at the 14.4–16 kHz speech context rate that folds back as a high-pitched
+// whine on loud, long speech. The curve is oversampled for the same reason.
+const LIMIT_RANGE = 4; // Inputs up to ±4 are shaped; beyond that the curve holds at ±1.
+export function createLimiter(ctx: BaseAudioContext) {
+  const input = ctx.createGain();
+  input.gain.value = 1 / LIMIT_RANGE;
+  const shaper = ctx.createWaveShaper();
+  const curve = new Float32Array(8193);
+  for (let i = 0; i < curve.length; i++) curve[i] = limit(LIMIT_RANGE * (2 * i / (curve.length - 1) - 1));
+  shaper.curve = curve;
+  shaper.oversample = '4x';
+  input.connect(shaper);
+  return {input, output: shaper as AudioNode, disconnect() { input.disconnect(); shaper.disconnect(); }};
 }
 
 // Streamed speech arrives in pieces, so its level is measured as it plays:
@@ -63,8 +69,8 @@ export function createStreamLeveler(ctx: AudioContext, output: AudioNode, voiceK
   const limiter = createLimiter(ctx);
   input.connect(meter);
   input.connect(gain);
-  gain.connect(limiter);
-  limiter.connect(output);
+  gain.connect(limiter.input);
+  limiter.output.connect(output);
   const scale = volumeGain(volume);
   let level = streamGains.get(voiceKey) ?? 1;
   gain.gain.value = level * scale;

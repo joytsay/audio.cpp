@@ -1669,6 +1669,21 @@ private:
       append_patch(result.decode_features, (*it)->feature, patch_elems);
       ++result.decode_patches;
     }
+    // Streaming decodes the same context ahead of the first patch. Without
+    // it the AudioVAE starts from silence and every stream opens with a
+    // short hum the offline decode (which trims this context) never has.
+    if ((streaming_chunks != nullptr || streaming_chunk_callback) &&
+        !context_rows.empty()) {
+      VoxCPM1StreamingChunk context;
+      context.decode_features = result.decode_features;
+      context.decode_patches = 0;
+      if (streaming_chunk_callback) {
+        streaming_chunk_callback(context);
+      }
+      if (streaming_chunks != nullptr) {
+        streaming_chunks->push_back(std::move(context));
+      }
+    }
     uint64_t patch_noise_start = noise_start_index;
     for (int64_t index = 0; index < max_tokens; ++index) {
       const auto projected =
