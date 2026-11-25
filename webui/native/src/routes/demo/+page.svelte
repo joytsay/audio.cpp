@@ -24,6 +24,7 @@
     Phone,
     PhoneOff,
     Send,
+    Play,
     Trash2,
     PanelLeftClose,
     PanelLeftOpen,
@@ -35,6 +36,7 @@
   import logo from "../../../static/logo_cloud.svg?raw";
   import "../../app.css";
   import { browserDecodeToWav, encodePcm16Wav } from "$lib/audio";
+  import { DEFAULT_TTS_VOLUME, createStreamLeveler, normalizeBuffer } from "$lib/loudness";
   import { readGreetingCsv, writeGreetingCsv } from "$lib/greetings";
   import { recognitionContext } from "$lib/asr-context";
   import { correctAsrTranscript, DEFAULT_ASR_POSTPROCESS_LABEL, DEFAULT_ASR_POSTPROCESS_MODEL } from "$lib/asr-postprocess";
@@ -899,6 +901,17 @@
   let hotwords = "",
     savingHotwords = false,
     hotwordsStatus = "";
+  // TTS volume 1–10 (5 = every voice at the same normalized level), kept in
+  // this browser.
+  let ttsVolume = DEFAULT_TTS_VOLUME;
+  try {
+    const stored = Number(localStorage.getItem("demo.ttsVolume"));
+    if (Number.isInteger(stored) && stored >= 1 && stored <= 10) ttsVolume = stored;
+  } catch { /* No browser storage: keep the default. */ }
+  function saveTtsVolume() {
+    ttsVolume = Math.min(10, Math.max(1, Math.round(Number(ttsVolume) || DEFAULT_TTS_VOLUME)));
+    try { localStorage.setItem("demo.ttsVolume", String(ttsVolume)); } catch { /* Not persisted. */ }
+  }
   // Wait notice: spoken when an IVR turn is still running after this delay.
   let noticeDelaySeconds = DEFAULT_NOTICE_DELAY_SECONDS, savedNoticeDelaySeconds = DEFAULT_NOTICE_DELAY_SECONDS;
   async function saveNoticeDelay() {
@@ -1770,10 +1783,12 @@
     streamAnalyser.fftSize = 512;
     streamAnalyser.connect(ctx.destination);
     analyser = streamAnalyser;
+    // Streamed speech is levelled as it plays (it cannot be measured first).
+    const leveler = createStreamLeveler(ctx, streamAnalyser, JSON.stringify([ttsKey, body.voice_ref ? body.reference_text : body.voice]), ttsVolume);
     let began = false;
     try {
       return await playSpeechStream(ctx, streamingSpeechBody(body), signal, {
-        destination: streamAnalyser,
+        destination: leveler.input,
         leadInSeconds,
         bufferSeconds: selectedTts?.family === "voxcpm1" ? 0.32 : 0,
               continuousPcm: selectedTts?.family === "voxcpm1",
@@ -1807,6 +1822,7 @@
           ),
       });
     } finally {
+      leveler.stop();
       streamAnalyser.disconnect();
       if (analyser === streamAnalyser) analyser = null;
       if (generation === epoch) {
@@ -1923,7 +1939,7 @@
     if (generation !== epoch || !ctx || signal?.aborted) return null;
     await ctx.resume();
     if (generation !== epoch || context !== ctx || signal?.aborted) return null;
-    const buffer = await ctx.decodeAudioData(await output.arrayBuffer());
+    const buffer = normalizeBuffer(await ctx.decodeAudioData(await output.arrayBuffer()), ttsVolume);
     if (generation !== epoch || context !== ctx || signal?.aborted) return null;
     const node = ctx.createBufferSource();
     node.playbackRate.value = ttsPlaybackRate;
@@ -2306,7 +2322,11 @@
       const builtin = caller?.id.startsWith("preset-") ? caller.id.slice(7) : undefined;
       body = builtin && (selectedTts?.builtin_voices ?? []).includes(builtin) ? {model: id, input: line, response_format: "wav", voice: builtin} : noticeBody(line, id);
     }
-    return (await synthesizeSpeech(body, signal)).audio;
+    const clip = (await synthesizeSpeech(body, signal)).audio;
+    // The bubble's audio element cannot amplify, so the clip itself is levelled.
+    const decoder = new AudioContext();
+    try { return encodePcm16Wav(normalizeBuffer(await decoder.decodeAudioData(await clip.arrayBuffer()), ttsVolume)); }
+    finally { await decoder.close(); }
   }
   // Speak one caller line with the caller voice and send it as the caller's
   // turn; resolves after the reply has been spoken.
@@ -2337,7 +2357,17 @@
         await sendCallerLine(line.text, `Q${index + 1} · ${line.label}`);
         if (error) break;
       }
-      if (token === mockToken) mockStatus = error ? `Mock call stopped: ${error}` : !connected ? "Mock call ended with the call" : `Mock call complete · ${lines.length} lines`;
+      // After the last reply has been spoken, stop the scenario as if Stop
+      // scenario were pressed; the call itself stays connected.
+      if (token === mockToken && !error && connected) {
+        await whenIdle(token);
+        if (token === mockToken) {
+          stopScenario();
+          mockStatus = `Mock call complete · ${lines.length} lines`;
+        }
+        return;
+      }
+      if (token === mockToken) mockStatus = error ? `Mock call stopped: ${error}` : "Mock call ended with the call";
     } catch (cause) {
       if (token === mockToken) { fail(cause); mockStatus = `Mock call stopped: ${error}`; }
     } finally {
@@ -3181,6 +3211,18 @@
               bind:value={ttsPlaybackRate}
             /></label
           >
+          <label class="tts-speed"
+            >Volume<input
+              aria-label="TTS volume"
+              title="1–10 · 5 plays every voice at the same normalized level"
+              type="number"
+              min="1"
+              max="10"
+              step="1"
+              bind:value={ttsVolume}
+              on:change={saveTtsVolume}
+            /></label
+          >
         </div>
         <small
           >{ttsSupportsStreaming
@@ -3716,10 +3758,10 @@
               </div>
             {/if}
             <div class="scenario-actions">
-              {#if mockCall}
-                <button type="button" disabled={mockRunning || useSip || busy || starting || knowledgeDeleting} on:click={runMockCall}>{mockRunning ? "Mock call running…" : "Run mock call"}</button>
-              {/if}
               <button title="Remove this scenario and its imported data" disabled={knowledgeDeleting || knowledgeUploading || !!simulation || mockRunning} on:click={removeSelectedKnowledgeScenario}><Trash2 size={14} /> {knowledgeDeleting ? "Removing scenario…" : "Remove scenario"}</button>
+              {#if mockCall}
+                <button type="button" disabled={mockRunning || useSip || busy || starting || knowledgeDeleting} on:click={runMockCall}><Play size={14} /> {mockRunning ? "Mock call running…" : "Run mock call"}</button>
+              {/if}
             </div>
             <p role="status">{knowledgeStatus}</p>
           {:else if isAudioScenario}
