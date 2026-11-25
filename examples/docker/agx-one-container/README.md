@@ -578,8 +578,9 @@ and queued audio. Streaming is off by default.
 
 The demo ASR context loads from `hotwords.csv`. **Save hotwords.csv** writes the
 one-column `context` CSV back to the server; its Docker bind mount preserves edits
-across container restarts. `hotword.csv` remains available for the existing SIP
-and other legacy consumers. Context only affects ASR models that support it.
+across container restarts. SIP calls use the same file (re-read on every call), so
+browser and SIP recognition share one hotword list; `hotword.csv` remains for other
+legacy consumers. Context only affects ASR models that support it.
 
 **Save model settings** in the demo sidebar persists global defaults to
 `ui-settings/demo-settings.yaml` on the host (`/app/ui-settings/demo-settings.yaml`

@@ -260,7 +260,8 @@ services:
       VAD_MODEL: ${SIP_VAD_MODEL:-silero-vad}
       STT_MODEL: ${SIP_STT_MODEL:-qwen3-asr}
       STT_LANGUAGE: ${SIP_STT_LANGUAGE:-}
-      STT_HOTWORDS_FILE: /app/hotword.csv
+      # The demo's ASR hotwords / context (left panel), re-read on every call.
+      STT_HOTWORDS_FILE: /app/hotwords.csv
       SYSTEM_PROMPT_FILE: /app/prompt.csv
       SIP_USE_RAG: ${SIP_USE_RAG:-0}
       TTS_MODEL: ${SIP_TTS_MODEL:-zipvoice}
@@ -268,7 +269,7 @@ services:
       IVRTTS_VOICE_DIR: /opt/sip/share/voices
     volumes:
       - audiocpp-sip-data:/app/sip-data
-      - ../../../hotword.csv:/app/hotword.csv:ro
+      - ../../../hotwords.csv:/app/hotwords.csv:ro
       - ../../../prompt.csv:/app/prompt.csv:ro
       - ../../../.devops/sip-entrypoint.sh:/app/sip-entrypoint.sh:ro
 

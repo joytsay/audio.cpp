@@ -656,7 +656,12 @@
   $: canSendText = (useSip ? sipCanSend : connected) && !busy && !detecting && !scenarioRunning;
   $: scenarioConnected = useSip ? sipConnected : connected;
   $: scenarioCanCall = useSip ? sipCanSend : connected || canCall;
-  $: displayMessages = (useSip ? sipLive.status?.messages || [] : messages) as DemoMessage[];
+  // SIP replies arrive whole from the call monitor; show them one sentence
+  // per bubble, like browser calls.
+  $: displayMessages = (useSip
+    ? (sipLive.status?.messages || []).flatMap((message: DemoMessage) =>
+        message.role === "assistant" && message.content ? assistantBubbles(message.content) : [message])
+    : messages) as DemoMessage[];
   $: sipStatus = !sipLive.live ? (useSip ? "Waiting for SIP worker" : "SIP disabled")
     : sipLive.status?.stage || "Waiting for incoming call";
   function sipBars(values: number[] | undefined) {
@@ -1521,7 +1526,7 @@
         );
       }
       if (signal.aborted || generation !== epoch) return;
-      if (useSip) { await sendSipText(normalizeTranscript(text, hotwords), signal); return; }
+      if (useSip) { await sendSipText(options.scripted ? text : normalizeTranscript(text, hotwords), signal); return; }
       const textLength = [...text].length;
       if (!options.scripted && useAsrPostprocess && textLength >= 3 && textLength <= 1200 && text.trim()) {
         const correctionStarted = performance.now();
@@ -2293,7 +2298,7 @@
   async function whenIdle(token: number) {
     let quiet = 0;
     while (token === mockToken && quiet < 3) {
-      quiet = connected && !starting && !busy && !speaking ? quiet + 1 : 0;
+      quiet = (useSip ? sipCanSend : connected && !starting && !speaking) && !busy ? quiet + 1 : 0;
       await new Promise(resolve => setTimeout(resolve, 150));
     }
   }
@@ -2331,14 +2336,18 @@
   // Speak one caller line with the caller voice and send it as the caller's
   // turn; resolves after the reply has been spoken.
   async function sendCallerLine(text: string, label: string) {
+    // In SIP mode the line goes into the live phone call as text; the reply
+    // is spoken on the phone and the turn ends when the call listens again.
+    if (useSip) return respond(text, undefined, epoch, {scripted: true});
     const speech = await mockCallerSpeech(text, controller?.signal ?? new AbortController().signal);
     await respond(text, speech, epoch, {playInputAudio: !!speech, audioName: `Mock caller · ${label}`, scripted: true});
   }
   async function runMockCall() {
-    if (!mockCall || mockRunning || useSip || scenarioRunning || starting) return;
-    // Every run starts a new call with an empty conversation, as if Hang up
-    // and Start call were pressed.
-    if (connected) {
+    if (!mockCall || mockRunning || scenarioRunning || starting) return;
+    if (useSip && !sipCanSend) { mockStatus = "Place a SIP call first; the mock call runs inside it."; return; }
+    // Every browser run starts a new call with an empty conversation, as if
+    // Hang up and Start call were pressed. A SIP run uses the phone call.
+    if (!useSip && connected) {
       hangup();
       await tick();
     }
@@ -2354,22 +2363,23 @@
       await tick();
       if (token !== mockToken) return;
       const lines = mockLines;
-      await call();
+      if (!useSip) await call();
       for (const [index, line] of lines.entries()) {
         await whenIdle(token);
-        if (token !== mockToken || !connected) break;
+        if (token !== mockToken || !scenarioConnected) break;
         mockLine = index;
         mockStatus = `Q${index + 1}/${lines.length} · ${line.label}`;
         await sendCallerLine(line.text, `Q${index + 1} · ${line.label}`);
         if (error) break;
       }
-      // After the last reply has been spoken, the mock call hangs up.
-      if (token === mockToken && !error && connected) {
+      // After the last reply has been spoken, the mock call hangs up (a SIP
+      // call is ended from the phone).
+      if (token === mockToken && !error && scenarioConnected) {
         await whenIdle(token);
         if (token === mockToken) {
           mockRunning = scenarioRunning = false;
           mockLine = -1;
-          hangup();
+          if (!useSip) hangup();
           mockStatus = `Mock call complete · ${lines.length} lines`;
         }
         return;
@@ -2458,14 +2468,15 @@
   // A mockup question is spoken with the caller voice and sent at once
   // (connecting the call first when needed).
   async function sendScenarioQuestion(question: string, index: number) {
-    if (mockRunning || useSip || scenarioRunning || starting) return;
+    if (mockRunning || scenarioRunning || starting) return;
+    if (useSip && !sipCanSend) { mockStatus = "Place a SIP call first; the question is sent into it."; return; }
     const token = ++mockToken;
     mockRunning = scenarioRunning = true;
     error = "";
     try {
-      if (!connected) await call();
+      if (!useSip && !connected) await call();
       await whenIdle(token);
-      if (token !== mockToken || !connected) return;
+      if (token !== mockToken || !scenarioConnected) return;
       mockStatus = `Q${index + 1}: ${question}`;
       await sendCallerLine(question, `Q${index + 1}`);
       if (token === mockToken) mockStatus = error ? `Stopped: ${error}` : `Q${index + 1} answered`;
@@ -3231,11 +3242,7 @@
             /></label
           >
         </div>
-        <small
-          >{ttsSupportsStreaming
-            ? "Play two-line speech groups as they are generated."
-            : "This model supports offline speech only."}</small
-        >
+        {#if !ttsSupportsStreaming}<small>This model supports offline speech only.</small>{/if}
         {#if supportsReference}
           <div class="voice-picker-row">
             <label
@@ -3735,12 +3742,12 @@
               <div class="scenario-examples" role="group" aria-labelledby="scenario-examples-title">
                 <h3 id="scenario-examples-title">Mockup questions:</h3>
                 {#each selectedKnowledgeScenario.examples as question, index}
-                  <button type="button" disabled={knowledgeDeleting || mockRunning || useSip || busy || starting} on:click={() => sendScenarioQuestion(question, index)}>
+                  <button type="button" disabled={knowledgeDeleting || mockRunning || busy || starting || (useSip && !sipCanSend)} on:click={() => sendScenarioQuestion(question, index)}>
                     <strong>Q{index + 1}:</strong> <span>{question}</span>
                   </button>
                 {/each}
               </div>
-              <small>Click a question to speak it with the caller voice and send it{scenarioConnected ? "" : " (starts the call)"}.</small>
+              <small>{useSip ? "Click a question to send it into the current phone call." : `Click a question to speak it with the caller voice and send it${scenarioConnected ? "" : " (starts the call)"}.`}</small>
             {:else}
               <small>Speak or type a question during a call.</small>
             {/if}
@@ -3760,14 +3767,14 @@
                     {#each mockLines as line, index}<li class:current={index === mockLine}><strong>Q{index + 1}</strong> {line.text}</li>{/each}
                   </ol>
                 </div>
-                {#if useSip}<small>Mock calls run in the browser; turn SIP off.</small>{/if}
+                {#if useSip}<small>SIP: runs inside the current phone call — each line is sent as text and its reply is spoken on the phone. Place the call first; end it from the phone.</small>{/if}
                 {#if mockStatus}<small role="status">{mockStatus}</small>{/if}
               </div>
             {/if}
             <div class="scenario-actions">
               <button title="Remove this scenario and its imported data" disabled={knowledgeDeleting || knowledgeUploading || !!simulation || mockRunning} on:click={removeSelectedKnowledgeScenario}><Trash2 size={14} /> {knowledgeDeleting ? "Removing scenario…" : "Remove scenario"}</button>
               {#if mockCall}
-                <button type="button" disabled={mockRunning || useSip || busy || starting || knowledgeDeleting} on:click={runMockCall}><Play size={14} /> {mockRunning ? "Mock call running…" : "Run mock call"}</button>
+                <button type="button" disabled={mockRunning || busy || starting || knowledgeDeleting || (useSip && !sipCanSend)} on:click={runMockCall}><Play size={14} /> {mockRunning ? "Mock call running…" : "Run mock call"}</button>
               {/if}
             </div>
             <p role="status">{knowledgeStatus}</p>
