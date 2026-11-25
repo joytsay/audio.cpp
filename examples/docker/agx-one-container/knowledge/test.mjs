@@ -51,6 +51,7 @@ const fakeFetch = async (url, init) => {
     field: /維修內容/.test(text) ? 'work' : /設備/.test(text) ? 'equipment' : 'summary'};
   else if (properties.line) content = scenarioReply(body.messages);
   else if (properties.date) content = {date: '2026-06-02', reference: '', title: '測試工單', equipment: 'F8A-AHU-07', details: '更換強排FAN 3個', notes: '', test_result: '正常'};
+  else if (properties.items && /database column/.test(body.messages[0].content)) content = {items: ['language', 'phone_holder_name', 'employee_id_last3', 'Service Request']};
   else if (properties.items) content = {items: JSON.parse(text).map(item => `EN:${item}`)};
   else content = '| 料件 | 實際可用量 |\n| SKR9FAN2F23 | 7 |';
   return new Response(JSON.stringify({choices: [{message: {content: typeof content === 'string' ? content : JSON.stringify(content)}}]}),
@@ -134,6 +135,28 @@ await test('opening is spoken verbatim and validates language and digits', async
   const menu = await say('open-1', '八四七');
   assert.equal(menu.reply, '請問您要回報什麼內容?');
   assert.equal(menu.awaitingLanguage, false);
+});
+
+await test('the call session row has one column per opening answer and the whole conversation', async () => {
+  const {rows, columns} = await store.ivr({sessionId: 'open-1', call: true});
+  const [row] = rows;
+  assert.deepEqual(columns, ['session_id', 'channel', 'date', 'time', 'language', 'phone_holder_name', 'employee_id_last3', 'opening_4',
+    'opening', 'conversation', 'conversation_duration'], 'an invalid generated name falls back to opening_N');
+  assert.equal(row.session_id, 'open-1');
+  assert.equal(row.channel, 'other');
+  assert.match(row.date, /^\d{4}-\d{2}-\d{2}$/);
+  assert.match(row.time, /^\d{2}:\d{2}:\d{2}$/);
+  assert.equal(row.language, '1');
+  assert.equal(row.phone_holder_name, '王怡文');
+  assert.equal(row.employee_id_last3, '八四七', 'only the accepted answer is kept');
+  assert.equal(row.opening_4, '');
+  assert.deepEqual(JSON.parse(row.opening), {'請先選語言：中文 1、英文2': '1', '請進行身分驗證：請問此電話持有人名字是?': '王怡文',
+    '請說出您員工編號後3碼?': '八四七', '請問您要回報什麼內容?': ''});
+  assert.equal(row.conversation.split('\n').length, 11);
+  assert.match(row.conversation, /^AI：請先選語言/);
+  assert.match(row.conversation, /來電者：84\n/);
+  assert.match(row.conversation_duration, /^\d{2}:\d{2}:\d{2}$/);
+  assert.deepEqual(await store.ivr({sessionId: 'never-started', call: true}), {rows: []});
 });
 
 async function openCall(sessionId) {

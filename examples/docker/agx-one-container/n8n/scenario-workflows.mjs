@@ -246,7 +246,37 @@ export function createScenarioManager({withApi=withN8nApi,knowledgeUrl='http://k
   };
 }
 
-export function createScenarioServer(manager=createScenarioManager()){
+// call_sessions holds one row per IVR call. Its opening-answer columns come
+// from the call script, so the columns each row needs are added on first use.
+export const callSessionsTable='call_sessions';
+const columnName=/^[a-zA-Z][a-zA-Z0-9_]{0,62}$/;
+export function createCallSessionColumns({withApi=withN8nApi,now=Date.now,ttlMs=60000}={}){
+  // Columns seen recently skip the API; the expiry recovers from a table
+  // that was deleted or edited by hand.
+  const known=new Map();
+  const isKnown=name=>now()-(known.get(name)??-Infinity)<ttlMs;
+  let pending=Promise.resolve();
+  const ensure=columns=>withApi(['dataTable:list','dataTable:create','dataTableColumn:read','dataTableColumn:create'],async api=>{
+    const table=(await list(api,'/data-tables')).find(item=>item.name===callSessionsTable);
+    if(!table){
+      await api('/data-tables',{name:callSessionsTable,columns:columns.map(name=>({name,type:'string'}))});
+    }else{
+      const route=`${tableRoute(table.id)}/columns`;
+      const response=await api(route),existing=new Set((response.data||response).map(column=>column.name));
+      for(const name of columns)if(!existing.has(name))await api(route,{name,type:'string'});
+    }
+    for(const name of columns)known.set(name,now());
+  });
+  return columns=>{
+    if(!Array.isArray(columns)||!columns.length||columns.some(name=>typeof name!=='string'||!columnName.test(name)))
+      throw Object.assign(new Error('Invalid call_sessions columns'),{status:400});
+    const result=pending.then(()=>columns.every(isKnown)?undefined:ensure(columns));
+    pending=result.catch(()=>{});
+    return result;
+  };
+}
+
+export function createScenarioServer(manager=createScenarioManager(),callColumns=createCallSessionColumns()){
   return createServer(async(req,res)=>{
     res.setHeader('Content-Type','application/json; charset=utf-8');
     try{
@@ -263,6 +293,21 @@ export function createScenarioServer(manager=createScenarioManager()){
         try{body=JSON.parse(raw);}catch{throw Object.assign(new Error('Invalid JSON'),{status:400});}
         const result=await manager.import(body);
         return res.end(JSON.stringify(result));
+      }
+      if(req.method==='POST'&&req.url==='/call-sessions'){
+        // Body: the IVR engine's {rows, columns}; replies with the rows once
+        // call_sessions has every column they use.
+        let raw='';
+        req.setEncoding('utf8');
+        for await(const chunk of req){
+          raw+=chunk;
+          if(raw.length>2*1024*1024)throw Object.assign(new Error('Call session is too large'),{status:413});
+        }
+        let body;
+        try{body=JSON.parse(raw);}catch{throw Object.assign(new Error('Invalid JSON'),{status:400});}
+        const rows=Array.isArray(body?.rows)?body.rows:[];
+        if(rows.length)await callColumns(body.columns);
+        return res.end(JSON.stringify(rows));
       }
       const id=/^\/scenarios\/([a-f0-9]{24})$/.exec(req.url)?.[1];
       if(req.method==='DELETE'&&id)return res.end(JSON.stringify(await manager.remove(id)));

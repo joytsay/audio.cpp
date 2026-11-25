@@ -15,7 +15,8 @@ const sections = [
 export const managedWorkflowIds = [ivrWorkflowId, scenarioAdminId, 'ivrDocumentRag'];
 // 30: the IVR engine flow (a revision 29 agent flow was deployed from another branch).
 // 31: saved work orders are passed to the engine for lookups.
-export const workflowLayoutRevision = 31;
+// 32: every call is saved to the call_sessions Data Table.
+export const workflowLayoutRevision = 32;
 const scenarioAdminRevision = 26;
 
 export function removeLegacyScenarioUpload(workflow) {

@@ -15,6 +15,7 @@ behaviour; nothing about the scenarios is hard-coded.
 | `{sessionId, start: true, scenarioId?}` | Starts a call; replies with the script's first opening prompt. |
 | `{sessionId, text, scenarioId?, work_orders?}` | Answers one caller turn. `work_orders`: saved rows, newest first (n8n sends them). |
 | `{sessionId, records: true}` | Extracts the work orders completed since the last request. |
+| `{sessionId, call: true}` | Returns `{rows: [call_sessions row], columns}` for the call so far (see [call sessions](../n8n/README.md#call-sessions)). |
 | `{sessionId, end: true}` | Discards the call. |
 
 Each reply carries `stage` (`opening`, `menu`, `scenario`), `status`, `scenario` (`{number, title}`),

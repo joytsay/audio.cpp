@@ -31,7 +31,8 @@ const installedMain=entities.get(template.id);
 assert.equal(installedMain.name,'GeoVision · Workflow');
 assert.equal(installedMain.meta.ivrWorkflowRevision,workflowLayoutRevision);
 assert.deepEqual(installedMain.nodes.map(node=>node.name).sort(),['1 · IVR call','IVR Input','Ensure work_orders','Read work orders · Data Table','Add saved work orders',
- 'IVR call engine','IVR Output','Work order to save?','Extract work orders','One row per work order','Save work order · Data Table'].sort());
+ 'IVR call engine','IVR Output','Work order to save?','Extract work orders','One row per work order','Save work order · Data Table',
+ 'Call session record','Ensure call_sessions columns','Save call session · Data Table'].sort());
 const next=name=>installedMain.connections[name].main.map(edges=>edges.map(edge=>edge.node));
 assert.deepEqual(next('IVR Input'),[['Ensure work_orders']]);
 assert.deepEqual(next('Ensure work_orders'),[['Read work orders · Data Table']]);
@@ -39,7 +40,13 @@ assert.deepEqual(next('Read work orders · Data Table'),[['Add saved work orders
 assert.deepEqual(next('Add saved work orders'),[['IVR call engine']]);
 assert.equal(installedMain.nodes.find(node=>node.name==='Read work orders · Data Table').alwaysOutputData,true,'an empty table still reaches the engine');
 assert.deepEqual(next('IVR call engine'),[['IVR Output']]);
-assert.deepEqual(next('IVR Output'),[['Work order to save?']],'the reply is sent before the work order is extracted');
+assert.deepEqual(next('IVR Output'),[['Work order to save?','Call session record']],'the reply is sent before anything is saved');
+assert.deepEqual(next('Call session record'),[['Ensure call_sessions columns']]);
+assert.deepEqual(next('Ensure call_sessions columns'),[['Save call session · Data Table']]);
+const saveCall=installedMain.nodes.find(node=>node.name==='Save call session · Data Table').parameters;
+assert.equal(saveCall.operation,'upsert');
+assert.equal(saveCall.filters.conditions[0].keyName,'session_id','one row per call, updated every turn');
+assert.equal(saveCall.columns.mappingMode,'autoMapInputData','opening-answer columns come from the call script');
 assert.deepEqual(next('Work order to save?'),[['Extract work orders'],[]]);
 assert.deepEqual(next('One row per work order'),[['Save work order · Data Table']]);
 assert.equal(installedMain.nodes.find(node=>node.name==='IVR call engine').parameters.url,'http://knowledge:8085/ivr');
@@ -200,3 +207,30 @@ try{
  await installMissing({templates,has,listWorkflows,run:async()=>assert.fail('migration must be idempotent'),backupDir:adminBackupDir,log:()=>{}});
 }finally{await fs.rm(adminBackupDir,{recursive:true,force:true});}
 console.log('PASS legacy upload removal preserves the current upload and local Scenario Admin edits');
+
+// call_sessions gets each opening-answer column the first time a row needs it.
+{
+  const {createCallSessionColumns}=await import('../../../examples/docker/agx-one-container/n8n/scenario-workflows.mjs');
+  const tables=[],calls=[];
+  const api=async(route,body)=>{
+    calls.push(route);
+    if(route.startsWith('/data-tables?'))return {data:tables};
+    if(route==='/data-tables'){const table={id:'t1',name:body.name,columns:body.columns};tables.push(table);return table;}
+    if(route==='/data-tables/t1/columns'){if(!body)return tables[0].columns;tables[0].columns.push(body);return body;}
+    throw new Error('unexpected '+route);
+  };
+  let clock=0;
+  const ensure=createCallSessionColumns({withApi:async(scopes,run)=>run(api),now:()=>clock});
+  await ensure(['session_id','date','supervisor_name']);
+  assert.deepEqual(tables[0].columns.map(c=>c.name),['session_id','date','supervisor_name']);
+  const before=calls.length;
+  await ensure(['session_id','supervisor_name']);
+  assert.equal(calls.length,before,'known columns need no API call');
+  await ensure(['session_id','date','supervisor_name','employee_id_last3']);
+  assert.deepEqual(tables[0].columns.map(c=>c.name),['session_id','date','supervisor_name','employee_id_last3']);
+  clock=61000;tables.length=0;
+  await ensure(['session_id','date']);
+  assert.deepEqual(tables[0].columns.map(c=>c.name),['session_id','date'],'a deleted table is recreated after the cache expires');
+  assert.throws(()=>ensure(['請問姓名']),/Invalid call_sessions columns/);
+  console.log('PASS call_sessions: table and opening-answer columns created on first use');
+}

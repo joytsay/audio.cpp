@@ -20,6 +20,12 @@ const sha = value => createHash('sha256').update(value).digest('hex');
 const sessionPattern = /^[A-Za-z0-9_.:-]{1,128}$/;
 const sessionTtlMs = 2 * 60 * 60 * 1000;
 const maxHistory = 40;
+const maxTranscript = 1000;
+// Columns of the call_sessions table that are not opening answers (n8n adds id, createdAt, updatedAt).
+const callColumns = ['session_id', 'channel', 'date', 'time', 'opening', 'conversation', 'conversation_duration'];
+const reservedColumns = new Set([...callColumns, 'id', 'createdat', 'updatedat']);
+const columnPattern = /^[a-z][a-z0-9_]{0,39}$/;
+const clock = seconds => [seconds / 3600, seconds / 60 % 60, seconds % 60].map(value => String(Math.floor(value)).padStart(2, '0')).join(':');
 
 const zhDigits = {'零': '0', '〇': '0', '○': '0', '一': '1', '幺': '1', '壹': '1', '二': '2', '兩': '2', '两': '2', '貳': '2',
   '三': '3', '參': '3', '四': '4', '肆': '4', '五': '5', '伍': '5', '六': '6', '陸': '6', '七': '7', '柒': '7',
@@ -234,6 +240,7 @@ export function createIvrEngine({
   fetchImpl = fetch,
   now = () => Date.now(),
   log = console.log,
+  timeZone = process.env.IVR_TIME_ZONE || 'Asia/Taipei',
 } = {}) {
   const sessionsDir = path.join(dataRoot, 'ivr-sessions');
   const cacheDir = path.join(dataRoot, 'ivr-cache');
@@ -354,6 +361,14 @@ export function createIvrEngine({
   }
   async function writeSession(session) {
     session.updatedAt = now();
+    // The model sees the last maxHistory turns; the call log keeps every turn.
+    session.transcript ??= [];
+    for (const turn of session.history) {
+      if (turn.logged) continue;
+      turn.logged = true;
+      session.transcript.push({role: turn.role, text: turn.content, at: session.updatedAt});
+    }
+    session.transcript = session.transcript.slice(-maxTranscript);
     session.history = session.history.slice(-maxHistory);
     sessions.set(session.id, session);
     await fs.mkdir(sessionsDir, {recursive: true});
@@ -660,12 +675,18 @@ export function createIvrEngine({
         } else if (prompt.digits) {
           valid = spokenDigits(text).length === prompt.digits;
         }
-        if (valid) session.step++;
+        if (valid) {
+          session.answers = [...(session.answers ?? []), {step: session.step, answer: text}];
+          session.step++;
+        }
         const reply = await openingPrompt(loaded, session, session.step);
         session.history.push({role: 'user', content: text, scenario: null, run: null},
           {role: 'assistant', content: reply, scenario: null, run: null});
         response = {reply, status: 'continue', stage: 'opening', scenario: null};
       } else {
+        // The answer to the service menu (the last opening question) is the first request.
+        if (session.step === loaded.opening.length - 1)
+          session.answers = [...(session.answers ?? []), {step: session.step, answer: text}];
         session.step = loaded.opening.length;
         const {reply, status, section, lookup} = await scenarioTurn(loaded, session, text, rows);
         response = {reply, status, stage: section ? 'scenario' : lookup ? 'lookup' : 'menu',
@@ -684,6 +705,61 @@ export function createIvrEngine({
       await writeSession(session);
       return {...response, language: session.language,
         awaitingLanguage: session.step === 0 && !!loaded.opening[0].language};
+    });
+  }
+
+  // Data Table column names for the opening questions (ASCII snake_case, as
+  // n8n requires), named once per script by the model and cached.
+  async function openingColumns(loaded) {
+    const questions = loaded.opening.map(prompt => prompt.text);
+    const key = sha(JSON.stringify(['columns-v2', questions]));
+    const cached = (await cacheFile(loaded.id)).columns?.[key];
+    if (cached?.length === questions.length) return cached;
+    let names = [];
+    try {
+      const result = await llm([
+        {role: 'system', content: 'Each item is a question an IVR asks the caller. Give the database column that stores the caller\'s answer, in short English snake_case (lowercase letters, digits, underscores; starts with a letter; at most 30 characters). Name the information itself and whose it is, not why it is asked, e.g. 請說出您的身分證字號後4碼? → id_number_last4, 請問您的分機號碼? → extension_number. No prefixes like answer_ or caller_. For a question asking what the caller needs, use request. Return the same number of items in the same order.'},
+        {role: 'user', content: JSON.stringify(questions)},
+      ], {type: 'object', properties: {items: {type: 'array', items: {type: 'string'}, minItems: questions.length, maxItems: questions.length}}, required: ['items']},
+      {maxTokens: 30 * questions.length, temperature: 0});
+      names = result.items.map(item => String(item).trim().toLowerCase());
+    } catch (error) { log(`[ivr-engine] Cannot name opening columns for ${loaded.name}: ${error.message}`); }
+    const used = new Set();
+    const columns = questions.map((_, index) => {
+      const name = names[index];
+      const valid = name && columnPattern.test(name) && !reservedColumns.has(name) && !used.has(name);
+      const column = valid ? name : `opening_${index + 1}`;
+      used.add(column);
+      return column;
+    });
+    if (names.length) await saveCache(loaded.id, current => ({columns: {...current.columns, [key]: columns}}));
+    return columns;
+  }
+
+  // One call_sessions row: when the call started, the opening answers (one
+  // column per opening question), the whole conversation and its duration.
+  async function call({sessionId}) {
+    if (typeof sessionId !== 'string' || !sessionPattern.test(sessionId)) throw fail('Invalid sessionId');
+    return serialized(sessionId, async () => {
+      const session = await readSession(sessionId);
+      if (!session) return {rows: []};
+      const loaded = await script(session.scenarioId);
+      const columns = await openingColumns(loaded);
+      const answer = step => (session.answers ?? []).findLast(item => item.step === step)?.answer ?? '';
+      const transcript = session.transcript ?? [];
+      const started = new Date(session.createdAt);
+      const part = options => new Intl.DateTimeFormat('en-CA', {timeZone, ...options}).format(started);
+      const row = {
+        session_id: session.id,
+        channel: session.id.startsWith('sip-') ? 'sip' : session.id.startsWith('web-') ? 'web' : 'other',
+        date: part({year: 'numeric', month: '2-digit', day: '2-digit'}),
+        time: part({hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23'}),
+        ...Object.fromEntries(columns.map((column, step) => [column, answer(step)])),
+        opening: JSON.stringify(Object.fromEntries(loaded.opening.map((prompt, step) => [prompt.text, answer(step)]))),
+        conversation: transcript.map(turn => `${turn.role === 'assistant' ? 'AI' : '來電者'}：${turn.text}`).join('\n'),
+        conversation_duration: clock(Math.max(0, Math.round(((transcript.at(-1)?.at ?? session.createdAt) - session.createdAt) / 1000))),
+      };
+      return {rows: [row], columns: Object.keys(row)};
     });
   }
 
@@ -711,6 +787,7 @@ export function createIvrEngine({
   async function handle(body) {
     if (body?.end === true) return end(body);
     if (body?.records === true) return records(body);
+    if (body?.call === true) return call(body);
     if (body?.start === true || typeof body?.text !== 'string' || !body.text.trim()) return start(body ?? {});
     return turn(body);
   }
@@ -724,5 +801,5 @@ export function createIvrEngine({
     }
   }
 
-  return {start, turn, end, records, handle, script, figureText, warm};
+  return {start, turn, end, records, call, handle, script, figureText, warm};
 }

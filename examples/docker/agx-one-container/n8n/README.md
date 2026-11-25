@@ -12,7 +12,8 @@ Startup installs three editable workflows from the [bundled template](workflow.j
 
 ```
 IVR Input → Ensure work_orders → Read work orders · Data Table → Add saved work orders → IVR call engine
-  → IVR Output → Work order to save? → Extract work orders → One row per work order → Save work order · Data Table
+  → IVR Output ─┬→ Work order to save? → Extract work orders → One row per work order → Save work order · Data Table
+                └→ Call session record → Ensure call_sessions columns → Save call session · Data Table
 ```
 
 Browser and SIP calls post `{sessionId, text}` (or `{sessionId, start: true}` to begin a call) to
@@ -33,10 +34,29 @@ Columns are `order_id`, `report_key`, `session_id`, `dispatch_date`, `reference_
 the scenario number and title, the extracted fields and the full scenario dialogue. The table
 persists in `/home/node/.n8n` (volume **audiocpp-n8n-data**).
 
-Workflow revision 31 replaces the previous agent flow. Startup backs up the installed drafts, and
+Workflow revision 32 (call sessions; 31 added work-order lookups) replaces the previous agent flow. Startup backs up the installed drafts, and
 unpublishes the retired **GeoVision · Knowledge Tools** sub-workflow (kept, with a backup, for
 reference). With automatic publishing disabled, publish **GeoVision · Workflow**, **Scenario Admin**
 and **Document RAG**.
+
+## Call sessions
+
+Every call has one row in the `call_sessions` Data Table, keyed by `session_id` and updated after
+each reply, so it is current until the caller hangs up:
+
+| Column | Value |
+|---|---|
+| `session_id`, `channel` | The call ID; `sip` for `sip-…` calls, `web` for browser calls. |
+| `date`, `time` | When the call started (`IVR_TIME_ZONE`, default Asia/Taipei). |
+| one column per opening question | The caller's accepted answer, e.g. `employee_id_last3` = `847`. The last one (`request`) is the answer to the service menu. |
+| `opening` | The same answers as JSON, keyed by the script's own question text. |
+| `conversation` | The whole call, one `AI：…` / `來電者：…` line per turn. |
+| `conversation_duration` | From the first prompt to the last turn, `HH:MM:SS`. |
+
+n8n column names must be ASCII, so the opening-question columns are named in English snake_case
+by the model when a script is first used (cached with the script); a name that is not valid falls
+back to `opening_N`. **Ensure call_sessions columns** creates the table and any column a new
+script needs.
 
 ## Browser, SIP and deployment
 

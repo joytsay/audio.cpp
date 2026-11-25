@@ -13,7 +13,7 @@
       ],
       "parameters": {
         "width": 2280,
-        "height": 420,
+        "height": 500,
         "color": 5,
         "content": "## IVR call\nThe knowledge service runs the call from the uploaded HTML call script (opening, 情境 routing, dialogue, session memory). Saved work orders are passed in so callers can ask about them. The reply is returned first; a completed work order is then extracted and upserted into the work_orders Data Table."
       }
@@ -1120,6 +1120,82 @@
         "responseBody": "={{ $json }}",
         "options": {}
       }
+    },
+    {
+      "id": "ivr-call-session-record",
+      "name": "Call session record",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1400,
+        320
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://knowledge:8085/ivr",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ {call:true,sessionId:$('IVR Input').first().json.body.sessionId} }}",
+        "options": {
+          "timeout": 60000
+        }
+      }
+    },
+    {
+      "id": "ivr-call-session-columns",
+      "name": "Ensure call_sessions columns",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1620,
+        320
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:8087/call-sessions",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json }}",
+        "options": {
+          "timeout": 120000
+        }
+      }
+    },
+    {
+      "id": "save-call-session-table",
+      "name": "Save call session · Data Table",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        1840,
+        320
+      ],
+      "parameters": {
+        "resource": "row",
+        "operation": "upsert",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "call_sessions"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "session_id",
+              "condition": "eq",
+              "keyValue": "={{ $json.session_id }}"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {}
+      }
     }
   ],
   "connections": {
@@ -1543,6 +1619,11 @@
             "node": "Work order to save?",
             "type": "main",
             "index": 0
+          },
+          {
+            "node": "Call session record",
+            "type": "main",
+            "index": 0
           }
         ]
       ]
@@ -1613,6 +1694,28 @@
           }
         ]
       ]
+    },
+    "Call session record": {
+      "main": [
+        [
+          {
+            "node": "Ensure call_sessions columns",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ensure call_sessions columns": {
+      "main": [
+        [
+          {
+            "node": "Save call session · Data Table",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     }
   },
   "active": false,
@@ -1623,6 +1726,6 @@
   "pinData": {},
   "tags": [],
   "meta": {
-    "ivrWorkflowRevision": 31
+    "ivrWorkflowRevision": 32
   }
 }
