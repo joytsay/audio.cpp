@@ -208,6 +208,13 @@ std::vector<int32_t> EmiliaTokenizer::encode(const std::string & raw_text) const
             }
         }
         if (!current.empty()) segments.push_back({current, lang});
+        // A text of only digits and punctuation ("1", "847", "5。") has no
+        // language of its own and would be dropped, leaving no tokens to
+        // speak; read its numbers in Chinese instead. Digits next to Chinese
+        // or English text already belong to that segment.
+        for (auto & seg : segments) {
+            if (seg.lang == 'o' && seg.text.find_first_of("0123456789") != std::string::npos) seg.lang = 'z';
+        }
     }
 
     // Split <pinyin> / [tag] parts out of every segment.

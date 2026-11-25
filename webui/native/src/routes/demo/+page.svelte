@@ -2336,6 +2336,12 @@
   }
   async function runMockCall() {
     if (!mockCall || mockRunning || useSip || scenarioRunning || starting) return;
+    // Every run starts a new call with an empty conversation, as if Hang up
+    // and Start call were pressed.
+    if (connected) {
+      hangup();
+      await tick();
+    }
     const token = ++mockToken;
     mockRunning = scenarioRunning = true;
     error = "";
@@ -2348,7 +2354,7 @@
       await tick();
       if (token !== mockToken) return;
       const lines = mockLines;
-      if (!connected) await call();
+      await call();
       for (const [index, line] of lines.entries()) {
         await whenIdle(token);
         if (token !== mockToken || !connected) break;
@@ -2357,12 +2363,13 @@
         await sendCallerLine(line.text, `Q${index + 1} · ${line.label}`);
         if (error) break;
       }
-      // After the last reply has been spoken, stop the scenario as if Stop
-      // scenario were pressed; the call itself stays connected.
+      // After the last reply has been spoken, the mock call hangs up.
       if (token === mockToken && !error && connected) {
         await whenIdle(token);
         if (token === mockToken) {
-          stopScenario();
+          mockRunning = scenarioRunning = false;
+          mockLine = -1;
+          hangup();
           mockStatus = `Mock call complete · ${lines.length} lines`;
         }
         return;
