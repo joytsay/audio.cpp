@@ -12,6 +12,7 @@ import {pathToFileURL} from 'node:url';
 import mammoth from 'mammoth';
 import ExcelJS from 'exceljs';
 import {createRagBridge} from './rag-embeddings.mjs';
+import {createSops} from './sops.mjs';
 import {createIvrEngine} from './ivr-engine.mjs';
 import {extractRagAssets,ragItems} from './rag-assets.mjs';
 const execFile=promisify(execFileCallback);
@@ -152,6 +153,9 @@ export function createKnowledgeStore({pdf=extractPdf,ocrImage=readScenarioImage,
   };
   const rag=createRagBridge({workflowUrl:ragUrl,fetchImpl});
   const ivr=createIvrEngine({scenarios,scenarioRoot:scenarioDir,fetchImpl});
+  const sops=createSops({scenarios,fetchImpl,script:id=>ivr.script(id),figureText:(id,figure)=>ivr.figureText(id,figure),
+    dataRoot:path.dirname(scenarioDir)});
+  const scriptTurns=new Map();
   const store = {
     ivr:body=>ivr.handle(body),
     warmIvr:()=>ivr.warm(),
@@ -161,7 +165,26 @@ export function createKnowledgeStore({pdf=extractPdf,ocrImage=readScenarioImage,
     readScenario:id=>scenarios.get(id),
     saveScenarioImport:(id,state)=>scenarios.saveImport(id,state),
     listScenarios:()=>scenarios.list(),
-    removeScenario:id=>scenarios.remove(id),
+    async removeScenario(id){const result=await scenarios.remove(id);await sops.removed(id);return result;},
+    sops:()=>sops.list(),
+    indexSop:id=>sops.index(id),
+    sopContext:body=>sops.context(body),
+    rememberSop:body=>sops.remember(body),
+    lookup:body=>sops.lookup(body),
+    rankSops:body=>sops.rank(body),
+    sopDocuments:id=>sops.documents(id),
+    // The script skill: one grounded step of the HTML call script. A turn is
+    // answered once: an agent that calls the skill twice gets the same step.
+    script({sopId,sessionId,text,start,turnId,work_orders}){
+      const key=typeof turnId==='string'&&turnId?`${sessionId}\n${turnId}`:'';
+      if(key&&scriptTurns.has(key))return scriptTurns.get(key);
+      const step=ivr.handle(start===true?{sessionId,start:true,scenarioId:sopId}:{sessionId,text,scenarioId:sopId,work_orders});
+      if(key){
+        scriptTurns.set(key,step);step.catch(()=>scriptTurns.delete(key));
+        if(scriptTurns.size>500)scriptTurns.delete(scriptTurns.keys().next().value);
+      }
+      return step;
+    },
     async indexScenario(id){
       if(typeof id!=='string')throw Object.assign(Error('A scenario ID is required'),{status:400});
       const uploads=await scenarios.corpus(id);
@@ -181,7 +204,7 @@ export function createKnowledgeServer(store=createKnowledgeStore()){
         let raw='';for await(const chunk of req){raw+=chunk;if(raw.length>256*1024)throw Object.assign(Error('Request too large'),{status:413});}
         data=await store.saveScenarioImport(importId,JSON.parse(raw));
       }
-      else if(req.method==='POST'&&['/ivr','/scenarios','/rag/index','/rag/evidence','/rag/embedding-inputs'].includes(url.pathname)){
+      else if(req.method==='POST'&&['/ivr','/scenarios','/rag/index','/rag/evidence','/rag/embedding-inputs','/sops/index','/sops/context','/sops/session','/skills/lookup','/skills/script','/sops/rank'].includes(url.pathname)){
         req.setEncoding('utf8');
         let raw='';for await(const chunk of req){raw+=chunk;if(Buffer.byteLength(raw)>(url.pathname==='/scenarios'?16*1024*1024:256*1024))throw Object.assign(Error('Request too large'),{status:413});}
         let body;try{body=JSON.parse(raw);}catch{throw Object.assign(Error('Invalid JSON'),{status:400});}
@@ -189,12 +212,20 @@ export function createKnowledgeServer(store=createKnowledgeStore()){
         else if(url.pathname==='/rag/embedding-inputs')data=store.embeddingInputs(body||{});
         else if(url.pathname==='/rag/evidence')data=store.evidence(body||{});
         else if(url.pathname==='/rag/index')data=await store.indexScenario(body?.id);
+        else if(url.pathname==='/sops/index')data=await store.indexSop(body?.id);
+        else if(url.pathname==='/sops/context')data=await store.sopContext(body||{});
+        else if(url.pathname==='/sops/session')data=store.rememberSop(body||{});
+        else if(url.pathname==='/skills/lookup')data=await store.lookup(body||{});
+        else if(url.pathname==='/sops/rank')data=await store.rankSops(body||{});
+        else if(url.pathname==='/skills/script')data=await store.script(body||{});
         else data=await store.addScenario(body);
       }
       else if(req.method==='DELETE'&&url.pathname.startsWith('/scenarios/'))data=await store.removeScenario(url.pathname.slice('/scenarios/'.length));
       else if(req.method!=='GET'){res.writeHead(405);res.end(JSON.stringify({error:'Method not allowed'}));return;}
       else if(url.pathname==='/health')data=await store.health();
       else if(url.pathname==='/scenarios')data={scenarios:await store.listScenarios()};
+      else if(url.pathname==='/sops')data={sops:await store.sops()};
+      else if(/^\/sops\/[a-f0-9]{24}\/documents$/.test(url.pathname))data=await store.sopDocuments(url.pathname.split('/')[2]);
       else if(importId)data=await store.readScenario(importId);
       else{res.writeHead(404);res.end(JSON.stringify({error:'Unknown knowledge endpoint'}));return;}
       res.end(JSON.stringify(data));

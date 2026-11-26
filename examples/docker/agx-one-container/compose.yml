@@ -178,10 +178,17 @@ services:
       PORT: 8085
       KNOWLEDGE_DATA_ROOT: /data
       OCR_LANGUAGES: chi_tra+eng
-      # IVR call engine: the already-loaded vision model answers every turn and
-      # reads the call script's figures (inventory tables, SOPs, directory cards).
-      IVR_LLM_URL: http://voice-ai:8087/v1
-      IVR_LLM_MODEL: ivr-vision
+      # IVR call engine and SOP skills: LFM2.5 answers every turn; the
+      # vision model only reads the call script's figures (once, cached).
+      IVR_LLM_URL: http://voice-ai:8082/v1
+      IVR_LLM_MODEL: ${IVR_LLM_MODEL:-bartowski/LiquidAI_LFM2.5-1.2B-Instruct-GGUF:Q4_K_M}
+      IVR_VISION_URL: http://voice-ai:8087/v1
+      IVR_VISION_MODEL: ivr-vision
+      # SOP retrieval: text embeddings of CSV rows and script sections.
+      IVR_TEXT_EMBED_URL: http://voice-ai:8084/v1
+      IVR_TEXT_EMBED_MODEL: Qwen/Qwen3-Embedding-0.6B-GGUF:Q8_0
+      # Uploaded SOPs add their names and codes to the ASR hotwords.
+      IVR_HOTWORDS_FILE: /app/hotwords.csv
       IVR_RAG_URL: http://n8n:5678/webhook/ivr-document-rag
       IVR_RAG_EMBED_MODEL: ${IVR_RAG_EMBED_MODEL:-gorse-io/Qwen3-VL-Embedding-2B-GGUF:Q4_K_M}
       IVR_RAG_EMBED_DIMENSIONS: ${IVR_RAG_EMBED_DIMENSIONS:-2048}
@@ -189,6 +196,7 @@ services:
     volumes:
       - audiocpp-knowledge-data:/data
       - ivr-qdrant-data:/qdrant/storage
+      - ../../../hotwords.csv:/app/hotwords.csv
     healthcheck:
       test: ["CMD", "node", "-e", "Promise.all([fetch('http://127.0.0.1:8085/health'),fetch('http://127.0.0.1:6333/readyz')]).then(rs=>process.exit(rs.every(r=>r.ok)?0:1)).catch(()=>process.exit(1))"]
       interval: 20s

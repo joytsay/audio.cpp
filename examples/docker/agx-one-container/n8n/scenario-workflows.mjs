@@ -3,6 +3,8 @@ import {setTimeout as delay} from 'node:timers/promises';
 import {pathToFileURL} from 'node:url';
 import {isDeepStrictEqual} from 'node:util';
 import {withN8nApi} from './unpublish-workflow.mjs';
+import {ensureWorkflowPublished} from './publish-workflow.mjs';
+import {routerMarker,routerSignature,routerWorkflow,sopMarker,sopWorkflow,skillMarkers,skillWorkflows,templateVersion} from './sop-workflows.mjs';
 
 // Normalize spreadsheet dispatch dates (2026/6/2, 202606/02, 20260602) for display.
 export function dispatchDate(value){
@@ -156,7 +158,10 @@ async function deleteScenarioWorkflow(api,workflowId){
   }
 }
 
-export function createScenarioManager({withApi=withN8nApi,knowledgeUrl='http://knowledge:8085'}={}){
+const workflowScopes=['workflow:list','workflow:read','workflow:create','workflow:update','workflow:activate','workflow:deactivate','workflow:delete'];
+const hasNode=(workflow,id)=>workflow.nodes?.some(node=>node.id===id);
+
+export function createScenarioManager({withApi=withN8nApi,knowledgeUrl='http://knowledge:8085',log=console.log}={}){
   const knowledge=async(route,method='GET',body)=>{
     const response=await fetch(knowledgeUrl+route,{
       method,headers:{'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body),
@@ -190,7 +195,76 @@ export function createScenarioManager({withApi=withN8nApi,knowledgeUrl='http://k
     }
     return tables;
   };
+  // The multi-agent flow: the shared skills, one agent per SOP (its
+  // vectors made by the Embed skill), and the front desk agent. Workflows are
+  // rebuilt only when their template or SOP changed.
+  const syncSopsNow=async()=>{
+    const {sops}=await knowledge('/sops');
+    const created=[];
+    const put=async(api,workflow,next)=>api(`/workflows/${encodeURIComponent(workflow.id)}`,
+      {name:next.name,nodes:next.nodes,connections:next.connections,settings:next.settings},'PUT');
+    const skills=await withApi(workflowScopes,async api=>{
+      const workflows=await list(api,'/workflows');
+      const ids={};
+      for(const [key,next] of Object.entries(skillWorkflows({knowledgeUrl}))){
+        let workflow=workflows.find(item=>hasNode(item,skillMarkers[key]));
+        if(!workflow){workflow=await api('/workflows',next);created.push(next.name);}
+        else if(!workflow.nodes.some(node=>node.id===skillMarkers[key]&&node.notes===templateVersion)){workflow=await put(api,workflow,next);created.push(`${next.name} (updated)`);}
+        await ensureWorkflowPublished(api,workflow.id);
+        ids[key]=workflow.id;
+      }
+      return ids;
+    },{expiresIn:600});
+    // Embedding extraction through the Embed skill, once per written sop.
+    for(const sop of sops.filter(item=>item.ready)){
+      const record=await missing(knowledge(importRoute(sop.id)));
+      if(!record)continue;
+      const state=record.resources||{tables:[]};
+      // Keyed by collection too: SOPs once lived in runbook_<id> collections.
+      const embedded=`${sop.collection}@${sop.writtenAt}`;
+      if(state.embedded===embedded)continue;
+      const documents=await knowledge(`/sops/${sop.id}/documents`);
+      const response=await fetch('http://127.0.0.1:5678/webhook/ivr-skill-embed',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify(documents),signal:AbortSignal.timeout(600000)});
+      const result=await response.json().catch(()=>({}));
+      if(!response.ok)throw new Error(`Embed skill failed for ${sop.name}: HTTP ${response.status} ${JSON.stringify(result).slice(0,200)}`);
+      delete state.embeddedAt;state.embedded=embedded;
+      await knowledge(importRoute(sop.id),'PUT',state);
+      log(`[ivr-n8n] Embed skill: ${sop.name} → ${result.collection} (${result.vectors} vectors)`);
+    }
+    return withApi(workflowScopes,async api=>{
+      const workflows=await list(api,'/workflows');
+      for(const sop of sops.filter(item=>item.ready)){
+        const record=await missing(knowledge(importRoute(sop.id)));
+        if(!record)continue;
+        const state=record.resources||{tables:[]};
+        let workflow=workflows.find(item=>item.id===state.workflowId)||workflows.find(item=>hasNode(item,sopMarker(sop.id)));
+        const next=sopWorkflow(sop,skills);
+        if(!workflow){workflow=await api('/workflows',next);created.push(next.name);}
+        else if(!workflow.nodes?.some(node=>node.id===sopMarker(sop.id)&&String(node.notes??'').includes(`${sop.writtenAt} · ${templateVersion}`))){
+          workflow=await put(api,workflow,next);created.push(`${next.name} (updated)`);
+        }
+        await ensureWorkflowPublished(api,workflow.id);
+        if(state.workflowId!==workflow.id){
+          state.workflowId=workflow.id;
+          await knowledge(importRoute(sop.id),'PUT',state);
+        }
+      }
+      // The front desk agent's skills are the SOP agents: rebuild it when they change.
+      const current=(await knowledge('/sops')).sops;
+      const next=routerWorkflow(current,{knowledgeUrl});
+      const signature=routerSignature(current);
+      // Also adopt the router installed before SOPs were called runbooks.
+      let router=workflows.find(item=>hasNode(item,routerMarker))||workflows.find(item=>hasNode(item,'runbook-router-input'));
+      if(!router){router=await api('/workflows',next);created.push(router.name);}
+      else if(!router.nodes?.some(node=>node.id===routerMarker&&node.notes===signature)){router=await put(api,router,next);created.push(`${router.name} (updated)`);}
+      await ensureWorkflowPublished(api,router.id);
+      if(created.length)log(`[ivr-n8n] Created ${created.join(', ')}.`);
+      return {sops:sops.length,created,router:router.id,skills};
+    },{expiresIn:600});
+  };
   return {
+    syncSops:()=>enqueue(syncSopsNow),
     async repairDispatchDates(){
       const tables=(await registeredTables()).filter(table=>table.columns.some(isDispatchDate));
       if(!tables.length)return;
@@ -216,6 +290,14 @@ export function createScenarioManager({withApi=withN8nApi,knowledgeUrl='http://k
         }
         state.ready=true;
         const scenario=await save();
+        if(/\.(?:csv|html?)$/i.test(document.name)){
+          // A sop: the LLM writes its Q/A (minutes for a long script), then
+          // it gets its n8n workflow. Runs after the upload has answered.
+          void knowledge('/sops/index','POST',{id:scenario.id})
+            .then(()=>enqueue(syncSopsNow))
+            .then(result=>log(`[ivr-n8n] SOP ready: ${document.name}`,result?.created??''))
+            .catch(error=>console.error(`[ivr-n8n] SOP for ${document.name} not ready:`,error.message));
+        }
         if (process.env.IVR_RAG_INDEX_UPLOADS === 'true' && !/\.(?:csv|xlsx)$/i.test(document.name)) {
           // Allow the first query to retry indexing if the inference workers are still warming up.
           void knowledge('/rag/index','POST',{id:scenario.id}).catch(error=>{
@@ -240,7 +322,10 @@ export function createScenarioManager({withApi=withN8nApi,knowledgeUrl='http://k
             }
           },{expiresIn:600});
         }
-        return knowledge(route,'DELETE');
+        const removed=await knowledge(route,'DELETE');
+        // The front desk agent loses that SOP's skill.
+        await syncSopsNow().catch(error=>console.error('[ivr-n8n] SOP router not updated:',error.message));
+        return removed;
       });
     },
   };
@@ -309,6 +394,7 @@ export function createScenarioServer(manager=createScenarioManager(),callColumns
         if(rows.length)await callColumns(body.columns);
         return res.end(JSON.stringify(rows));
       }
+      if(req.method==='POST'&&req.url==='/sops/sync')return res.end(JSON.stringify(await manager.syncSops()));
       const id=/^\/scenarios\/([a-f0-9]{24})$/.exec(req.url)?.[1];
       if(req.method==='DELETE'&&id)return res.end(JSON.stringify(await manager.remove(id)));
       res.writeHead(404).end('{"error":"Unknown scenario endpoint"}');

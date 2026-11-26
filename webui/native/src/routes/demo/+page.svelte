@@ -3715,10 +3715,10 @@
           >
           {#if scenarioMode === "add-scenario"}
             <label class="audio-choice">Choose documents<input
-              class="audio-file-input" aria-label="Scenario documents" type="file" multiple accept=".pdf,.docx,.xlsx,.csv,.txt,.md,.html,.htm,.png,.jpg,.jpeg,.gif,.webp"
+              class="audio-file-input" aria-label="Scenario documents" type="file" multiple accept=".csv,.html,.htm,.png,.jpg,.jpeg,.gif,.webp"
               disabled={knowledgeUploading} on:change={(event) => chooseKnowledgeFiles(event.currentTarget.files)}
             /></label>
-            <small>PDF, DOCX, XLSX, CSV, TXT, Markdown, HTML · up to 8 files, 10 MiB total</small>
+            <small>CSV table or HTML call script (+ its images) · one SOP per file, 10 MiB total</small>
             <small>Select HTML and its companion images together.</small>
             {#each newScenarioFiles as file}<p>{file.name} · {Math.ceil(file.size / 1024)} KB</p>{/each}
             <button disabled={knowledgeUploading || !newScenarioFiles.length} on:click={uploadKnowledgeScenario}>

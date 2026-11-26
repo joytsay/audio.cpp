@@ -29,7 +29,7 @@ export async function listKnowledgeScenarios(): Promise<KnowledgeScenario[]> {
 const companionImage = /\.(?:png|jpe?g|gif|webp)$/i;
 async function encodeScenarioFiles(files: File[],signal: AbortSignal) {
   if(!files.length||files.length>8)throw new Error('Choose 1–8 files.');
-  if(files.some(file=>!file.size||(!/\.(pdf|docx|xlsx|csv|txt|md|html?)$/i.test(file.name)&&!companionImage.test(file.name))))throw new Error('Choose PDF, DOCX, XLSX, CSV, TXT, Markdown or HTML files.');
+  if(files.some(file=>!file.size||(!/\.(csv|html?)$/i.test(file.name)&&!companionImage.test(file.name))))throw new Error('Choose a CSV table or an HTML call script (with its images).');
   if(files.reduce((sum,file)=>sum+file.size,0)>10*1024*1024)throw new Error('Files must total 10 MiB or less.');
   const encoded=[];
   for(const file of files){

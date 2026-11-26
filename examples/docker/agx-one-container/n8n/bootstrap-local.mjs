@@ -267,6 +267,8 @@ export async function prepareStartupWorkflow({
     await upgradeResultsColumn();
     const scenarios=createScenarioManager();
     await scenarios.repairDispatchDates();
+    // SOP workflows for uploads that predate them, and the router.
+    try{await scenarios.syncSops();}catch(error){console.error('[ivr-n8n] SOP workflows not synced:',error.message);}
   },
   publish=publishWorkflow,
   autoPublish=process.env.N8N_AUTO_PUBLISH_WORKFLOW!=='false',

@@ -78,3 +78,8 @@ docs/FALCON_H1_0.1B_PORT_PLAN.md
 /llama-models/.conversion/
 /llama-models/.asr-postprocess/
 /rag-data
+/geovision_extension_directory_clean.csv
+/*.html
+/*.gif
+/*.txt
+/*.png

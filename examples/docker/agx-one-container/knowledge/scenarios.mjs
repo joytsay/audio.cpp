@@ -8,7 +8,8 @@ import {imageType} from './rag-assets.mjs';
 import {mockCallScript} from './mock-call.mjs';
 
 const maxBytes=10*1024*1024;
-const extensions=new Set(['.pdf','.docx','.xlsx','.csv','.txt','.md','.html','.htm']);
+// An SOP is a CSV table (front-desk directory) or an HTML call script.
+const extensions=new Set(['.csv','.html','.htm']);
 const imageExtensions=new Set(['.png','.jpg','.jpeg','.gif','.webp']);
 const fail=(message,status=400)=>Object.assign(new Error(message),{status});
 const hash=bytes=>createHash('sha256').update(bytes).digest('hex');
@@ -17,7 +18,7 @@ export function validateScenarioUpload(input, allowed=extensions){
  if(!Array.isArray(input.files)||input.files.length<1||input.files.length>8)throw fail('Choose 1–8 documents');
  let total=0;
  const files=input.files.map(file=>{
-  if(!file||typeof file.name!=='string'||!file.name.trim()||file.name.length>200||/[\\/\x00-\x1f]/.test(file.name)||!allowed.has(path.extname(file.name).toLowerCase()))throw fail('Supported files: PDF, DOCX, XLSX, CSV, TXT, Markdown and HTML (companion images require HTML)');
+  if(!file||typeof file.name!=='string'||!file.name.trim()||file.name.length>200||/[\\/\x00-\x1f]/.test(file.name)||!allowed.has(path.extname(file.name).toLowerCase()))throw fail('Upload a CSV table or an HTML call script (companion images require HTML)');
   if(typeof file.data!=='string'||file.data.length>Math.ceil(maxBytes/3)*4)throw fail('Documents must total 10 MiB or less',413);
   const bytes=Buffer.from(file.data,'base64');
   if(!bytes.length||bytes.toString('base64')!==file.data)throw fail('Invalid or empty document data');

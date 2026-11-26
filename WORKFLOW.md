@@ -1,23 +1,24 @@
 # GeoVision IVR Workflow
 
-[Knowledge overview](knowledge/README.md) · [Demo and Compose setup](examples/docker/agx-one-container/README.md) · [n8n workflow guide](examples/docker/agx-one-container/n8n/README.md)
+[Knowledge overview](knowledge/README.md) · [Demo and Compose setup](examples/docker/agx-one-container/README.md) · [n8n workflow guide](examples/docker/agx-one-container/n8n/README.md) · [IVR call engine](examples/docker/agx-one-container/knowledge/README.md#ivr-call-engine)
 
 ## Architecture
 
-The Demo's voice path is **VAD → STT / ASR → n8n → TTS**.
-With **Dialogue source → n8n**, **GeoVision · Workflow** routes fixed replies
-and structured lookup results directly to IVR Output. The AI Agent uses the
-selected local LLM and can call Scenario MCP tools to compose other replies.
-audio.cpp handles speech recognition and synthesis.
+The voice path is **VAD → STT / ASR → n8n → TTS**. With **Dialogue source → n8n**,
+**GeoVision · Workflow** passes every turn to the **IVR call engine** in the knowledge
+service. The engine runs the whole call from the uploaded HTML call script and its
+images. No AI Agent, memory node or MCP tool sits in
+the call path. The engine keeps each call's state on disk, so restarting n8n does not
+lose a call. audio.cpp handles speech recognition and synthesis.
 
 ```text
-   Browser microphone             SIP caller                  Typed input
-           │                         │                            │
+   Browser microphone             SIP caller                  Typed input /
+           │                         │                        demo mock call
            │                         ▼                            │
            │            ┌─────────────────────────┐               │
-           │            │ Optional SIP greeting   │               │
-           │            │ greetings.csv + saved   │               │
-           │            │ TTS settings → playback │               │
+           │            │ SIP greeting +          │               │
+           │            │ script's language prompt│               │
+           │            │ (DTMF 1/2 selects)      │               │
            │            └────────────┬────────────┘               │
            │                         │ Listen                     │
            └────────────┬────────────┘                            │
@@ -25,175 +26,269 @@ audio.cpp handles speech recognition and synthesis.
              ┌──────────────────────┐                             │
              │  audio.cpp           │                             │
              │  VAD → STT / ASR     │                             │
-             │  Speech → transcript │                             │
+             │  hotwords.csv        │                             │
+             │  (+ SOP terms)       │                             │
              └──────────┬───────────┘                             │
-                        │                                         │
                         └───────────────┬─────────────────────────┘
                                         ▼
              ┌────────────────────────────────────────────────────┐
-             │  Demo / SIP dialogue                               │
-             │  Normalize transcript + attach session and history │
-             └──────────────────────────┬─────────────────────────┘
-                                        │ IVR agent webhook
-                                        ▼
-  ┌──────────────────────────────────────────────────────────────────────┐
-  │  n8n · GeoVision Workflow                                            │
-  │                                                                      │
-  │  ┌───────────┐                                                       │
-  │  │ IVR Input │──▶ Register caller turn                               │
-  │  └───────────┘             │                                         │
-  │  ┌◀───── Fixed reply ──────┤                                         │
-  │  │                         ▼                                         │
-  │  │                 Retrieve or save                                  │
-  │  │                         ├─ Structured lookup result ────────────┐ │
-  │  │                         └──┐                                    │ │
-  │  │                            ▼ Other context                      │ │
-  │  │                  ┌─────────────────┐      ┌──────────────────┐  │ │
-  │  │                  │    AI Agent     │◀────▶│  Local LLM       │  │ │
-  │  │                  │                 │      │  Selected model  │  │ │
-  │  │                  │ Session memory  │      └──────────────────┘  │ │
-  │  │                  └─────────┬─────┬─┘                            │ │
-  │  │         tool call / result │     └──────────────────────────┐   │ │
-  │  │                            ↕                          reply │   │ │
-  │  │                 ┌────────────────────┐                      │   │ │
-  │  │                 │ Scenario MCP Server│                      │   │ │
-  │  │                 └─────────┬──────────┘                      │   │ │
-  │  │                            │                                │   │ │
-  │  │         ┌──────────────────┴──────────────────┐             │   │ │
-  │  │         ↕                  ↕                  ↕             │   │ │
-  │  │ ┌────────────────┐ ┌────────────────┐ ┌────────────────┐    │   │ │
-  │  │ │ Uploaded file  │ │ retrieve_      │ │ add_work_order │    │   │ │
-  │  │ │ scenario tool  │ │ knowledge      │ │                │    │   │ │
-  │  │ └───────┬────────┘ └───────┬────────┘ └───────┬────────┘    │   │ │
-  │  │         ▼                  ▼                  ▼             │   │ │
-  │  │ ┌────────────────┐ ┌────────────────┐ ┌────────────────┐    │   │ │
-  │  │ │ File's n8n     │ │ Imported rows  │ │ Native n8n     │    │   │ │
-  │  │ │ subworkflow    │ │ or source Q/A  │ │ work_orders    │    │   │ │
-  │  │ └───────┬────────┘ │                │ │ Data Table     │    │   │ │
-  │  │         ▼          │ Possible name  │ └────────────────┘    │   │ │
-  │  │ ┌────────────────┐ │ with no match  │                       │   │ │
-  │  │ │ Same-name n8n  │ │ → source Q/A   │                       │   │ │
-  │  │ │ Data Table +   │ └────────────────┘                       │   │ │
-  │  │ │ voice template │                                          │   │ │
-  │  │ └────────────────┘                                          │   │ │
-  │  │                                     ┌───────────────────────┴───┘ │
-  │  │                                     ▼                             │
-  │  │                            Prepare IVR output                     │
-  │  │                                     ▼                             │
-  │  └──────────────────────────────▶ IVR Output                         │
-  └────────────────────────────────────────┬─────────────────────────────┘
-                                           │ reply text + tool events
-                                           ▼
-                              ┌─────────────────────────┐
-                              │  audio.cpp · TTS        │
-                              │  Selected voice / clone │
-                              │  Streaming or offline   │
-                              └────────────┬────────────┘
-                                           ▼
-                              Browser speaker / SIP caller
+             │  Demo / SIP dialogue (shared n8n-dialogue client)  │
+             │  Normalize transcript · session ID                 │
+             │  Start wait-notice timer (default 2 s)             │
+             └───────┬──────────────────────────────┬─────────────┘
+          ivr-agent  │                              │ ivr-intent (in parallel)
+                     ▼                              ▼
+  ┌───────────────────────────────────────────────────────────────────────┐
+  │  n8n · GeoVision Workflow   (webhook ivr-agent)                       │
+  │                                                                       │
+  │  IVR Input → Ensure work_orders → Read work orders · Data Table       │
+  │      → Add saved work orders → IVR call engine ──────────┐            │
+  │                                                          ▼            │
+  │  IVR Intent Input → What is the caller asking?     IVR Output ──▶ reply
+  │      → IVR Intent Output (scenario + wait phrases)       │            │
+  │                                              after reply │            │
+  │                 ┌────────────────────────────────────────┤            │
+  │                 ▼                                        ▼            │
+  │   Work order to save?                      Call session record        │
+  │   → Extract work orders                    → Ensure call_sessions     │
+  │   → Save work order · Data Table             columns                  │
+  │     (work_orders)                          → Save call session ·      │
+  │                                              Data Table               │
+  │                                              (call_sessions)          │
+  └───────────────────────────────────┬───────────────────────────────────┘
+                                      │ HTTP
+                                      ▼
+            ┌───────────────────────────────────────────────────┐
+            │  Knowledge service · POST /ivr (IVR call engine)  │
+            │  HTML call script → opening, menu, scenarios      │
+            │  Turns and routing: local text LLM                │
+            │  (LFM2.5 1.2B, JSON-schema output)                │
+            │  Figures: vision LLM (ivr-vision), read once,     │
+            │  cached                                           │
+            │  Sessions and model cache under /data             │
+            └───────────────────────────────────────────────────┘
+
+  Reply text (one sentence per bubble)
+                                      ▼
+                         ┌─────────────────────────┐
+                         │  audio.cpp · TTS        │
+                         │  Selected voice / clone │
+                         │  Streaming or offline   │
+                         └────────────┬────────────┘
+                                      ▼
+            Browser speaker (normalized volume) / SIP caller
 
        Demo observes: caller and assistant waves, conversation and events.
 ```
 
-STT (speech-to-text) and ASR (automatic speech recognition) describe the same
-recognition stage here. Typed input enters at the transcript stage. Browser and
-SIP turns use the same n8n agent workflow.
+STT (speech-to-text) and ASR (automatic speech recognition) are the same stage
+here. Typed input and mock-call lines enter at the transcript stage. Browser and
+SIP turns use the same workflow, engine, routing and wait notice.
 
-The Demo's upload webhook creates the uploaded-file tool shown above.
-[Upload a scenario](#upload-a-scenario)
+## SOP agents
+
+Every uploaded file also becomes an **SOP**: the local LLM (LFM2.5 by default)
+writes its purpose, answer rules, Q/A pairs and hotwords, and n8n builds one agent
+for it. **GeoVision · SOPs** is the front desk at `/webhook/ivr-sop`: it picks the
+SOP for each turn and speaks only what that SOP's skills return. The demo and SIP
+still post to `ivr-agent`; `ivr-sop` is the multi-agent path.
+
+```text
+  ┌───────────────────────────────────────────────────────────────────────┐
+  │  n8n · GeoVision · SOPs   (front desk agent, webhook ivr-sop)         │
+  │                                                                       │
+  │  SOP Input → SOP context (this call's active SOP) → Turn              │
+  │    ├─ new call, several SOPs → greeting that offers each SOP          │
+  │    ├─ one SOP only → run it                                           │
+  │    └─ otherwise → RAG routing evidence (/sops/rank, every SOP)        │
+  │         ├─ one clear exact match (a name, a code) → run that SOP      │
+  │         └─ else Front desk agent (LFM2.5) picks an SOP agent tool     │
+  │                                   │                                   │
+  │                                   ▼                                   │
+  │  GeoVision · SOP · <file>   (one agent per uploaded file)             │
+  │    HTML call script → Runmap skill every turn; RAG skill for facts.   │
+  │                       The reply is the Runmap step, word for word.    │
+  │    CSV table        → RAG skill first, then the agent answers.        │
+  │                       Numbers and codes must appear in a retrieved    │
+  │                       row with the asked name, or caller rephrases.   │
+  │                                   │                                   │
+  │                                   ▼                                   │
+  │  Prepare reply → Remember SOP (/sops/session) → SOP Output ──▶ reply  │
+  │      after a Runmap turn: save work_orders and call_sessions          │
+  └───────────────────────────────────────────────────────────────────────┘
+
+  Shared skills (n8n workflows any agent calls as tools)
+    GeoVision · Skill · RAG     Qdrant semantic search + exact keyword match
+                                over one SOP
+    GeoVision · Skill · Runmap  next step of the opening and call script
+                                (knowledge POST /skills/script → IVR call engine)
+    GeoVision · Skill · Embed   SOP Q/A + passages → Qwen3-Embedding → Qdrant
+                                (webhook ivr-skill-embed, run on upload)
+```
 
 ## One conversation turn
 
-1. **Listen:** browser or SIP audio enters VAD, which detects the end of speech.
-2. **Transcribe:** the selected ASR model produces text. Transcript normalization,
-   the session ID and caller history accompany the request to n8n.
-3. **Route.** n8n can return a fixed reply or call Scenario MCP. Structured
-   results go directly to reply formatting. Other retrieved context goes to
-   the AI Agent, which uses the selected LLM and session memory.
-4. **Use tools when needed:** Scenario MCP exposes the uploaded-file tools and
-   the core retrieval/save tools. A file tool calls its subworkflow, reads the
-   live Data Table and returns original field labels and matching records or
-   dialogue guidance. The LLM receives agent tool results before answering.
-5. **Reply:** n8n returns a short Traditional Chinese reply and the completed
-   tool names. While a lookup exceeds the configured wait time, the Demo/SIP
-   dialogue layer can speak `查詢中，請稍後。` through TTS.
-6. **Speak and display:** the selected TTS model generates the reply audio for
-   browser or SIP playback. The Demo shows the transcript, assistant reply,
-   audio waveforms and workflow/tool events.
+1. **Listen.** VAD detects the end of browser or SIP speech.
+2. **Transcribe.** The selected ASR model produces text, biased by the
+   **ASR hotwords / context** in the demo's left panel (`hotwords.csv`, which the
+   SIP container also mounts). The transcript is normalized and sent to
+   `/webhook/ivr-agent` with the session ID.
+3. **Run the script.** The IVR call engine handles three stages:
+   - **Opening:** the AI lines before the first scenario, spoken verbatim, starting with the
+     language prompt.
+   - **Menu:** routes the caller to a scenario by number, title or description.
+   - **Scenario turns:** grounded in that section's example dialogue and figures.
 
-Structured lookups include directory names, equipment models and serial
-numbers. If the request looks like a name and the directory has no match,
-the workflow searches the source Q/A.
-Work-order saves are acknowledged only after the write succeeds.
+   A built-in lookup answers questions about saved work orders: the latest or
+   oldest one, a work order number, or a detail of the one just answered (for
+   example its maintenance work). It gives short answers from the actual row fields.
+4. **Reply.** n8n returns the reply first. The demo shows one sentence per bubble,
+   and long sentences are split at clause breaks.
+5. **Save.** After the reply, n8n records the call:
+   - A completed work-order scenario is extracted and upserted into `work_orders`.
+   - The call's row in `call_sessions` is updated.
+6. **Speak.** The selected TTS model speaks the reply in the browser or on the SIP
+   call. In the browser, every voice plays at one normalized loudness, scaled by
+   **Volume** (1–10).
+
+## Wait notice
+
+Alongside each turn, the client posts the same text to `/webhook/ivr-intent`. The
+engine says which scenario the turn is about and returns that scenario's wait
+phrases: a short acknowledgement, what is being looked up and a request to wait.
+The model writes them once per script,
+and they are cached. If the reply has not arrived after the **Wait notice** delay
+(left panel, below ASR, default 2 s), the caller hears one of these phrases.
+
+- **Browser:** synthesizes the phrase as soon as it is known, so it plays
+  without delay.
+- **SIP:** speaks it as the turn's `progress` event.
+
+A notice never repeats the previous one in the same call, and a turn that answers
+in time is not announced. The notice is not part of the dialogue history.
+
+## Call records
+
+| Data Table | Key | Contents |
+| --- | --- | --- |
+| `work_orders` | `report_key` | One row per completed work-order scenario: dispatch date, equipment, maintenance items, quantity, test result, notes, the caller's words and the scenario dialogue. |
+| `call_sessions` | `session_id` | One row per call, updated after every reply. See below. |
+
+Each `call_sessions` row holds:
+
+- `channel`: `sip` or `web`.
+- `date` and `time`: when the call started.
+- One column per opening question. The model names these in English snake_case
+  when the script is first used, for example `employee_id_last3` = `847`.
+- `opening`: the same answers as JSON.
+- `conversation`: the whole call.
+- `conversation_duration`: the call length, as `HH:MM:SS`.
+
+See [Call sessions](examples/docker/agx-one-container/n8n/README.md#call-sessions).
+
+## Mock call
+
+**Scenario → Run mock call** plays a test call from the script's own caller lines.
+First come the opening answers, then the checked scenarios (by default the outbound ones,
+such as 1 and 8). The order is Q1 A1 Q2 A2…. The `ivr-mock-call` webhook varies
+each run:
+
+- Names change.
+- Numbers get new values of the same length and format.
+- Dates and times stay valid, and scores stay on the asked scale.
+- Part, model and fault codes, the language digit and outbound titles are kept.
+
+Each run differs by mode:
+
+- **Browser:**
+  - Starts over from the greeting.
+  - Speaks each line in the **Caller voice** (default TsaiKY).
+  - Waits for the reply, then sends the next line.
+  - Hangs up after the last reply.
+- **SIP:** runs inside the current phone call. Each line is sent as text, and the
+  reply is spoken on the phone. Place the call first and end it from the phone.
+
+**Stop scenario** or **Hang up** stops a run. Clicking one mockup question sends
+just that line.
 
 ## Upload a scenario
 
-**Scenarios → Add New Scenario** accepts PDF, DOCX, XLSX, CSV, TXT and Markdown.
-Each uploaded file creates one tool and one n8n subworkflow. Excel files create
-a native Data Table per worksheet. Other files create one same-named table.
+**Scenarios → Add New Scenario** accepts a CSV table (for example a front-desk
+directory) or an HTML call script. Each file becomes one [SOP](#sop-agents). To run
+calls, select the HTML call script and its companion images together.
+Reimporting the same HTML adds any missing images. The engine transcribes the
+figures when the service starts, so the first call does not wait.
 
 ```text
                  Demo · Add New Scenario
+                 (CSV table, or HTML call script + images)
                                │ POST /n8n/webhook/ivr-import-scenario
                                ▼
                  n8n · Upload scenario file
                                │
                                ▼
                  ┌───────────────────────────┐
-                 │ Extract records, tables   │
-                 │ and Q/A dialogue templates│
+                 │  Knowledge service        │
+                 │  Store files, extract the │
+                 │  call script / records    │
                  └─────────────┬─────────────┘
                                ▼
                  ┌───────────────────────────┐
-                 │ Map source headers to    │
-                 │ n8n-compatible column IDs│
-                 │ Preserve original labels │
+                 │  Native Data Tables for   │
+                 │  tabular sources          │
+                 └─────────────┬─────────────┘
+                               │ in the background, after the upload answers
+                               ▼
+                 ┌───────────────────────────┐
+                 │  SOP writer (LFM2.5)      │
+                 │  purpose, instructions,   │
+                 │  Q/A, hotwords            │
+                 │  → added to hotwords.csv  │
                  └─────────────┬─────────────┘
                                ▼
                  ┌───────────────────────────┐
-                 │ Create native Data Table  │
-                 │ and import source rows    │
+                 │  n8n · Skill · Embed      │
+                 │  Q/A + passages →         │
+                 │  Qwen3-Embedding-0.6B →   │
+                 │  Qdrant (sop_<id>)        │
                  └─────────────┬─────────────┘
                                ▼
                  ┌───────────────────────────┐
-                 │ Publish file subworkflow  │
-                 │ Register Scenario MCP tool│
+                 │  n8n · SOP agent workflow │
+                 │  built; front desk agent  │
+                 │  rebuilt with its tool    │
                  └─────────────┬─────────────┘
                                ▼
-                     Available to the AI Agent
+                 Available to the IVR call engine (ivr-agent:
+                 latest HTML script by default, SIP scenario chosen
+                 in the demo) and to the SOP agents (ivr-sop)
 ```
 
-| Uploaded file | MCP tool display name | n8n subworkflow | n8n Data Table |
-| --- | --- | --- | --- |
-| `geovision_extension_directory_clean.csv` | `geovision_extension_directory_clean` | `geovision_extension_directory_clean` | `geovision_extension_directory_clean` |
-| `CSD資料庫.xlsx` | `CSD資料庫` | `CSD資料庫` | `CSD資料庫_派工`, `CSD資料庫_客戶設備`, `CSD資料庫_設備類型`, `CSD資料庫_通訊錄` |
-| `情境模擬_20261105.docx` | `情境模擬_20261105` | `情境模擬_20261105` | `情境模擬_20261105` |
-
-These are upload examples; documents are added by the user. MCP uses an ASCII
-wire alias where needed while preserving the filename as the display name.
-The Excel tool can search all worksheets or a specified worksheet. Dialogue
-examples guide the conversation and retain their source attribution.
-Screenshot tables use OCR and need verification against the source images.
-
-The MCP tool exposes a callable capability to the agent; its subworkflow executes
-the table query. Tool results restore original headers even though n8n stores
-English column IDs. Colliding translated IDs receive suffixes such as `_2`.
-Identical upload retries reuse saved mappings and retain duplicate source rows.
+**Remove scenario** deletes the uploaded files and any tables created for them.
+If the demo's **SIP scenario** is saved empty, SIP calls stop using the call
+script and the `prompt.csv` dialogue source answers instead.
 
 ## Components and entry points
 
 | Component | Responsibility | Reference |
 | --- | --- | --- |
-| Demo | Microphone/text input, playback, conversation, waveforms and events | [Demo page](webui/native/src/routes/demo/+page.svelte) |
-| SIP pipeline | Caller audio, VAD/ASR and reply playback | [SIP pipeline](examples/ivrTTS/sipPipeline.cpp) |
-| n8n dialogue transport | Sends turns, reports tool completion and schedules wait notices | [Shared transport](webui/native/src/lib/n8n-dialogue.ts) |
-| GeoVision · Workflow | AI Agent, selected LLM, memory, MCP tools and reply formatting | [Workflow definition](examples/docker/agx-one-container/n8n/workflow.json) |
-| Scenario manager | Creates/publishes file workflows, tables and MCP registrations | [Workflow manager](examples/docker/agx-one-container/n8n/scenario-workflows.mjs) |
-| Knowledge service | Stores uploads, extracted records, templates and original-header mappings | [Knowledge service](examples/docker/agx-one-container/knowledge/README.md) |
+| Demo | Microphone/text input, mock call, playback and loudness, conversation, waveforms and events | [Demo page](webui/native/src/routes/demo/+page.svelte) |
+| SIP pipeline | Caller audio, VAD/ASR (hotwords) and reply playback | [SIP pipeline](examples/ivrTTS/sipPipeline.cpp) |
+| n8n dialogue transport | Sends turns, fetches the intent, schedules and plays wait notices | [Shared transport](webui/native/src/lib/n8n-dialogue.ts) |
+| GeoVision · Workflow | IVR webhooks (agent, intent, mock call), work_orders and call_sessions tables | [Workflow definition](examples/docker/agx-one-container/n8n/workflow.json) |
+| IVR call engine | Runs calls from the HTML script: opening, routing, scenario replies, lookups, records | [Engine](examples/docker/agx-one-container/knowledge/ivr-engine.mjs) |
+| Scenario manager | Scenario uploads and removal; creates the call_sessions columns; builds the SOP workflows | [Workflow manager](examples/docker/agx-one-container/n8n/scenario-workflows.mjs) |
+| SOP writer | Writes each upload's SOP (Q/A, hotwords); retrieval, ranking and SOP sessions | [SOPs](examples/docker/agx-one-container/knowledge/sops.mjs) |
+| SOP workflows | Front desk agent, one agent per SOP, RAG / Runmap / Embed skills | [SOP workflow templates](examples/docker/agx-one-container/n8n/sop-workflows.mjs) |
 
-The browser sends turns to `/n8n/webhook/ivr-agent`; the gateway forwards them to
-n8n's `/webhook/ivr-agent`. Scenario MCP retains `/mcp/ivr-maintenance` as its
-endpoint. The main workflow remains **GeoVision · Workflow** as uploads add tools.
+| Webhook (browser proxy `/n8n/webhook/…`) | Purpose |
+| --- | --- |
+| `ivr-agent` | One caller turn, or `{start: true}` to begin a call |
+| `ivr-intent` | Scenario and wait phrases for a turn in progress |
+| `ivr-mock-call` | Varied caller lines for the mock call |
+| `ivr-import-scenario` | Upload a scenario file |
+| `ivr-sop` | One caller turn through the SOP front desk agent |
+| `ivr-skill-embed` | Embed an SOP into Qdrant (called after upload) |
 
 | Local interface | URL |
 | --- | --- |
@@ -203,10 +298,14 @@ endpoint. The main workflow remains **GeoVision · Workflow** as uploads add too
 | Full interface over HTTPS | `https://127.0.0.1:8084/` |
 | n8n workflow editor | `http://127.0.0.1:5678/workflow/ivrWorkflow` |
 
-Original files, templates and mappings persist in `audiocpp-knowledge-data`;
-native Data Tables and workflows persist in the n8n data volume. Removing a
-scenario removes its registered tool, generated subworkflow, owned Data Tables
-and stored source files.
+Where things are kept:
+
+- **`audiocpp-knowledge-data` volume:** uploaded files, call sessions
+  (`/data/ivr-sessions`, which expire after two hours idle) and the model cache
+  (`/data/ivr-cache`: figures, translations, wait phrases and column names), and the
+  written SOPs.
+- **`ivr-qdrant-data` volume:** SOP vectors (`sop_<id>` collections).
+- **n8n data volume:** Data Tables and workflows.
 
 Diagram layout inspired by the boxed architecture overview in
 [CAAL](https://github.com/coreworxlab/caal#architecture).

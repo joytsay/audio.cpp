@@ -238,6 +238,9 @@ export function createIvrEngine({
   dataRoot = process.env.KNOWLEDGE_DATA_ROOT || '/data',
   llmUrl = process.env.IVR_LLM_URL || 'http://voice-ai:8087/v1',
   model = process.env.IVR_LLM_MODEL || 'ivr-vision',
+  // Figures need a vision model; every other call uses the text model above.
+  visionUrl = process.env.IVR_VISION_URL || llmUrl,
+  visionModel = process.env.IVR_VISION_MODEL || model,
   fetchImpl = fetch,
   now = () => Date.now(),
   log = console.log,
@@ -252,13 +255,13 @@ export function createIvrEngine({
   const routes = new Map();
   const pendingWaits = new Map();
 
-  async function llm(messages, schema, {maxTokens = 400, temperature = 0.1, timeout = 90_000, repeatPenalty} = {}) {
-    const body = {model, messages, temperature, max_tokens: maxTokens, stream: false,
+  async function llm(messages, schema, {maxTokens = 400, temperature = 0.1, timeout = 90_000, repeatPenalty, vision = false} = {}) {
+    const body = {model: vision ? visionModel : model, messages, temperature, max_tokens: maxTokens, stream: false,
       chat_template_kwargs: {enable_thinking: false}, ...(repeatPenalty ? {repeat_penalty: repeatPenalty} : {})};
     if (schema) body.response_format = {type: 'json_schema', json_schema: {name: 'reply', schema}};
     let lastError;
     for (let attempt = 0; attempt < 2; attempt++) {
-      const response = await fetchImpl(`${llmUrl.replace(/\/$/, '')}/chat/completions`, {
+      const response = await fetchImpl(`${(vision ? visionUrl : llmUrl).replace(/\/$/, '')}/chat/completions`, {
         method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body),
         signal: AbortSignal.timeout(timeout),
       });
@@ -314,7 +317,7 @@ export function createIvrEngine({
         const text = await llm([{role: 'user', content: [
           {type: 'image_url', image_url: {url: image}},
           {type: 'text', text: figurePrompt},
-        ]}], undefined, {maxTokens: 1500, temperature: 0, timeout: 180_000, repeatPenalty: 1.1});
+        ]}], undefined, {maxTokens: 1500, temperature: 0, timeout: 180_000, repeatPenalty: 1.1, vision: true});
         await saveCache(scriptId, current => ({figures: {...current.figures, [figure.key]: text}}));
         log(`[ivr-engine] Transcribed figure ${figure.key.slice(0, 12)} (${text.length} chars)`);
         return text;
