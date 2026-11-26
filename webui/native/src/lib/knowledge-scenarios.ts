@@ -26,11 +26,7 @@ export async function listKnowledgeScenarios(): Promise<KnowledgeScenario[]> {
   if(!Array.isArray(result.scenarios))throw new Error('Invalid saved scenario list');
   return result.scenarios;
 }
-const companionImage = /\.(?:png|jpe?g|gif|webp)$/i;
-async function encodeScenarioFiles(files: File[],signal: AbortSignal) {
-  if(!files.length||files.length>8)throw new Error('Choose 1–8 files.');
-  if(files.some(file=>!file.size||(!/\.(csv|html?)$/i.test(file.name)&&!companionImage.test(file.name))))throw new Error('Choose a CSV table or an HTML call script (with its images).');
-  if(files.reduce((sum,file)=>sum+file.size,0)>10*1024*1024)throw new Error('Files must total 10 MiB or less.');
+async function encodeFiles(files: File[],signal: AbortSignal) {
   const encoded=[];
   for(const file of files){
     signal.throwIfAborted();
@@ -42,26 +38,69 @@ async function encodeScenarioFiles(files: File[],signal: AbortSignal) {
   return encoded;
 }
 
-export async function importScenarioFiles(files: File[],signal: AbortSignal,onImport: (scenario: KnowledgeScenario)=>void) {
-  const encoded=await encodeScenarioFiles(files,signal);
-  const attachments=encoded.filter(file=>companionImage.test(file.name));
-  const documents=encoded.filter(file=>!companionImage.test(file.name));
-  const html=documents.filter(file=>/\.html?$/i.test(file.name));
-  if(attachments.length&&html.length!==1)throw new Error('Select exactly one HTML document when attaching companion images.');
-  for(const file of documents){
-    const input=attachments.length&&file===html[0]?{...file,attachments}:file;
-    const {scenario}=await request<{scenario: KnowledgeScenario}>('/n8n/webhook/ivr-import-scenario',{
-      method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(input),signal,
-    });
-    if(!scenario?.id||!Array.isArray(scenario.tables))throw new Error(`Import did not complete for ${file.name}.`);
-    onImport(scenario);
-  }
-}
-
 export async function removeKnowledgeScenario(id: string): Promise<void> {
   if(!/^[a-f0-9]{24}$/.test(id))throw new Error('Choose an uploaded scenario to remove.');
   const result=await request<{id: string; removed: boolean}>('/n8n/webhook/ivr-delete-scenario',{
     method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id}),
   });
   if(result.id!==id||result.removed!==true)throw new Error('Scenario workflow did not confirm removal.');
+}
+
+// ── SOP drafts ──────────────────────────────────────────────────────────────
+// Every upload is first tidied by the local LLM into one SOP page (agent
+// prompt, hotwords, opening, scenarios, knowledge base). The user opens the
+// page, then confirms it: the page, its images and its tables are imported.
+export type SopDraft = {
+  id: string; status: "writing" | "ready" | "failed"; error?: string; url: string; createdAt?: string;
+  uploads: string[]; name?: string; page?: string; scenarios?: string[]; hotwords?: number;
+  images?: string[]; tables?: string[]; files?: string[];
+};
+const draftRoot='/knowledge/sop-drafts';
+export const sopDraftExtensions=/\.(?:docx|html?|png|jpe?g|gif|md|markdown|csv|xlsx|pdf)$/i;
+async function draftRequest<T>(url: string, init: RequestInit = {}): Promise<T> {
+  const response=await fetch(url,{cache:'no-store',...init});
+  const body=await response.json().catch(()=>undefined);
+  if(!response.ok||!body)throw new Error(`SOP draft failed (${response.status}): ${body?.error||'No JSON response'}`);
+  return body as T;
+}
+export const sopDraftPage=(draft: SopDraft)=>`/knowledge/${draft.url}`;
+export async function createSopDraft(files: File[],signal: AbortSignal,onProgress: (draft: SopDraft)=>void): Promise<SopDraft> {
+  if(!files.length||files.length>8)throw new Error('Choose 1–8 files.');
+  if(files.some(file=>!file.size||!sopDraftExtensions.test(file.name)))throw new Error('Choose DOCX, HTML, PDF, Markdown, CSV, XLSX, PNG, JPEG or GIF files.');
+  if(files.reduce((sum,file)=>sum+file.size,0)>10*1024*1024)throw new Error('Files must total 10 MiB or less.');
+  const encoded=await encodeFiles(files,signal);
+  const draft=await draftRequest<SopDraft>(draftRoot,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({files:encoded}),signal});
+  onProgress(draft);
+  return waitSopDraft(draft,signal,onProgress);
+}
+// The LLM writes the page in the background: a long document takes minutes.
+// Also resumes a draft after the page is reloaded.
+export async function waitSopDraft(draft: SopDraft,signal: AbortSignal,onProgress: (draft: SopDraft)=>void): Promise<SopDraft> {
+  while(draft.status==='writing'){
+    await new Promise(resolve=>setTimeout(resolve,3000));
+    signal.throwIfAborted();
+    draft=await draftRequest<SopDraft>(`${draftRoot}/${draft.id}`,{signal});
+    onProgress(draft);
+  }
+  if(draft.status==='failed')throw new Error(`SOP draft failed: ${draft.error||'unknown error'}`);
+  return draft;
+}
+export async function getSopDraft(id: string): Promise<SopDraft> {
+  if(!/^[a-f0-9]{24}$/.test(id))throw new Error('Invalid SOP draft ID.');
+  return draftRequest<SopDraft>(`${draftRoot}/${id}`);
+}
+export async function discardSopDraft(id: string): Promise<void> {
+  await draftRequest(`${draftRoot}/${id}`,{method:'DELETE'});
+}
+// Import a checked draft: the page (with its images) and each table.
+export async function confirmSopDraft(draft: SopDraft,signal: AbortSignal,onImport: (scenario: KnowledgeScenario)=>void) {
+  const bundle=await draftRequest<{documents: {name: string; data: string; attachments?: {name: string; data: string}[]}[]}>(`${draftRoot}/${draft.id}/bundle`,{signal});
+  if(!bundle.documents?.length)throw new Error('The SOP draft has nothing to import.');
+  for(const document of bundle.documents){
+    const {scenario}=await request<{scenario: KnowledgeScenario}>('/n8n/webhook/ivr-import-scenario',{
+      method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(document),signal,
+    });
+    if(!scenario?.id||!Array.isArray(scenario.tables))throw new Error(`Import did not complete for ${document.name}.`);
+    onImport(scenario);
+  }
 }

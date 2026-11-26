@@ -87,9 +87,10 @@ SIP turns use the same workflow, engine, routing and wait notice.
 
 ## SOP agents
 
-Every uploaded file also becomes an **SOP**: the local LLM (LFM2.5 by default)
-writes its purpose, answer rules, Q/A pairs and hotwords, and n8n builds one agent
-for it. **GeoVision · SOPs** is the front desk at `/webhook/ivr-sop`: it picks the
+Every confirmed [SOP page](#upload-a-scenario) becomes an **SOP**, with the rows of
+the tables it links. The page's AGENT PROMPT is the SOP's answer rules and its
+HOTWORDS join the ASR context (`hotwords.csv`) as soon as it is confirmed. The local LLM (LFM2.5 by default) writes the purpose and the
+Q/A pairs, and n8n builds one agent for each SOP. **GeoVision · SOPs** is the front desk at `/webhook/ivr-sop`: it picks the
 SOP for each turn and speaks only what that SOP's skills return. The demo and SIP
 still post to `ivr-agent`; `ivr-sop` is the multi-agent path.
 
@@ -105,9 +106,11 @@ still post to `ivr-agent`; `ivr-sop` is the multi-agent path.
   │         └─ else Front desk agent (LFM2.5) picks an SOP agent tool     │
   │                                   │                                   │
   │                                   ▼                                   │
-  │  GeoVision · SOP · <file>   (one agent per uploaded file)             │
-  │    HTML call script → Runmap skill every turn; RAG skill for facts.   │
+  │  GeoVision · SOP · <file>   (one agent per SOP)                       │
+  │    SOP page (HTML)  → Runmap skill every turn; RAG skill for facts.   │
   │                       The reply is the Runmap step, word for word.    │
+  │                       Its SOP also holds every row of the tables      │
+  │                       the page links (KNOWLEDGE BASE · TABLE:).       │
   │    CSV table        → RAG skill first, then the agent answers.        │
   │                       Numbers and codes must appear in a retrieved    │
   │                       row with the asked name, or caller rephrases.   │
@@ -121,7 +124,10 @@ still post to `ivr-agent`; `ivr-sop` is the multi-agent path.
     GeoVision · Skill · RAG     Qdrant semantic search + exact keyword match
                                 over one SOP
     GeoVision · Skill · Runmap  next step of the opening and call script
-                                (knowledge POST /skills/script → IVR call engine)
+                                (knowledge POST /skills/script → IVR call engine).
+                                A scenario reply is grounded in its script,
+                                figures and the linked table rows that best
+                                match the caller (up to 3)
     GeoVision · Skill · Embed   SOP Q/A + passages → Qwen3-Embedding → Qdrant
                                 (webhook ivr-skill-embed, run on upload)
 ```
@@ -213,36 +219,98 @@ just that line.
 
 ## Upload a scenario
 
-**Scenarios → Add New Scenario** accepts a CSV table (for example a front-desk
-directory) or an HTML call script. Each file becomes one [SOP](#sop-agents). To run
-calls, select the HTML call script and its companion images together.
-Reimporting the same HTML adds any missing images. The engine transcribes the
-figures when the service starts, so the first call does not wait.
+**Scenarios → Add New Scenario → Upload** accepts DOCX, HTML, PDF, Markdown,
+CSV, XLSX, PNG, JPEG and GIF (up to 8 files, 10 MiB). The files are not imported
+yet: the local LLM first tidies them into one **SOP page**. The demo shows
+**Open SOP draft**, **Confirm import** and **Discard**. Check the page, then confirm.
+To fix it, save the page, edit it and upload it again: an uploaded page keeps its
+own prompt and hotwords.
+
+The page has five parts. Only spoken lines and content are Chinese; every
+structure line is English.
 
 ```text
-                 Demo · Add New Scenario
-                 (CSV table, or HTML call script + images)
-                               │ POST /n8n/webhook/ivr-import-scenario
+AGENT PROMPT     You are the phone voice assistant for …   (English)
+HOTWORDS         王怡文, 黃培熏, F15P1H4K-GEX-EF-03, …
+OPENING          AI: 請先選語言：中文 1、英文2
+                 AI: 請進行身分驗證：請問此電話持有人名字是?
+                 USER: 王怡文
+                 …
+                 CHOOSE SCENARIO
+                 AI: 請問您要回報什麼內容?
+                 USER: 工單回報
+SCENARIOS        SCENARIO_01: 工單回報
+                   USER: …
+                   AI: …
+                   FIGURE: table.png
+KNOWLEDGE BASE   IMAGE: …png   TABLE: …csv · N rows   FILE: the uploaded original
+```
+
+- **A call script** (AI:/USER: turns under numbered scenarios) keeps its lines
+  word for word, and its images stay in their scenarios as `FIGURE:`.
+- **Any other document** is read in about 1,500-character parts, and the LLM
+  writes up to 2 scenarios per part, using only facts from the document.
+- **Tables** (CSV, XLSX sheets, DOCX tables, tables read from images) become CSV
+  files under `KNOWLEDGE BASE`, imported with the page (not as separate scenarios). The LLM writes lookup scenarios from each table's
+  columns and sample rows, so a table-only upload also gets a full page.
+- **The opening** is the document's own; without one, the standard opening above
+  is used, and its last `USER:` line is the first scenario's title.
+- **The agent prompt** is written by code from the page, always in English: start
+  every call with the OPENING in order, then CHOOSE SCENARIO, then follow the chosen
+  scenario; the scenario list; facts only from the SOP and its tables; reply in the
+  caller's language.
+- **Hotwords** are kept only if they appear in the document, plus every
+  letter-and-digit code.
+- **Traditional Chinese only:** every Chinese line on the page, the tables too, is
+  converted from Simplified with OpenCC. Text already in Traditional (台, 臺) is
+  kept as written.
+- **One scenario per upload,** listed under the uploaded file's name (for example
+  `情境模擬_20261105.docx`).
+
+The LLM writes only fields; the knowledge service renders the page, so the import
+always reads the same structure. Old scripts with `情境 1：` headings still import.
+
+```text
+                 Demo · Add New Scenario · Upload
+                               │ POST /knowledge/sop-drafts
                                ▼
-                 n8n · Upload scenario file
+                 ┌───────────────────────────┐
+                 │  Knowledge service        │
+                 │  Extract text, tables and │
+                 │  images; OCR images/PDF   │
+                 │  scans                    │
+                 └─────────────┬─────────────┘
+                               │ in the background; the demo polls
+                               ▼
+                 ┌───────────────────────────┐
+                 │  SOP tidy (LFM2.5)        │
+                 │  scenarios, agent prompt, │
+                 │  hotwords → SOP page      │
+                 └─────────────┬─────────────┘
+                               │ Open SOP draft → check → Confirm import
+                               ▼
+                 n8n · Upload scenario file  (ivr-import-scenario):
+                 the page with its images and table CSVs
                                │
                                ▼
                  ┌───────────────────────────┐
                  │  Knowledge service        │
-                 │  Store files, extract the │
+                 │  Store files, read the    │
                  │  call script / records    │
                  └─────────────┬─────────────┘
                                ▼
                  ┌───────────────────────────┐
-                 │  Native Data Tables for   │
-                 │  tabular sources          │
+                 │  hotwords.csv: the page's │
+                 │  HOTWORDS; the demo's     │
+                 │  hotwords box reloads     │
                  └─────────────┬─────────────┘
                                │ in the background, after the upload answers
                                ▼
                  ┌───────────────────────────┐
                  │  SOP writer (LFM2.5)      │
-                 │  purpose, instructions,   │
-                 │  Q/A, hotwords            │
+                 │  purpose, Q/A; prompt and │
+                 │  hotwords from the page;  │
+                 │  linked table rows        │
                  │  → added to hotwords.csv  │
                  └─────────────┬─────────────┘
                                ▼
@@ -264,6 +332,9 @@ figures when the service starts, so the first call does not wait.
                  in the demo) and to the SOP agents (ivr-sop)
 ```
 
+The engine transcribes the figures when the service starts, so the first call does
+not wait. The newest 20 drafts are kept; a confirmed draft is deleted.
+
 **Remove scenario** deletes the uploaded files and any tables created for them.
 If the demo's **SIP scenario** is saved empty, SIP calls stop using the call
 script and the `prompt.csv` dialogue source answers instead.
@@ -278,7 +349,8 @@ script and the `prompt.csv` dialogue source answers instead.
 | GeoVision · Workflow | IVR webhooks (agent, intent, mock call), work_orders and call_sessions tables | [Workflow definition](examples/docker/agx-one-container/n8n/workflow.json) |
 | IVR call engine | Runs calls from the HTML script: opening, routing, scenario replies, lookups, records | [Engine](examples/docker/agx-one-container/knowledge/ivr-engine.mjs) |
 | Scenario manager | Scenario uploads and removal; creates the call_sessions columns; builds the SOP workflows | [Workflow manager](examples/docker/agx-one-container/n8n/scenario-workflows.mjs) |
-| SOP writer | Writes each upload's SOP (Q/A, hotwords); retrieval, ranking and SOP sessions | [SOPs](examples/docker/agx-one-container/knowledge/sops.mjs) |
+| SOP drafts | Tidies uploads into one SOP page to check and confirm; serves the page, its files and the import bundle | [SOP drafts](examples/docker/agx-one-container/knowledge/sop-drafts.mjs) |
+| SOP writer | Writes each upload's SOP (Q/A, hotwords, linked table rows); retrieval, ranking and SOP sessions | [SOPs](examples/docker/agx-one-container/knowledge/sops.mjs) |
 | SOP workflows | Front desk agent, one agent per SOP, RAG / Runmap / Embed skills | [SOP workflow templates](examples/docker/agx-one-container/n8n/sop-workflows.mjs) |
 
 | Webhook (browser proxy `/n8n/webhook/…`) | Purpose |
@@ -289,6 +361,10 @@ script and the `prompt.csv` dialogue source answers instead.
 | `ivr-import-scenario` | Upload a scenario file |
 | `ivr-sop` | One caller turn through the SOP front desk agent |
 | `ivr-skill-embed` | Embed an SOP into Qdrant (called after upload) |
+
+The SOP drafts are served by the knowledge service, not n8n: the HTTPS proxy
+exposes only `/knowledge/sop-drafts…` (upload, `GET <id>`, `<id>/draft.html`,
+`<id>/files/<name>`, `<id>/bundle`, `DELETE <id>`).
 
 | Local interface | URL |
 | --- | --- |
@@ -302,8 +378,8 @@ Where things are kept:
 
 - **`audiocpp-knowledge-data` volume:** uploaded files, call sessions
   (`/data/ivr-sessions`, which expire after two hours idle) and the model cache
-  (`/data/ivr-cache`: figures, translations, wait phrases and column names), and the
-  written SOPs.
+  (`/data/ivr-cache`: figures, translations, wait phrases and column names), the
+  written SOPs and the SOP drafts (`/data/sop-drafts`).
 - **`ivr-qdrant-data` volume:** SOP vectors (`sop_<id>` collections).
 - **n8n data volume:** Data Tables and workflows.
 

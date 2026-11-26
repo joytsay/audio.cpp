@@ -11,6 +11,10 @@ const maxBytes=10*1024*1024;
 // An SOP is a CSV table (front-desk directory) or an HTML call script.
 const extensions=new Set(['.csv','.html','.htm']);
 const imageExtensions=new Set(['.png','.jpg','.jpeg','.gif','.webp']);
+// An SOP page also carries the CSV tables its knowledge base links.
+const attachmentExtensions=new Set([...imageExtensions,'.csv']);
+const isCsv=file=>/\.csv$/i.test(file.name);
+const attachmentLimits=files=>files.filter(file=>!isCsv(file)).length<=7&&files.length<=8;
 const fail=(message,status=400)=>Object.assign(new Error(message),{status});
 const hash=bytes=>createHash('sha256').update(bytes).digest('hex');
 export function validateScenarioUpload(input, allowed=extensions){
@@ -165,15 +169,20 @@ export function createScenarioStore({root=path.join(process.env.KNOWLEDGE_DATA_R
    const fileMode=input?.fileMode===true;
    if(fileMode){
     if(input.files?.length!==1||typeof input.files[0]?.name!=='string')throw fail('One document is required per scenario import');
-    input={...input,name:scenarioFileName(input.files[0].name)};
+    // The name shown in the demo: the uploaded file's name when given (an SOP page from a DOCX).
+    const title=typeof input.title==='string'&&input.title.trim()?input.title.trim().slice(0,120):'';
+    input={...input,name:title||scenarioFileName(input.files[0].name)};
    }
    const upload=validateScenarioUpload(input);
    if(input.attachments!==undefined&&!Array.isArray(input.attachments))throw fail('Invalid HTML companion images');
    const attachments=input.attachments?.length
-    ?validateScenarioUpload({name:upload.name,files:input.attachments},imageExtensions).files:[];
-   if(attachments.length&&(!fileMode||!/^\.html?$/.test(upload.files[0].extension)||attachments.length>7||
-    [...upload.files,...attachments].reduce((total,file)=>total+file.size,0)>maxBytes))throw fail('Use up to 7 HTML companion images and 10 MiB total');
-   if(attachments.some(file=>!imageType(file.bytes)))throw fail('Invalid HTML companion image data');
+    ?validateScenarioUpload({name:upload.name,files:input.attachments},attachmentExtensions).files:[];
+   if(attachments.length&&(!fileMode||!/^\.html?$/.test(upload.files[0].extension)||!attachmentLimits(attachments)||
+    [...upload.files,...attachments].reduce((total,file)=>total+file.size,0)>maxBytes))throw fail('Use up to 7 HTML companion images, 8 attachments and 10 MiB total');
+   for(const file of attachments){
+    if(isCsv(file)){try{new TextDecoder('utf-8',{fatal:true}).decode(file.bytes);}catch{throw fail(`Invalid CSV table: ${file.name}`);}}
+    else if(!imageType(file.bytes))throw fail('Invalid HTML companion image data');
+   }
    const fileMetadata=files=>files.map(({name,size,sha256})=>({name,size,sha256}));
    const writeFiles=(dir,files)=>Promise.all(files.map(file=>fs.writeFile(path.join(dir,file.sha256+file.extension),file.bytes,{mode:0o600})));
    const operation=async()=>{
@@ -191,7 +200,7 @@ export function createScenarioStore({root=path.join(process.env.KNOWLEDGE_DATA_R
      if(attachments.length){
       const dir=path.join(root,id);
       const combined=[...new Map([...(duplicate.attachments??[]),...fileMetadata(attachments)].map(file=>[file.name,file])).values()];
-      if(combined.length>7||[...duplicate.files,...combined].reduce((total,file)=>total+file.size,0)>maxBytes)throw fail('HTML companion images exceed the upload limits');
+      if(!attachmentLimits(combined)||[...duplicate.files,...combined].reduce((total,file)=>total+file.size,0)>maxBytes)throw fail('HTML companion images exceed the upload limits');
       await writeFiles(dir,attachments);
       duplicate.attachments=combined;
       const temp=path.join(dir,`.attachments-${randomUUID()}.json`);

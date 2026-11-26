@@ -16,7 +16,12 @@ export function scenarioFileName(filename) {
   return (/\.html?$/i.test(filename) ? path.basename(filename) : path.parse(filename).name).trim();
 }
 
-const scenarioHeading = /^(?:情境|Scenario)\s*(?:(\d{1,3})(?!\d)\s*[:：.、-]?|[:：])\s*(.+)/i;
+// 情境 1：title, Scenario 1: title, or a tidied SOP page's SCENARIO_01: title.
+const scenarioHeading = /^(?:情境|Scenario)(?:[\s_]*(\d{1,3})(?!\d)\s*[:：.、-]?|\s*[:：])\s*(.+)/i;
+// A tidied SOP page's structure lines (see sop-drafts.mjs). They end a turn
+// and are never spoken.
+export const sopHeadings = ['AGENT PROMPT', 'HOTWORDS', 'OPENING', 'SCENARIOS', 'KNOWLEDGE BASE'];
+const sopMarker = new RegExp(`^(?:${sopHeadings.join('|')}|CHOOSE SCENARIO)$|^(?:FIGURE|IMAGE|TABLE|FILE)\\s*[:：]`);
 function readHeading(line, highest) {
   const match = scenarioHeading.exec(line);
   if (match) return {number: match[1] ? Number(match[1]) : highest + 1, title: match[2]};
@@ -29,6 +34,8 @@ export function htmlScenarioText(html, images) {
   const flush = () => {
     const line = parts.join('').replace(/\s+/g, ' ').trim();
     if (line) lines.push(line);
+    // The knowledge base lists the page's files; they belong to no scenario.
+    if (line === 'KNOWLEDGE BASE') section = '';
     const heading = images && readHeading(line, highest);
     if (heading) {
       highest = Math.max(highest, heading.number);
@@ -110,6 +117,7 @@ export function dialogueTemplate(text) {
       turn = undefined;
       continue;
     }
+    if (sopMarker.test(line)) { turn = undefined; continue; }
     const speaker = /^(AI|Assistant|助理|GEOVISION|A|答案|回答|Q|問題|維修人員|客戶|使用者|Caller|User|YOU)\s*[:：]\s*(.*)$/i.exec(line);
     if (speaker) {
       const role = /^(AI|Assistant|助理|GEOVISION|A|答案|回答)$/i.test(speaker[1]) ? 'assistant' : 'caller';
@@ -122,6 +130,23 @@ export function dialogueTemplate(text) {
   const populated = sections.filter(section => section.turns.length);
   const roles = new Set(populated.flatMap(section => section.turns.map(turn => turn.role)));
   return roles.size === 2 || (roles.has('assistant') && populated.some(section => section.number)) ? populated : [];
+}
+
+// The agent prompt and hotwords of a tidied SOP page, or undefined.
+export function sopParts(text) {
+  const lines = String(text).split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+  const part = heading => {
+    const start = lines.indexOf(heading);
+    if (start < 0) return [];
+    const end = lines.findIndex((line, index) => index > start && sopHeadings.includes(line));
+    return lines.slice(start + 1, end < 0 ? undefined : end);
+  };
+  const prompt = part('AGENT PROMPT').join('\n');
+  if (!prompt) return undefined;
+  const hotwords = [...new Set(part('HOTWORDS').join(',').split(/[,，、;；\n]/).map(term => term.trim()).filter(Boolean))];
+  // TABLE: <file>.csv · N rows, each imported as its own table SOP.
+  const tables = part('KNOWLEDGE BASE').map(line => /^TABLE\s*[:：]\s*(.+?)(?:\s+·.*)?$/.exec(line)?.[1]).filter(Boolean);
+  return {prompt, hotwords, tables};
 }
 
 export function fileDataset(filename, sources) {
@@ -153,5 +178,6 @@ export function fileDataset(filename, sources) {
   if(tables.some(table=>table.name.length>128)){
     throw Object.assign(new Error('A generated n8n table name exceeds 128 characters. Shorten the filename or worksheet name.'),{status:400});
   }
-  return {template,tables};
+  const sop = html ? sopParts(sources.filter(source => !source.fields && !source.image).map(source => source.text).join('\n')) : undefined;
+  return {template,tables,...(sop?{sop}:{})};
 }

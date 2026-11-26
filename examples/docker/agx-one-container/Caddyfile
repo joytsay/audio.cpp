@@ -18,6 +18,13 @@
 		respond 404
 	}
 
+	# SOP drafts: upload, preview page, files and confirm bundle. Only these
+	# knowledge-service routes are exposed.
+	handle /knowledge/sop-drafts* {
+		uri strip_prefix /knowledge
+		reverse_proxy knowledge:8085
+	}
+
 	handle /n8n/webhook/* {
 		uri strip_prefix /n8n
 		reverse_proxy n8n:5678

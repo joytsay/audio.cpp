@@ -274,8 +274,8 @@ export function createScenarioManager({withApi=withN8nApi,knowledgeUrl='http://k
     },
     import(file){
       return enqueue(async()=>{
-        const {attachments,...document}=file;
-        const added=await knowledge('/scenarios','POST',{files:[document],attachments,fileMode:true});
+        const {attachments,title,...document}=file;
+        const added=await knowledge('/scenarios','POST',{files:[document],attachments,fileMode:true,...(title?{title}:{})});
         const record=await knowledge(importRoute(added.scenario.id));
         const state=record.resources||{tables:[]};
         state.tables??=[];
@@ -290,6 +290,8 @@ export function createScenarioManager({withApi=withN8nApi,knowledgeUrl='http://k
         }
         state.ready=true;
         const scenario=await save();
+        // An SOP page's hotwords reach hotwords.csv now, before its SOP is written.
+        await knowledge('/sops/hotwords','POST',{}).catch(error=>console.error('[ivr-n8n] hotwords.csv not updated:',error.message));
         if(/\.(?:csv|html?)$/i.test(document.name)){
           // A sop: the LLM writes its Q/A (minutes for a long script), then
           // it gets its n8n workflow. Runs after the upload has answered.

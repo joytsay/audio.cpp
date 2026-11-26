@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy, tick } from "svelte";
   import { DEFAULT_NOTICE_DELAY_SECONDS, ivrDialogue, type DialogueSource } from "$lib/n8n-dialogue";
-  import {importScenarioFiles,listKnowledgeScenarios,removeKnowledgeScenario,type KnowledgeScenario} from "$lib/knowledge-scenarios";
+  import {confirmSopDraft,createSopDraft,discardSopDraft,getSopDraft,waitSopDraft,listKnowledgeScenarios,removeKnowledgeScenario,sopDraftPage,type KnowledgeScenario,type SopDraft} from "$lib/knowledge-scenarios";
   import SipSidebar from "$lib/SipSidebar.svelte";
   import type { SipSettings, SipLive } from "$lib/sip";
   import PanelDivider from "$lib/PanelDivider.svelte";
@@ -520,6 +520,43 @@
   let restoreScenarioOnLoad = true;
   let newScenarioFiles: File[] = [], knowledgeUploading = false, knowledgeDeleting = false, knowledgeStatus = "";
   let knowledgeAborter: AbortController | null = null;
+  // The tidied SOP page of the last upload, waiting to be checked and
+  // confirmed. Its ID is kept in the browser so a reload keeps the draft.
+  let sopDraft: SopDraft | null = null;
+  const sopDraftKey = "geovision.sopDraft";
+  function keepSopDraft(draft: SopDraft | null) {
+    sopDraft = draft;
+    try { if (draft) localStorage.setItem(sopDraftKey, draft.id); else localStorage.removeItem(sopDraftKey); } catch { /* storage disabled */ }
+  }
+  async function restoreSopDraft() {
+    let id: string | null = null;
+    try { id = localStorage.getItem(sopDraftKey); } catch { return; }
+    if (!id || knowledgeUploading) return;
+    try {
+      const draft = await getSopDraft(id);
+      if (draft.status === "failed") { keepSopDraft(null); knowledgeStatus = `SOP draft failed: ${draft.error || "unknown error"}`; return; }
+      sopDraft = draft;
+      restoreScenarioOnLoad = false;
+      scenarioMode = "add-scenario";
+      if (draft.status === "writing") await followSopDraft(draft);
+      else knowledgeStatus = draftReadyStatus(draft);
+    } catch { keepSopDraft(null); }
+  }
+  const draftReadyStatus = (draft: SopDraft) =>
+    `Draft ready: ${draft.scenarios?.length ?? 0} scenarios, ${draft.tables?.length ?? 0} tables. Not imported yet: open it to check, then confirm.`;
+  async function followSopDraft(draft: SopDraft) {
+    knowledgeUploading = true; knowledgeAborter = new AbortController();
+    const started = Date.parse(draft.createdAt ?? "") || Date.now();
+    try {
+      const ready = await waitSopDraft(draft,AbortSignal.any([knowledgeAborter.signal,AbortSignal.timeout(1800000)]),progress=>{
+        if (progress.status === "writing") knowledgeStatus = `Tidying into an SOP page with the local LLM… ${Math.round((Date.now() - started) / 1000)} s`;
+      });
+      keepSopDraft(ready);
+      knowledgeStatus = draftReadyStatus(ready);
+    } catch (cause) {
+      if (!knowledgeAborter.signal.aborted) { knowledgeStatus = cause instanceof Error ? cause.message : String(cause); keepSopDraft(null); }
+    } finally { knowledgeUploading = false; knowledgeAborter = null; }
+  }
   // One IVR engine session per call. The knowledge service holds the call
   // state; the page only keeps the session ID and the selected script.
   let simulation: {sessionId: string; scenarioId?: string} | null = null;
@@ -561,23 +598,54 @@
     if (newScenarioFiles.length) restoreScenarioOnLoad = false;
     knowledgeStatus = "";
   }
-  async function uploadKnowledgeScenario() {
+  // Upload: the local LLM tidies the files into one SOP page to check first.
+  async function draftKnowledgeScenario() {
     if (knowledgeUploading) return;
     knowledgeUploading = true; knowledgeAborter = new AbortController();
-    knowledgeStatus = "Importing scenario references…";
+    knowledgeStatus = "Uploading…";
+    keepSopDraft(null);
+    const started = Date.now();
+    try {
+      const ready = await createSopDraft(newScenarioFiles,AbortSignal.any([knowledgeAborter.signal,AbortSignal.timeout(1800000)]),draft=>{
+        if (!sopDraft) keepSopDraft(draft);  // a reload from here on resumes this draft
+        if (draft.status === "writing") knowledgeStatus = `Tidying into an SOP page with the local LLM… ${Math.round((Date.now() - started) / 1000)} s`;
+      });
+      keepSopDraft(ready);
+      knowledgeStatus = draftReadyStatus(ready);
+      newScenarioFiles = [];
+    } catch (cause) {
+      if (!knowledgeAborter.signal.aborted) { knowledgeStatus = cause instanceof Error ? cause.message : String(cause); keepSopDraft(null); }
+    } finally { knowledgeUploading = false; knowledgeAborter = null; }
+  }
+  async function discardKnowledgeDraft() {
+    if (!sopDraft || knowledgeUploading) return;
+    const id = sopDraft.id;
+    keepSopDraft(null);
+    knowledgeStatus = "Draft discarded.";
+    await discardSopDraft(id).catch(() => {});
+  }
+  // Confirm: import the checked page, its images and its tables.
+  async function uploadKnowledgeScenario() {
+    if (knowledgeUploading || !sopDraft) return;
+    const draft = sopDraft;
+    knowledgeUploading = true; knowledgeAborter = new AbortController();
+    knowledgeStatus = "Importing the SOP…";
     const imported: KnowledgeScenario[] = [];
     try {
-      await importScenarioFiles(newScenarioFiles,AbortSignal.any([knowledgeAborter.signal,AbortSignal.timeout(900000)]),scenario=>{
+      await confirmSopDraft(draft,AbortSignal.any([knowledgeAborter.signal,AbortSignal.timeout(900000)]),scenario=>{
         imported.push(scenario);
         knowledgeScenarios=[...knowledgeScenarios.filter(saved=>saved.id!==scenario.id),scenario];
         record("SCENARIO_ADDED", `${scenario.name} imported`);
       });
       const scenario=imported.findLast(scenario=>scenario.simulation) ?? imported.at(-1);
       if(!scenario)return;
-      knowledgeStatus = `Imported ${imported.length} ${imported.length===1?"file":"files"}.`;
+      knowledgeStatus = `Imported ${scenario.name}.`;
+      keepSopDraft(null);
+      // The import added the page's hotwords to hotwords.csv: show them.
+      await loadHotwordsCsv("Loaded hotwords.csv (SOP hotwords added)");
+      void discardSopDraft(draft.id).catch(() => {});
       scenarioMode = `scenario:${scenario.id}`;
       await saveScenarioSelection(scenario);
-      newScenarioFiles = [];
     } catch (cause) {
       if (!knowledgeAborter.signal.aborted) knowledgeStatus = cause instanceof Error ? cause.message : String(cause);
     } finally { knowledgeUploading = false; knowledgeAborter = null; }
@@ -905,6 +973,7 @@
     referencePath = "";
   let hotwords = "",
     savingHotwords = false,
+    loadingHotwords = false,
     hotwordsStatus = "";
   // TTS volume 1–10 (5 = every voice at the same normalized level), kept in
   // this browser.
@@ -1705,6 +1774,15 @@
         if (!error) status = idleStatus();
       }
     }
+  }
+  async function loadHotwordsCsv(loaded = "Loaded hotwords.csv") {
+    loadingHotwords = true;
+    try {
+      hotwords = readHotwordsCsv((await endpointJson<{ content: string }>("", "ui/hotwords")).content);
+      hotwordsStatus = loaded;
+    } catch (cause) {
+      hotwordsStatus = `Cannot load hotwords.csv: ${cause instanceof Error ? cause.message : String(cause)}`;
+    } finally { loadingHotwords = false; }
   }
   async function loadCsvFiles() {
     try {
@@ -2776,6 +2854,7 @@
     restorePanelVisibility();
     void loadSystemInfo();
     void refreshKnowledgeScenarios();
+    void restoreSopDraft();
     void initializeSidebar();
     try {
       const saved = JSON.parse(localStorage.getItem(historyKey) || "[]");
@@ -3069,9 +3148,14 @@
             bind:value={hotwords}
             placeholder="X光機、設備代碼、人名…"></textarea></label
         >
-        <button disabled={savingHotwords} on:click={saveHotwordsCsv}
-          >{savingHotwords ? "Saving…" : "Save hotwords.csv"}</button
-        >
+        <div class="hotwords-actions">
+          <button disabled={savingHotwords || loadingHotwords} on:click={() => loadHotwordsCsv()}
+            >{loadingHotwords ? "Loading…" : "Load"}</button
+          >
+          <button disabled={savingHotwords || loadingHotwords} on:click={saveHotwordsCsv}
+            >{savingHotwords ? "Saving…" : "Save"}</button
+          >
+        </div>
         {#if hotwordsStatus}<small role="status">{hotwordsStatus}</small>{/if}
 
         {#if selectedAsr?.family === "audio8_asr"}<small
@@ -3715,15 +3799,22 @@
           >
           {#if scenarioMode === "add-scenario"}
             <label class="audio-choice">Choose documents<input
-              class="audio-file-input" aria-label="Scenario documents" type="file" multiple accept=".csv,.html,.htm,.png,.jpg,.jpeg,.gif,.webp"
+              class="audio-file-input" aria-label="Scenario documents" type="file" multiple accept=".docx,.html,.htm,.png,.jpg,.jpeg,.gif,.md,.markdown,.csv,.xlsx,.pdf"
               disabled={knowledgeUploading} on:change={(event) => chooseKnowledgeFiles(event.currentTarget.files)}
             /></label>
-            <small>CSV table or HTML call script (+ its images) · one SOP per file, 10 MiB total</small>
-            <small>Select HTML and its companion images together.</small>
+            <small>DOCX, HTML, PDF, Markdown, CSV, XLSX, PNG, JPEG or GIF · up to 8 files, 10 MiB total</small>
+            <small>The files become one SOP page: agent prompt, hotwords, opening, scenarios and knowledge base. Check it before importing.</small>
             {#each newScenarioFiles as file}<p>{file.name} · {Math.ceil(file.size / 1024)} KB</p>{/each}
-            <button disabled={knowledgeUploading || !newScenarioFiles.length} on:click={uploadKnowledgeScenario}>
-              {knowledgeUploading ? "Adding scenario…" : "Add scenario"}
+            <button disabled={knowledgeUploading || !newScenarioFiles.length} on:click={draftKnowledgeScenario}>
+              {knowledgeUploading && sopDraft?.status !== "ready" ? "Writing SOP draft…" : "Upload"}
             </button>
+            {#if sopDraft?.status === "ready"}
+              <p><a href={sopDraftPage(sopDraft)} target="_blank" rel="noopener">Open SOP draft: {sopDraft.name}</a></p>
+              <div class="scenario-actions">
+                <button disabled={knowledgeUploading} on:click={uploadKnowledgeScenario}>{knowledgeUploading ? "Importing…" : "Confirm import"}</button>
+                <button disabled={knowledgeUploading} on:click={discardKnowledgeDraft}>Discard</button>
+              </div>
+            {/if}
             <p role="status">{knowledgeStatus}</p>
           {:else if selectedKnowledgeScenario}
             <p><strong>{selectedKnowledgeScenario.name}</strong> · {selectedKnowledgeScenario.qaCount} Q/A pairs</p>
@@ -4825,5 +4916,12 @@
     .wave span {
       width: 3px;
     }
+  }
+  .hotwords-actions {
+    display: flex;
+    gap: 8px;
+  }
+  .hotwords-actions button {
+    flex: 1;
   }
 </style>

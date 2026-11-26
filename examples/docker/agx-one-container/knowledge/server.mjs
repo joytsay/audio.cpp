@@ -1,4 +1,5 @@
-import {createScenarioStore} from './scenarios.mjs';
+import {createScenarioStore,validateOfficeArchive} from './scenarios.mjs';
+import {createSopDrafts,markdownText} from './sop-drafts.mjs';
 import {htmlScenarioText,uniqueHeaders} from './scenario-files.mjs';
 import {readScenarioImage} from './scenario-image.mjs';
 import {createServer} from 'node:http';
@@ -14,7 +15,7 @@ import ExcelJS from 'exceljs';
 import {createRagBridge} from './rag-embeddings.mjs';
 import {createSops} from './sops.mjs';
 import {createIvrEngine} from './ivr-engine.mjs';
-import {extractRagAssets,ragItems} from './rag-assets.mjs';
+import {extractRagAssets,imageType,ragItems} from './rag-assets.mjs';
 const execFile=promisify(execFileCallback);
 function cellText(cell){const v=cell.result??cell.value;if(v instanceof Date)return v.toISOString().slice(0,10);if(typeof v==='number'&&/^0+$/.test(cell.numFmt||''))return String(v).padStart(cell.numFmt.length,'0');return cell.text?.trim()||'';}
 function worksheetRows(sheet){
@@ -116,6 +117,45 @@ export async function extractPdf(file,{languages=process.env.OCR_LANGUAGES||'chi
     }return {text:chunks.join('\n\n'),extraction:'ocr',pages,languages,notice:'OCR output is not authoritative; verify codes, quantities and dates against the PDF image.'};
   }finally{await fs.rm(dir,{recursive:true,force:true});}
 }
+// The OCR reader takes PNG and JPEG; a GIF's first frame is converted.
+async function ocrAnyImage(bytes,ocrImage){
+  if(imageType(bytes)!=='gif')return ocrImage(bytes);
+  const dir=await fs.mkdtemp(path.join(os.tmpdir(),'ivr-knowledge-gif-'));
+  try{
+    await fs.writeFile(path.join(dir,'in.gif'),bytes);
+    await execFile('convert',['-limit','memory','64MiB','-limit','disk','0','gif:'+path.join(dir,'in.gif')+'[0]','png:'+path.join(dir,'out.png')],{timeout:60000});
+    return ocrImage(await fs.readFile(path.join(dir,'out.png')));
+  }finally{await fs.rm(dir,{recursive:true,force:true});}
+}
+// A non-HTML document for an SOP draft: its text, tables and images.
+async function readDraftDocument(upload,{pdf,ocrImage}){
+  const base=path.parse(upload.name).name.trim();
+  const dir=await fs.mkdtemp(path.join(os.tmpdir(),'ivr-knowledge-draft-'));
+  try{
+    const file=path.join(dir,'upload'+upload.extension);
+    await fs.writeFile(file,upload.bytes);
+    if(upload.extension==='.pdf')return {text:(await pdf(file)).text,tables:[],images:[]};
+    if(upload.extension==='.md'||upload.extension==='.markdown')
+      return {text:markdownText(new TextDecoder('utf-8',{fatal:true}).decode(upload.bytes)),tables:[],images:[]};
+    if(upload.extension==='.csv'){const sheet=await readCsv(file);return {text:'',tables:[{name:base,headers:sheet.headers,rows:sheet.rows.map(row=>row.fields)}],images:[]};}
+    validateOfficeArchive(upload.bytes);
+    if(upload.extension==='.xlsx')return {text:'',images:[],tables:(await readWorkbook(file)).map(sheet=>({name:`${base}_${sheet.name}`,headers:sheet.headers,rows:sheet.rows.map(row=>row.fields)}))};
+    // DOCX: body text and the OCR text of its images; tables (and tables read from images) become CSV files.
+    const images=[];
+    const sources=await extractScenarioWord(file,async bytes=>{images.push(bytes);return ocrImage(bytes).catch(()=>({}));});
+    const tables=new Map();
+    for(const source of sources){
+      if(!source.headers)continue;
+      if(!tables.has(source.section))tables.set(source.section,{name:`${base}_${source.section.replace(/\s+/g,'')}`,headers:source.headers,rows:[]});
+      if(source.fields)tables.get(source.section).rows.push(source.fields);
+    }
+    return {
+      text:sources.filter(source=>!source.headers).map(source=>source.image?`【${source.image}】\n${source.text}`:source.text).join('\n\n'),
+      tables:[...tables.values()],
+      images:images.map((bytes,index)=>({name:`${base}_圖片${index+1}.${imageType(bytes)==='jpeg'?'jpg':'png'}`,bytes})),
+    };
+  }finally{await fs.rm(dir,{recursive:true,force:true});}
+}
 export function createKnowledgeStore({pdf=extractPdf,ocrImage=readScenarioImage,scenarioRoot,ragUrl,fetchImpl=fetch}={}){
   const scenarioDir=scenarioRoot??path.join(process.env.KNOWLEDGE_DATA_ROOT||'/data','scenarios');
   const scenarios=createScenarioStore({root:scenarioDir,extract:async(file,upload)=>{
@@ -152,11 +192,15 @@ export function createKnowledgeStore({pdf=extractPdf,ocrImage=readScenarioImage,
     return assets;
   };
   const rag=createRagBridge({workflowUrl:ragUrl,fetchImpl});
-  const ivr=createIvrEngine({scenarios,scenarioRoot:scenarioDir,fetchImpl});
+  // sops is declared below; the engine asks it for table rows only during calls.
+  const ivr=createIvrEngine({scenarios,scenarioRoot:scenarioDir,fetchImpl,tableRows:(id,query)=>sops.tableRows(id,query)});
   const sops=createSops({scenarios,fetchImpl,script:id=>ivr.script(id),figureText:(id,figure)=>ivr.figureText(id,figure),
     dataRoot:path.dirname(scenarioDir)});
+  const drafts=createSopDrafts({root:path.join(path.dirname(scenarioDir),'sop-drafts'),fetchImpl,
+    read:upload=>readDraftDocument(upload,{pdf,ocrImage}),ocr:bytes=>ocrAnyImage(bytes,ocrImage)});
   const scriptTurns=new Map();
   const store = {
+    drafts,
     ivr:body=>ivr.handle(body),
     warmIvr:()=>ivr.warm(),
     addScenario:input=>scenarios.add(input),
@@ -173,6 +217,7 @@ export function createKnowledgeStore({pdf=extractPdf,ocrImage=readScenarioImage,
     lookup:body=>sops.lookup(body),
     rankSops:body=>sops.rank(body),
     sopDocuments:id=>sops.documents(id),
+    syncHotwords:async()=>({terms:await sops.syncHotwords()}),
     // The script skill: one grounded step of the HTML call script. A turn is
     // answered once: an agent that calls the skill twice gets the same step.
     script({sopId,sessionId,text,start,turnId,work_orders}){
@@ -194,17 +239,52 @@ export function createKnowledgeStore({pdf=extractPdf,ocrImage=readScenarioImage,
   };
   return store;
 }
+// Draft files are shown, never run: the page is escaped HTML without
+// scripts, and uploaded originals (an HTML script too) are shown as text or downloaded.
+function sendDraftFile(res,{bytes,name}){
+  const extension=path.extname(name).toLowerCase();
+  const image=imageType(bytes);
+  const type=name==='draft.html'?'text/html; charset=utf-8':image?`image/${image}`:extension==='.pdf'?'application/pdf':
+    ['.csv','.md','.markdown','.html','.htm'].includes(extension)?'text/plain; charset=utf-8':'application/octet-stream';
+  res.setHeader('Content-Type',type);
+  res.setHeader('X-Content-Type-Options','nosniff');
+  res.setHeader('Content-Security-Policy',"default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'");
+  if(type==='application/octet-stream')res.setHeader('Content-Disposition',`attachment; filename*=UTF-8''${encodeURIComponent(name)}`);
+  res.end(bytes);
+}
 export function createKnowledgeServer(store=createKnowledgeStore()){
   return createServer(async(req,res)=>{
     res.setHeader('Content-Type','application/json; charset=utf-8');res.setHeader('Cache-Control','no-store');
     try{
       const url=new URL(req.url,'http://localhost');let data;
       const importId=/^\/scenario-imports\/([a-f0-9]{24})$/.exec(url.pathname)?.[1];
+      // SOP drafts (served to the browser through the HTTPS proxy as /knowledge/sop-drafts).
+      const draft=/^\/sop-drafts(?:\/([a-f0-9]{24})(?:\/(draft\.html|bundle|files\/[^/]+))?)?$/.exec(url.pathname);
+      if(draft){
+        const [,id,part]=draft;
+        if(req.method==='POST'&&!id){
+          req.setEncoding('utf8');
+          let raw='';for await(const chunk of req){raw+=chunk;if(Buffer.byteLength(raw)>16*1024*1024)throw Object.assign(Error('Request too large'),{status:413});}
+          let body;try{body=JSON.parse(raw);}catch{throw Object.assign(Error('Invalid JSON'),{status:400});}
+          data=await store.drafts.create(body);
+        }
+        else if(req.method==='DELETE'&&id&&!part)data=await store.drafts.remove(id);
+        else if(req.method!=='GET'||!id){res.writeHead(405);res.end(JSON.stringify({error:'Method not allowed'}));return;}
+        else if(!part)data=await store.drafts.get(id);
+        else if(part==='bundle')data=await store.drafts.bundle(id);
+        else{
+          let name=part;
+          try{name=part==='draft.html'?part:decodeURIComponent(part.slice('files/'.length));}catch{throw Object.assign(Error('Invalid file name'),{status:400});}
+          const file=await store.drafts.file(id,name);
+          sendDraftFile(res,file);return;
+        }
+        res.end(JSON.stringify(data));return;
+      }
       if(req.method==='PUT'&&importId){
         let raw='';for await(const chunk of req){raw+=chunk;if(raw.length>256*1024)throw Object.assign(Error('Request too large'),{status:413});}
         data=await store.saveScenarioImport(importId,JSON.parse(raw));
       }
-      else if(req.method==='POST'&&['/ivr','/scenarios','/rag/index','/rag/evidence','/rag/embedding-inputs','/sops/index','/sops/context','/sops/session','/skills/lookup','/skills/script','/sops/rank'].includes(url.pathname)){
+      else if(req.method==='POST'&&['/ivr','/scenarios','/rag/index','/rag/evidence','/rag/embedding-inputs','/sops/index','/sops/context','/sops/session','/skills/lookup','/skills/script','/sops/rank','/sops/hotwords'].includes(url.pathname)){
         req.setEncoding('utf8');
         let raw='';for await(const chunk of req){raw+=chunk;if(Buffer.byteLength(raw)>(url.pathname==='/scenarios'?16*1024*1024:256*1024))throw Object.assign(Error('Request too large'),{status:413});}
         let body;try{body=JSON.parse(raw);}catch{throw Object.assign(Error('Invalid JSON'),{status:400});}
@@ -217,6 +297,7 @@ export function createKnowledgeServer(store=createKnowledgeStore()){
         else if(url.pathname==='/sops/session')data=store.rememberSop(body||{});
         else if(url.pathname==='/skills/lookup')data=await store.lookup(body||{});
         else if(url.pathname==='/sops/rank')data=await store.rankSops(body||{});
+        else if(url.pathname==='/sops/hotwords')data=await store.syncHotwords();
         else if(url.pathname==='/skills/script')data=await store.script(body||{});
         else data=await store.addScenario(body);
       }

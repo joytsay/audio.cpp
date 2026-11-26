@@ -8,8 +8,9 @@ import path from 'node:path';
 
 const root = await fs.mkdtemp(path.join(os.tmpdir(), 'ivr-knowledge-test-'));
 process.env.KNOWLEDGE_DATA_ROOT = root;
+process.env.IVR_HOTWORDS_FILE = path.join(root, 'hotwords.csv');
 const {createKnowledgeStore, createKnowledgeServer} = await import('./server.mjs');
-const {chooseLanguage, describeWorkOrders, dropExampleSentences, exampleLeaks, explicitSection, isFiller, namedSection, spokenDigits} = await import('./ivr-engine.mjs');
+const {loadScript, chooseLanguage, describeWorkOrders, dropExampleSentences, exampleLeaks, explicitSection, isFiller, namedSection, spokenDigits} = await import('./ivr-engine.mjs');
 
 const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
 const html = `<html><body>
@@ -39,6 +40,12 @@ const html = `<html><body>
 const calls = [];
 let scenarioReply = () => ({line: 1, reply: '', switch: false});
 const fakeFetch = async (url, init) => {
+  if (String(url).endsWith('/embeddings')) {
+    // Character-bag vectors: texts sharing characters are close.
+    const vector = text => Array.from({length: 64}, (_, i) => [...text].filter(c => c.codePointAt(0) % 64 === i).length + 0.01);
+    const input = JSON.parse(init.body).input;
+    return new Response(JSON.stringify({data: input.map((text, index) => ({index, embedding: vector(text)}))}), {status: 200});
+  }
   if (!String(url).includes('/chat/completions')) throw new Error(`Unexpected fetch ${url}`);
   const body = JSON.parse(init.body);
   const properties = body.response_format?.json_schema?.schema?.properties ?? {};
@@ -53,6 +60,11 @@ const fakeFetch = async (url, init) => {
     en: ['Sure, let me check the stock for you.', 'Okay, one moment while I look.', 'Got it, checking now.', 'Sure, let me check the stock for you.']};
   else if (properties.line) content = scenarioReply(body.messages);
   else if (properties.date) content = {date: '2026-06-02', reference: '', title: '測試工單', equipment: 'F8A-AHU-07', details: '更換強排FAN 3個', notes: '', test_result: '正常'};
+  else if (properties.scenarios) content = {scenarios: [{title: '密碼重設', turns: [{role: 'USER', text: '我忘記密碼了'},
+    {role: 'AI', text: '请到 IT-HELP01 网站按「忘记密码」，重设连结十分钟内有效。'}]}]};
+  else if (properties.purpose && properties.instructions) content = {purpose: '查詢同仁分機', offer: '分機查詢', instructions: '依表格回答。', hotwords: []};
+  else if (properties.paraphrases) content = {paraphrases: []};
+  else if (properties.hotwords) content = {hotwords: ['IT-HELP01', '不在文件裡']};
   else if (properties.items && /database column/.test(body.messages[0].content)) content = {items: ['language', 'phone_holder_name', 'employee_id_last3', 'Service Request']};
   else if (properties.items) content = {items: JSON.parse(text).map(item => `EN:${item}`)};
   else if (properties.lines) content = {lines: JSON.parse(text).map(item => item.replace('王怡文', '李小華').replace('F15P1H4K', 'X'))};
@@ -327,6 +339,113 @@ await test('HTTP /ivr validates input', async () => {
     assert.equal(bad.status, 400);
     const ok = await fetch(url, {method: 'POST', body: JSON.stringify({sessionId: 'http-1', start: true, scenarioId})});
     assert.equal((await ok.json()).reply, '請先選語言：中文 1、英文2');
+  } finally { server.close(); }
+});
+
+// ── SOP drafts ──────────────────────────────────────────────────────────────
+const drafted = async files => {
+  let draft = await store.drafts.create({files});
+  while (draft.status === 'writing') { await new Promise(resolve => setTimeout(resolve, 20)); draft = await store.drafts.get(draft.id); }
+  assert.equal(draft.status, 'ready', draft.error);
+  return {draft, page: (await store.drafts.file(draft.id, 'draft.html')).bytes.toString('utf8')};
+};
+const importBundle = async id => {
+  const results = [];
+  for (const document of (await store.drafts.bundle(id)).documents) {
+    const {attachments, title, ...file} = document;
+    const result = await store.addScenario({fileMode: true, files: [file], attachments, title});
+    // As the n8n import does before an SOP is written.
+    await store.saveScenarioImport(result.scenario.id, {tables: [], ready: true});
+    results.push(result);
+  }
+  return results;
+};
+
+await test('a call script keeps its turns verbatim in English-structured parts', async () => {
+  const {draft, page} = await drafted([encode('維修腳本.html', html.replace('table.png', 'images/table.png')), encode('table.png', png)]);
+  for (const heading of ['AGENT PROMPT', 'HOTWORDS', 'OPENING', 'SCENARIOS', 'KNOWLEDGE BASE']) assert.match(page, new RegExp(`<h2>${heading}</h2>`));
+  assert.match(page, /<p class="marker">CHOOSE SCENARIO<\/p>\n<p class="turn ai"><b>AI:<\/b> 請問您要回報什麼內容\?/);
+  assert.match(page, /<b>USER:<\/b> 王怡文/);
+  assert.match(page, /<h3>SCENARIO_02: 工單回報<\/h3>/);
+  assert.match(page, /FIGURE: table\.png<\/p>\n<img src="files\/table\.png"/);
+  assert.doesNotMatch(page, /情境 \d|維修人員：|參考圖表|選擇情境/);
+  assert.deepEqual(draft.figures, ['table.png']);
+  assert.match(page, /IT-HELP01|F15P1H4K-GEX-EF-03/, 'codes become hotwords');
+  assert.doesNotMatch(page, /不在文件裡/, 'hotwords must appear in the document');
+  const [result] = await importBundle(draft.id);
+  const record = await store.readScenario(result.scenario.id);
+  const script = await loadScript(record, path.join(root, 'scenarios', record.id));
+  assert.deepEqual(script.sections.map(section => section.figures?.length ?? 0), [0, 0, 1, 0], 'the figure stays in its scenario');
+  assert.equal(script.opening.length, 4);
+  await store.removeScenario(result.scenario.id);
+});
+
+await test('a narrative document is written into scenarios, and the confirmed page runs as a call script', async () => {
+  const markdown = '# IT 服務台\n\n忘記密碼時，請到 IT-HELP01 網站按「忘記密碼」。重設連結十分鐘內有效，逾時請重新申請。\n';
+  const {draft, page} = await drafted([encode('IT服務台.md', markdown)]);
+  assert.match(page, /<h3>SCENARIO_01: 密碼重設<\/h3>/);
+  assert.match(page, /<pre>You are the phone voice assistant for &quot;IT服務台&quot;\.\n/);
+  assert.match(page, /1\. OPENING: start every call with the OPENING\. Say its 5 AI lines in order/);
+  assert.match(page, /2\. CHOOSE SCENARIO: after the opening/);
+  assert.match(page, /Scenarios: 1\. 密碼重設\./);
+  const {traditional} = await import('./sop-drafts.mjs');
+  assert.equal(traditional('IT服務台 臺北 請说 查询零件库存 台风'), 'IT服務台 臺北 請說 查詢零件庫存 颱風', 'Traditional text is kept as written');
+  assert.match(page, /<b>AI:<\/b> 請到 IT-HELP01 網站按「忘記密碼」，重設連結十分鐘內有效。/, 'Simplified Chinese from the LLM becomes Traditional');
+  assert.match(page, /<b>USER:<\/b> 密碼重設<\/p>/, 'the default opening ends with the first scenario');
+  assert.match(page, /FILE: <a href="files\/IT%E6%9C%8D%E5%8B%99%E5%8F%B0\.md">/);
+  const [result] = await importBundle(draft.id);
+  assert.equal(result.scenario.simulation, true);
+  assert.equal(result.scenario.name, 'IT服務台.md', 'listed under the uploaded file name');
+  assert.ok((await store.syncHotwords()).terms >= 1);
+  assert.match(await fs.readFile(process.env.IVR_HOTWORDS_FILE, 'utf8'), /IT-HELP01/, 'the page hotwords reach hotwords.csv before the SOP is written');
+  const record = await store.readScenario(result.scenario.id);
+  assert.match(record.dataset.sop.prompt, /^You are the phone voice assistant for "IT服務台"\. Every call must follow this SOP in order:/);
+  assert.ok(record.dataset.sop.hotwords.includes('IT-HELP01'));
+  const sections = record.dataset.template.filter(section => section.number);
+  assert.deepEqual(sections.map(section => [section.number, section.title]), [[1, '密碼重設']]);
+  assert.deepEqual(sections[0].turns.map(turn => turn.role), ['caller', 'assistant']);
+  const opening = record.dataset.template.find(section => !section.number);
+  assert.equal(opening.turns.at(-2).text, '請問您要回報什麼內容?', 'no structure line is appended to a turn');
+  assert.equal(opening.turns.at(-1).text, '密碼重設');
+  await store.saveScenarioImport(result.scenario.id, {tables: [], ready: true});
+  const call = await store.ivr({sessionId: 'draft-1', start: true, scenarioId: result.scenario.id});
+  assert.equal(call.reply, '請先選語言：中文 1、英文2');
+});
+
+await test('a table alone gets a full page that links the table, and the page SOP reads its rows', async () => {
+  const {draft, page} = await drafted([encode('分機表.csv', '姓名,分機\n王小明,1234\n陳大文,5678\n')]);
+  assert.match(page, /<h3>SCENARIO_01: /);
+  assert.match(page, /TABLE: <a href="files\/%E5%88%86%E6%A9%9F%E8%A1%A8\.csv">分機表\.csv<\/a> · 2 rows/);
+  const scenarioCall = calls.findLast(call => call.kind === 'scenarios');
+  assert.match(scenarioCall.text, /欄位：姓名、分機/);
+  assert.match(scenarioCall.text, /王小明/);
+  const bundle = await store.drafts.bundle(draft.id);
+  assert.deepEqual(bundle.documents.map(document => [document.name, document.title, document.attachments.map(file => file.name)]),
+    [['分機表.html', '分機表.csv', ['分機表.csv']]], 'one scenario: the page with its table');
+  assert.equal(Buffer.from(bundle.documents[0].attachments[0].data, 'base64').toString(), '姓名,分機\n王小明,1234\n陳大文,5678\n');
+  const results = await importBundle(draft.id);
+  assert.equal(results.length, 1);
+  assert.equal(results[0].scenario.name, '分機表.csv');
+  const record = await store.readScenario(results[0].scenario.id);
+  assert.deepEqual(record.dataset.sop.tables, ['分機表.csv']);
+  const sop = await store.indexSop(record.id);
+  assert.match(sop.instructions, /^You are the phone voice assistant for "分機表"\..*tables \(分機表\.csv\)/, 'the page prompt is the SOP instructions');
+  const {results: found} = await store.lookup({sopId: record.id, query: '陳大文的分機是多少', k: 2});
+  assert.match(found[0].text, /分機表\.csv：姓名：陳大文；分機：5678/, 'the linked table row is found');
+});
+
+await test('HTTP serves the draft page with a no-script policy and rejects bad names', async () => {
+  const {draft} = await drafted([encode('IT2.md', '忘記密碼時，請到 IT-HELP01 網站按「忘記密碼」重設，連結十分鐘內有效。')]);
+  const server = createKnowledgeServer(store).listen(0);
+  try {
+    const base = `http://127.0.0.1:${server.address().port}/sop-drafts/${draft.id}`;
+    const response = await fetch(`${base}/draft.html`);
+    assert.equal(response.headers.get('content-type'), 'text/html; charset=utf-8');
+    assert.match(response.headers.get('content-security-policy'), /default-src 'none'/);
+    const original = await fetch(`${base}/files/IT2.md`);
+    assert.equal(original.headers.get('content-type'), 'text/plain; charset=utf-8');
+    assert.equal((await fetch(`${base}/files/..%2Fdraft.json`)).status, 400);
+    assert.equal((await fetch(`http://127.0.0.1:${server.address().port}/sop-drafts`, {method: 'POST', body: JSON.stringify({files: [encode('x.exe', 'x')]})})).status, 400);
   } finally { server.close(); }
 });
 

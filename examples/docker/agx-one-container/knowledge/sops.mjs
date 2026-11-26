@@ -71,7 +71,7 @@ function scriptOffer(offer, titles) {
 }
 
 // Codes a speech recognizer is likely to miss: letters with digits.
-const codes = text => (String(text).normalize('NFKC').match(/[A-Za-z][A-Za-z0-9-]*\d[A-Za-z0-9-]*|\d+[A-Za-z]{2,}[A-Za-z0-9-]*/g) ?? [])
+export const codes = text => (String(text).normalize('NFKC').match(/[A-Za-z][A-Za-z0-9-]*\d[A-Za-z0-9-]*|\d+[A-Za-z]{2,}[A-Za-z0-9-]*/g) ?? [])
   .filter(token => token.length >= 3 && token.length <= 30);
 
 // Source passages are stored in pieces small enough for a 1.2B model's
@@ -222,12 +222,30 @@ export function createSops({
   }
 
   // ── Writing an SOP from an HTML call script ─────────────────────────
-  async function writeScript(record) {
+  // The tables a tidied SOP page links (TABLE: lines), uploaded with it as
+  // CSV attachments: their rows join the page's SOP, so its search and the
+  // call script find them.
+  async function linkedTables(record) {
+    const names = new Set(record.dataset?.sop?.tables ?? []);
+    const linked = [];
+    for (const file of (record.attachments ?? []).filter(file => names.has(file.name) && /\.csv$/i.test(file.name))) {
+      const [headers, ...cells] = parseCsv(await fs.readFile(path.join(dataRoot, 'scenarios', record.id, `${file.sha256}.csv`), 'utf8'));
+      if (!headers?.length) continue;
+      const rows = cells.slice(0, 4000).map(row => Object.fromEntries(headers.map((header, i) => [header.trim(), clean(row[i])]).filter(([, value]) => value)))
+        .filter(fields => Object.keys(fields).length);
+      if (rows.length) linked.push({name: file.name, sha256: file.sha256, rows});
+    }
+    return linked;
+  }
+
+  async function writeScript(record, linked = []) {
     const script = await loadScript(record.id);
     const figures = new Map();
     for (const figure of script.sections.flatMap(section => section.figures ?? []))
       figures.set(figure.key, await figureText(record.id, figure).catch(() => ''));
     const passages = scriptPassages(script, figures);
+    for (const [index, table] of linked.entries()) for (const [row, fields] of table.rows.entries())
+      passages.push({id: `table-${index + 1}-row-${row + 1}`, table: table.name, text: `${table.name}：${rowText(fields)}`, fields});
     const overview = await llm([
       {role: 'system', content: '你負責為電話語音客服撰寫 SOP。閱讀通話腳本的開場與各情境標題，判斷它的用途。只用繁體中文。'},
       {role: 'user', content: `檔名：${record.name}\n開場：\n${script.opening.map(item => item.text).join('\n')}\n情境：\n` +
@@ -267,15 +285,19 @@ export function createSops({
       }
     }
     const allText = passages.map(passage => passage.text).join('\n');
-    const hotwords = new Set([...codes(allText), ...overview.hotwords.map(clean).filter(term => term && allText.includes(term))]);
+    // A tidied SOP page states its own agent prompt and hotwords.
+    const page = record.dataset.sop;
+    const hotwords = new Set([...(page?.hotwords ?? []), ...codes(allText),
+      ...overview.hotwords.map(clean).filter(term => term && allText.includes(term))]);
     return {purpose: `${clean(overview.purpose).replace(/[。.]$/, '')}（${script.sections.map(section => section.title).join('、')}）`,
       offer: scriptOffer(shortOffer(overview.offer, record.name), script.sections.map(section => section.title)),
-      instructions: clean(overview.instructions), qa, passages, hotwords: [...hotwords],
+      instructions: clean(page?.prompt || overview.instructions), qa, passages, hotwords: [...hotwords],
       sections: script.sections.map(section => ({number: section.number, title: section.title}))};
   }
 
-  const sourceKey = record => createHash('sha256')
-    .update(JSON.stringify([writerVersion, model, embedModel, record.files, record.attachments ?? []])).digest('hex');
+  const sourceKey = (record, linked = []) => createHash('sha256')
+    .update(JSON.stringify([writerVersion, model, embedModel, record.files, record.attachments ?? [],
+      ...(linked.length ? [linked.map(table => [table.name, table.sha256])] : [])])).digest('hex');
 
   async function read(id) {
     if (loaded.has(id)) return loaded.get(id);
@@ -294,11 +316,12 @@ export function createSops({
       const record = await scenarios.get(id);
       const kind = sopKind(record);
       if (!kind) throw fail('Only CSV tables and HTML call scripts become SOPs');
-      const key = sourceKey(record);
+      const linked = kind === 'script' ? await linkedTables(record) : [];
+      const key = sourceKey(record, linked);
       const saved = await read(id);
       if (saved?.key === key && !force) return saved;
       const started = Date.now();
-      const written = kind === 'table' ? await writeTable(record) : await writeScript(record);
+      const written = kind === 'table' ? await writeTable(record) : await writeScript(record, linked);
       const entries = [
         ...written.qa.map((item, index) => ({id: `qa-${index + 1}`, type: 'qa', text: `Q：${item.question}\nA：${item.answer}`,
           ...(item.row ? {row: item.row} : {}), ...(item.section !== undefined ? {section: item.section} : {})})),
@@ -375,6 +398,15 @@ export function createSops({
     return {sopId, name: sop.name, results};
   }
 
+  // Rows of a script SOP's linked tables that match the caller's words, for
+  // the call script's reference. Only an SOP already written is searched.
+  async function tableRows(sopId, query) {
+    const sop = await read(sopId);
+    if (!sop?.entries?.some(entry => entry.table) || !String(query ?? '').trim()) return [];
+    const {results} = await lookup({sopId, query, k: 3});
+    return results.filter(result => result.fields && result.score >= 0.4).map(result => result.text);
+  }
+
   // Routing evidence: each SOP's best RAG match for the caller's words.
   async function rank({text}) {
     if (typeof text !== 'string' || !text.trim()) return {ranking: []};
@@ -402,11 +434,14 @@ export function createSops({
   // hotwords.csv holds one context cell. Generated terms are one line that is
   // replaced on every change; the user's own text is kept.
   async function syncHotwords() {
-    if (!hotwordsFile) return;
+    if (!hotwordsFile) return 0;
     await migrated;
     const terms = new Set();
-    for (const item of (await scenarios.list()).filter(listedSop))
-      for (const term of (await read(item.id))?.hotwords ?? []) terms.add(term);
+    for (const item of (await scenarios.list()).filter(listedSop)) {
+      // Until its SOP is written, an SOP page's own HOTWORDS.
+      const written = (await read(item.id))?.hotwords;
+      for (const term of written ?? (await scenarios.get(item.id).catch(() => undefined))?.dataset?.sop?.hotwords ?? []) terms.add(term);
+    }
     let previous = '';
     try { previous = JSON.parse(await fs.readFile(managedFile, 'utf8')).line ?? ''; } catch { /* first run */ }
     let context = '';
@@ -421,6 +456,7 @@ export function createSops({
     }
     await fs.writeFile(managedFile, JSON.stringify({line, updatedAt: new Date().toISOString()}));
     log(`[sops] hotwords.csv: ${terms.size} SOP terms`);
+    return terms.size;
   }
 
   async function removed(id) {
@@ -451,7 +487,32 @@ export function createSops({
   }
 
   return {index, build, read: async id => { const sop = await read(id); return sop && summary(sop); },
-    documents, lookup, rank, list, syncHotwords, removed, context, remember};
+    documents, lookup, rank, list, syncHotwords, removed, context, remember, tableRows};
+}
+
+// RFC 4180 CSV (the SOP page's tables): quoted cells may hold commas, quotes and line breaks.
+export function parseCsv(text) {
+  const rows = [];
+  let row = [], cell = '', quoted = false;
+  const input = text.replace(/^\uFEFF/, '');
+  for (let i = 0; i < input.length; i++) {
+    const c = input[i];
+    if (quoted) {
+      if (c === '"' && input[i + 1] === '"') { cell += '"'; i++; }
+      else if (c === '"') quoted = false;
+      else cell += c;
+    } else if (c === '"') quoted = true;
+    else if (c === ',') { row.push(cell); cell = ''; }
+    else if (c === '\n' || c === '\r') {
+      if (c === '\r' && input[i + 1] === '\n') i++;
+      row.push(cell); cell = '';
+      if (row.some(Boolean)) rows.push(row);
+      row = [];
+    } else cell += c;
+  }
+  row.push(cell);
+  if (row.some(Boolean)) rows.push(row);
+  return rows;
 }
 
 export function readContext(csv) {

@@ -245,6 +245,8 @@ export function createIvrEngine({
   now = () => Date.now(),
   log = console.log,
   timeZone = process.env.IVR_TIME_ZONE || 'Asia/Taipei',
+  // Rows of the script's linked tables that match the caller's words.
+  tableRows = async () => [],
 } = {}) {
   const sessionsDir = path.join(dataRoot, 'ivr-sessions');
   const cacheDir = path.join(dataRoot, 'ivr-cache');
@@ -458,15 +460,18 @@ export function createIvrEngine({
     return reply;
   }
 
-  async function sectionReference(loaded, section, hidden) {
+  async function sectionReference(loaded, section, hidden, query) {
     const figures = await Promise.all((section.figures ?? []).map(figure => figureText(loaded.id, figure)));
+    const rows = query ? await tableRows(loaded.id, query).catch(error => { log(`[ivr-engine] Table rows: ${error.message}`); return []; }) : [];
     return [`REFERENCE SCRIPT (情境 ${section.number}：${section.title})`, scriptText(section, hidden),
-      ...figures.map((text, index) => `REFERENCE FIGURE ${index + 1}\n${text}`)].join('\n\n');
+      ...figures.map((text, index) => `REFERENCE FIGURE ${index + 1}\n${text}`),
+      ...(rows.length ? [`REFERENCE TABLE ROWS\n${rows.join('\n')}`] : [])].join('\n\n');
   }
 
   async function scenarioReply(loaded, session, section) {
     const history = runTurns(session, section.number, session.scenarioRun).map(({role, content}) => ({role, content}));
-    const reference = await sectionReference(loaded, section, section.saves ? unsaidExamples(section, history) : undefined);
+    const reference = await sectionReference(loaded, section, section.saves ? unsaidExamples(section, history) : undefined,
+      history.findLast(turn => turn.role === 'user')?.content);
     const language = session.language === 'en' ? 'English' : 'Traditional Chinese (繁體中文)';
     const system = [
       `You are the GeoVision phone IVR voice assistant. This call is in scenario ${section.number}: ${section.title}.`,
@@ -474,7 +479,7 @@ export function createIvrEngine({
       'Rules:',
       '- Give exactly the next single spoken AI turn for the live call: short, natural, plain text. No markdown, lists, emojis or role labels.',
       '- Facts about this call (names, dates, IDs, part numbers, quantities, serial numbers, readings, scores) come only from what the caller said in this call. Repeat them exactly, keeping letters, digits, leading zeros and units. Never present the script\'s example values as the caller\'s.',
-      '- Reference facts (stock, lead times, SOP steps, fault-code meanings, colleague details) come only from the AI lines of the REFERENCE SCRIPT and the REFERENCE FIGURES. If the caller asks for something that is not there, say it is not in the reference. Never invent.',
+      '- Reference facts (stock, lead times, SOP steps, fault-code meanings, colleague details) come only from the AI lines of the REFERENCE SCRIPT, the REFERENCE FIGURES and the REFERENCE TABLE ROWS. The script\'s values are examples when TABLE ROWS are given: answer from the row the caller asked about. If the caller asks for something that is not there, say it is not in the reference. Never invent.',
       '- A script AI line ending in …… is abbreviated: give the complete answer from the REFERENCE FIGURES.',
       '- Where the script reads values back and asks for confirmation, read back the caller\'s actual values and ask the same way. If the caller corrects something, read back the corrected values.',
       '- When the caller has given what the script\'s next AI line needs, move on; ask only for what is still missing.',

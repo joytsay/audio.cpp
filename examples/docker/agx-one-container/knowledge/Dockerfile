@@ -9,7 +9,7 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN --mount=type=cache,id=audiocpp-knowledge-npm,target=/root/.npm \
     npm ci --omit=dev --ignore-scripts --prefer-offline
-COPY start.mjs server.mjs ivr-engine.mjs mock-call.mjs replay-scenarios.mjs test.mjs qa.mjs scenarios.mjs scenario-files.mjs scenario-image.mjs rag-assets.mjs rag-embeddings.mjs sops.mjs ./
+COPY start.mjs server.mjs ivr-engine.mjs mock-call.mjs replay-scenarios.mjs test.mjs qa.mjs scenarios.mjs scenario-files.mjs scenario-image.mjs rag-assets.mjs rag-embeddings.mjs sops.mjs sop-drafts.mjs ./
 RUN mkdir -p /data /qdrant/storage /qdrant/snapshots && chown node:node /data /qdrant/storage /qdrant/snapshots
 ENV NODE_ENV=production PORT=8085 OCR_LANGUAGES=chi_tra+eng
 EXPOSE 8085 6333
